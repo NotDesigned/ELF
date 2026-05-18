@@ -33,13 +33,11 @@ def train_step(
 
     new_dropout_rng, current_step_rng = jax.random.split(state.dropout_rng, 2)
     current_step_rng = jax.random.fold_in(current_step_rng, jax.lax.axis_index(axis_name="batch"))
-    # The 11-way split (rather than 10) preserves the exact RNG stream of our
-    # released checkpoints so resumed runs are bit-for-bit reproducible.
     (
-        t_rng, noise_rng, self_cond_mask_rng, self_cond_cfg_rng, _,
+        t_rng, noise_rng, self_cond_mask_rng, self_cond_cfg_rng,
         model_dropout_rng, decoder_step_rng, decoder_rng,
-        decoder_lambda_rng, decoder_noise_rng, _,
-    ) = jax.random.split(current_step_rng, 11)
+        decoder_lambda_rng, decoder_noise_rng,
+    ) = jax.random.split(current_step_rng, 9)
 
     # encoder_attention_mask: cond sees cond, x sees all
     encoder_attention_mask = batch["encoder_attention_mask"]
@@ -175,7 +173,7 @@ def train_step(
 
     def get_v_target(params, z, t, base_v_target, x_tokens):
         """Compute final v target with self-conditioning guidance."""
-        if config.num_self_cond_cfg_tokens > 0:
+        if config.num_self_cond_cfg_tokens > 0 and config.self_cond_prob > 0:
             return get_sc_guided_v(params, z, t, base_v_target=base_v_target, x_tokens=x_tokens)
         return base_v_target
 

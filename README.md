@@ -4,7 +4,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)&nbsp;
 [![Hugging Face](https://img.shields.io/badge/Hugging%20Face-ELF-blue.svg)](https://huggingface.co/embedded-language-flows)&nbsp;
 
-This is the official JAX implementation for the paper *ELF: Embedded Language Flows*. This code is written and tested on TPUs. A PyTorch version will be released soon.
+This is the official JAX implementation for the paper *ELF: Embedded Language Flows*. This code is written and tested on TPUs. A PyTorch version is available on the [`pytorch_elf`](https://github.com/lillian039/ELF/tree/pytorch_elf) branch.
 
 ELF is a class of continuous diffusion language models based on continuous-time Flow Matching. Unlike existing DLMs, ELF predominantly stays within the continuous embedding space until the final time step, where it maps to discrete tokens using a shared-weight network. This formulation makes it straightforward to adapt established techniques from image-domain diffusion models, e.g., classifier-free guidance (CFG).
 

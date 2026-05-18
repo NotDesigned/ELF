@@ -37,7 +37,7 @@ self_cond_prob: 0.5
 
 # Training (optimizer + schedule)
 epochs: 100
-global_batch_size: 64
+global_batch_size: 512
 blr: 0.001
 weight_decay: 0.0
 warmup_steps: 5000
