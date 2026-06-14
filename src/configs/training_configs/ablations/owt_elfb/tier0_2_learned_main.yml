@@ -1,0 +1,19 @@
+base_config: ../../train_owt_ELF-B.yml
+
+# Tier 0: learned sentence plan sanity check / main hypothesis smoke run.
+use_sentence_plan: true
+sentence_encoder_type: learned
+plan_adapter_type: slot_mlp
+num_plan_tokens: 8
+sentence_encoder_grad: none
+plan_aux_passes: 1
+plan_aux_token_context: denoiser_z
+plan_learned_encoder_norm: true
+plan_loss_weight: 1.0
+plan_noise_scale: 1.0
+
+output_dir: outputs/ablations/owt_elfb/tier0_2_learned_main
+resume: null
+warm_start: null
+wandb_run_name: tier0_2_owt_elfb_learned_main
+wandb_tag: tier0,owt,elfb,learned,main

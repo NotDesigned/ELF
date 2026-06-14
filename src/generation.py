@@ -38,6 +38,23 @@ def _world() -> int:
     return dist.get_world_size() if dist.is_initialized() else 1
 
 
+class _IndexedSubset:
+    """Small map-style subset that preserves original dataset indices."""
+
+    def __init__(self, dataset, indices):
+        self.dataset = dataset
+        self.indices = [int(i) for i in indices]
+
+    def __len__(self):
+        return len(self.indices)
+
+    def __getitem__(self, idx):
+        original_idx = self.indices[idx]
+        item = dict(self.dataset[original_idx])
+        item.setdefault("index", original_idx)
+        return item
+
+
 def _build_eval_model(state, use_compile: bool = False) -> nn.Module:
     """Return an eval-mode model copy loaded with EMA params (if available)."""
     model = unwrap_model(state.model)
@@ -165,12 +182,16 @@ def test_generation_uncond(
                      * config.denoiser_noise_scale).to(device)
 
             gen_start = time.time()
-            latent = _generate_samples_single_batch(
+            latent_out = _generate_samples_single_batch(
                 model=model, generator=generator, z=z, t_steps=t_steps,
                 cond_seq=None, cond_seq_mask=None,
                 config=config, sampling_config=sampling_config,
                 cfg_scale=cfg_scale, self_cond_cfg_scale=self_cond_cfg_scale,
             )
+            if isinstance(latent_out, tuple):
+                latent, plan_latent = latent_out
+            else:
+                latent, plan_latent = latent_out, None
             generation_time += time.time() - gen_start
 
             dec_start = time.time()
@@ -178,6 +199,7 @@ def test_generation_uncond(
             predicted_ids = _dlm_decode_batch(
                 z=latent, model=model, t_final_val=t_final_val,
                 config=config, self_cond_cfg_scale=self_cond_cfg_scale,
+                plan_z=plan_latent,
             )
             decode_time += time.time() - dec_start
 
@@ -307,11 +329,20 @@ def test_generation_cond(
     pad_token_id = get_pad_token_id(tokenizer, config.pad_token)
     eos_token_id = tokenizer.eos_token_id
 
+    world = _world()
+    rank = _rank()
+    total_samples = min(int(num_samples), len(dataset))
+    local_indices = list(range(rank, total_samples, world))
+    local_dataset = _IndexedSubset(dataset, local_indices)
     dataloader = get_dataloader(
-        dataset, batch_size=batch_size,
+        local_dataset, batch_size=batch_size,
         shuffle=False, num_workers=0, drop_last=False,
         max_seq_length=config.max_length, pad_token_id=pad_token_id,
         max_input_seq_length=config.max_input_length, distributed=False,
+    )
+    log_for_0(
+        f"Conditional eval samples: total={total_samples}, "
+        f"per-rank~={(total_samples + world - 1) // world}, world={world}"
     )
 
     wandb_tables = {}
@@ -325,16 +356,16 @@ def test_generation_cond(
         log_for_0(f"\n--- Steps: {num_sampling_steps}, CFG Scale: {cfg_scale}, "
                   f"SC-CFG: {self_cond_cfg_scale} ---")
 
-        all_generated = []
+        local_generated = []
         generation_time = 0.0
         decode_time = 0.0
         samples_processed = 0
 
-        rank = _rank()
-        total_batches = (num_samples + batch_size - 1) // batch_size
-        pbar = tqdm(total=total_batches, desc="Generating samples (cond)", disable=(rank != 0))
+        local_num_samples = len(local_indices)
+        local_total_batches = (local_num_samples + batch_size - 1) // batch_size
+        pbar = tqdm(total=local_total_batches, desc="Generating samples (cond)", disable=(rank != 0))
         for batch_idx, batch in enumerate(dataloader):
-            if samples_processed >= num_samples:
+            if samples_processed >= local_num_samples:
                 break
             bsz = batch["input_ids"].shape[0]
             input_ids = torch.from_numpy(np.array(batch["input_ids"])).to(device).long()
@@ -358,12 +389,16 @@ def test_generation_cond(
                  * config.denoiser_noise_scale).to(device)
 
             gen_start = time.time()
-            latent = _generate_samples_single_batch(
+            latent_out = _generate_samples_single_batch(
                 model=model, generator=generator, z=z, t_steps=t_steps,
                 cond_seq=cond_seq, cond_seq_mask=cond_seq_mask_arr,
                 config=config, sampling_config=sampling_config,
                 cfg_scale=cfg_scale, self_cond_cfg_scale=self_cond_cfg_scale,
             )
+            if isinstance(latent_out, tuple):
+                latent, plan_latent = latent_out
+            else:
+                latent, plan_latent = latent_out, None
             generation_time += time.time() - gen_start
 
             gen_length = config.max_length - config.max_input_length
@@ -374,6 +409,7 @@ def test_generation_cond(
             predicted_ids = _dlm_decode_batch(
                 z=latent, model=model, t_final_val=t_final_val,
                 config=config, self_cond_cfg_scale=self_cond_cfg_scale,
+                plan_z=plan_latent,
             )
             predicted_ids = shift_left(predicted_ids, cond_len_per_sample, 0)[:, :gen_length]
             predicted_ids = mask_after_eos(predicted_ids, eos_token_id=eos_token_id, pad_token_id=pad_token_id)
@@ -381,15 +417,30 @@ def test_generation_cond(
 
             original_texts = [batch["target"][i] for i in range(bsz)]
             context_texts = [batch["input"][i] for i in range(bsz)]
+            sample_ids = [int(i) for i in batch["index"]]
 
             for i in range(bsz):
-                if samples_processed >= num_samples:
+                if samples_processed >= local_num_samples:
                     break
                 text = tokenizer.decode(predicted_ids[i].detach().cpu().numpy(), skip_special_tokens=True)
-                all_generated.append((samples_processed, original_texts[i], text, context_texts[i]))
+                local_generated.append((sample_ids[i], original_texts[i], text, context_texts[i]))
                 samples_processed += 1
             pbar.update(1)
         pbar.close()
+
+        if world > 1:
+            gathered = [None] * world
+            dist.all_gather_object(gathered, local_generated)
+            if rank == 0:
+                all_generated = []
+                for shard in gathered:
+                    all_generated.extend(shard)
+                all_generated.sort(key=lambda row: row[0])
+                all_generated = all_generated[:total_samples]
+            else:
+                all_generated = []
+        else:
+            all_generated = local_generated
 
         log_for_0(f"Generation: {generation_time:.2f}s ({num_sampling_steps} steps) | Decode: {decode_time:.2f}s")
         log_for_0("-" * 70)

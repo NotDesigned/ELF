@@ -1,4 +1,7 @@
 import json
+import os
+import shutil
+from pathlib import Path
 from typing import Dict, Optional
 
 import numpy as np
@@ -161,14 +164,53 @@ def _looks_like_save_to_disk_arrow(ds) -> bool:
     )
 
 
+def _datasets_cache_root(dataset_cache_dir=None) -> Path:
+    if dataset_cache_dir:
+        return Path(dataset_cache_dir).expanduser()
+    if os.environ.get("HF_DATASETS_CACHE"):
+        return Path(os.environ["HF_DATASETS_CACHE"]).expanduser()
+    if os.environ.get("HF_HOME"):
+        return Path(os.environ["HF_HOME"]).expanduser() / "datasets"
+    return Path.home() / ".cache" / "huggingface" / "datasets"
+
+
+def _prune_incomplete_dataset_cache(path: str, dataset_cache_dir=None) -> None:
+    """Remove stale HF datasets `.incomplete` entries for one remote dataset id."""
+    if os.path.exists(os.path.expanduser(path)):
+        return
+    dataset_root = _datasets_cache_root(dataset_cache_dir) / path.replace("/", "___")
+    if not dataset_root.exists():
+        return
+    incomplete_paths = list(dataset_root.rglob("*.incomplete"))
+    if not incomplete_paths:
+        return
+    for incomplete in incomplete_paths:
+        if incomplete.is_dir():
+            shutil.rmtree(incomplete, ignore_errors=True)
+        else:
+            incomplete.unlink(missing_ok=True)
+    log_for_0(
+        f"Removed {len(incomplete_paths)} stale incomplete HF dataset cache entries under {dataset_root}"
+    )
+
+
 def load_dataset_split(path: str, dataset_cache_dir=None):
     """Load a dataset. Tries HuggingFace Hub first; falls back to local on-disk Arrow."""
     from datasets import DatasetDict, load_dataset as hf_load_dataset, load_from_disk
-    ds = None
-    try:
-        ds = hf_load_dataset(path, cache_dir=dataset_cache_dir)
-    except Exception:
-        ds = load_from_disk(path)
+    local_path = os.path.expanduser(path)
+    if os.path.exists(local_path):
+        ds = load_from_disk(local_path)
+    else:
+        _prune_incomplete_dataset_cache(path, dataset_cache_dir)
+        try:
+            ds = hf_load_dataset(path, cache_dir=dataset_cache_dir)
+        except Exception as exc:
+            endpoint = os.environ.get("HF_ENDPOINT", "https://huggingface.co")
+            raise RuntimeError(
+                f"Failed to load dataset {path!r} from Hugging Face endpoint {endpoint!r}. "
+                "Check network access/HF_ENDPOINT and remove stale *.incomplete cache directories "
+                f"under {_datasets_cache_root(dataset_cache_dir)} if the previous run was interrupted."
+            ) from exc
 
     if isinstance(ds, DatasetDict):
         splits = list(ds.keys())

@@ -4,7 +4,6 @@ from typing import Dict, List, Union
 
 import numpy as np
 import torch
-import torch.nn.functional as F
 import sacrebleu
 import transformers
 from tqdm import tqdm
@@ -147,10 +146,10 @@ class Metrics:
         log_normalizers = torch.logsumexp(logits_pred.to(torch.float32), dim=-1)
         target_logits = logits_pred.gather(-1, targets.unsqueeze(-1)).squeeze(-1).to(torch.float32)
         nlls = log_normalizers - target_logits
-        is_eos = (input_ids == eos_token_id)
-        first_eos = (is_eos.to(torch.int32).cumsum(dim=-1) == 1)
-        token_mask = (input_ids != eos_token_id)
-        valid_tokens = first_eos[:, 1:].to(torch.int32) + token_mask[:, 1:].to(torch.int32)
+        valid_tokens = attention_mask[:, 1:].to(torch.int32)
+        if eos_token_id is not None:
+            eos_count = (input_ids == eos_token_id).to(torch.int32).cumsum(dim=-1)
+            valid_tokens = valid_tokens * (eos_count[:, :-1] == 0).to(torch.int32)
         return nlls, valid_tokens
 
     def record_generative_perplexity(

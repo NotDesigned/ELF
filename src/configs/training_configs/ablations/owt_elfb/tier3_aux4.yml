@@ -1,0 +1,8 @@
+base_config: tier0_2_learned_main.yml
+
+# Tier 3: four detached plan-denoiser passes per reconstruction/main pass.
+plan_aux_passes: 4
+
+output_dir: outputs/ablations/owt_elfb/tier3_aux4
+wandb_run_name: tier3_owt_elfb_aux4
+wandb_tag: tier3,owt,elfb,aux4

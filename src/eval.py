@@ -18,10 +18,10 @@ from modules.t5_encoder import get_encoder
 from modules.model import ELF_models
 from utils.logging_utils import log_for_0
 from utils.checkpoint_utils import load_checkpoint
-from utils.train_utils import TrainState, get_optimizer
+from utils.train_utils import TrainState, local_rank_zero_first
 from utils.data_utils import load_jsonl_dataset, load_dataset_split, get_pad_token_id
 from generation import test_generation_uncond, test_generation_cond
-from configs.config import load_config_from_yaml, apply_config_overrides, load_sampling_configs
+from configs.config import load_config_from_yaml, apply_config_overrides, load_sampling_configs, resolve_batch_sizes
 
 logging.basicConfig(
     format="%(levelname)s - %(name)s - %(message)s",
@@ -73,16 +73,9 @@ def main():
     world = dist.get_world_size() if dist.is_initialized() else 1
     if config.global_batch_size is not None:
         log_for_0(f"Using global batch size for evaluation: {config.global_batch_size}")
-        total_batch_size = config.global_batch_size
-        local_batch_size = total_batch_size // world
-        config.batch_size = local_batch_size
     elif config.batch_size is not None:
         log_for_0(f"Using batch size per device: {config.batch_size}")
-        total_batch_size = config.batch_size * world
-        local_batch_size = config.batch_size
-        config.global_batch_size = total_batch_size
-    else:
-        raise ValueError("Either global_batch_size or batch_size must be specified")
+    _, local_batch_size = resolve_batch_sizes(config, world, context="evaluation")
 
     log_for_0(f"Config loaded from {args.config}")
     log_for_0(f"Model: {config.model}")
@@ -98,33 +91,38 @@ def main():
     seed_list = [int(s.strip()) for s in args.seeds.split(",")] if args.seeds is not None else [args.seed]
     log_for_0(f"Seeds to evaluate: {seed_list}")
 
-    log_for_0("Loading tokenizer...")
-    tokenizer = AutoTokenizer.from_pretrained(config.tokenizer_name or config.encoder_model_name)
-    pad_token_id = get_pad_token_id(tokenizer, config.pad_token)
-    log_for_0(f"Using {'EOS' if config.pad_token == 'eos' else 'PAD'} token for padding: {pad_token_id}")
+    with local_rank_zero_first():
+        log_for_0("Loading tokenizer...")
+        tokenizer = AutoTokenizer.from_pretrained(config.tokenizer_name or config.encoder_model_name)
+        pad_token_id = get_pad_token_id(tokenizer, config.pad_token)
+        log_for_0(f"Using {'EOS' if config.pad_token == 'eos' else 'PAD'} token for padding: {pad_token_id}")
 
-    eval_dataset = None
-    if config.eval_data_path is not None:
-        log_for_0("Loading dataset for conditional generation...")
-        if config.eval_data_path.endswith(".jsonl"):
-            eval_dataset = load_jsonl_dataset(
-                config.eval_data_path, tokenizer,
-                input_key="input", output_key="output",
-            )
-        else:
-            eval_dataset = load_dataset_split(config.eval_data_path)
-        log_for_0(f"Eval dataset size: {len(eval_dataset)}")
+        eval_dataset = None
+        if config.eval_data_path is not None:
+            log_for_0("Loading dataset for conditional generation...")
+            if config.eval_data_path.endswith(".jsonl"):
+                eval_dataset = load_jsonl_dataset(
+                    config.eval_data_path, tokenizer,
+                    input_key="input", output_key="output",
+                )
+            else:
+                eval_dataset = load_dataset_split(config.eval_data_path)
+            log_for_0(f"Eval dataset size: {len(eval_dataset)}")
 
-    # Encoder (HuggingFace T5)
-    log_for_0(f"Loading Encoder: {config.encoder_model_name}...")
-    encoder_config, encoder = get_encoder(config.encoder_model_name, torch.float32)
-    encoder = encoder.to(device).eval()
-    for p in encoder.parameters():
-        p.requires_grad_(False)
+        # Encoder (HuggingFace T5)
+        log_for_0(f"Loading Encoder: {config.encoder_model_name}...")
+        encoder_config, encoder = get_encoder(config.encoder_model_name, torch.float32)
+        encoder = encoder.to(device).eval()
+        for p in encoder.parameters():
+            p.requires_grad_(False)
 
     # ELF model
     log_for_0(f"Creating {config.model} model...")
-    vocab_size = tokenizer.vocab_size
+    try:
+        vocab_size = len(tokenizer)
+    except TypeError:
+        vocab_size = tokenizer.vocab_size
+    log_for_0(f"Tokenizer vocab: CE head={vocab_size}")
     model = ELF_models[config.model](
         text_encoder_dim=encoder_config.d_model, max_length=config.max_length,
         attn_drop=config.attn_dropout, proj_drop=config.proj_dropout,
@@ -133,13 +131,19 @@ def main():
         vocab_size=vocab_size,
         num_model_mode_tokens=config.num_model_mode_tokens,
         bottleneck_dim=config.bottleneck_dim,
+        use_sentence_plan=bool(getattr(config, "use_sentence_plan", False)),
+        sentence_encoder_type=getattr(config, "sentence_encoder_type", "sentence_t5"),
+        sentence_emb_dim=int(getattr(config, "sentence_emb_dim", 768)),
+        num_plan_tokens=int(getattr(config, "num_plan_tokens", 8)),
+        plan_adapter_type=getattr(config, "plan_adapter_type", "slot_mlp"),
+        plan_slot_dit_depth=int(getattr(config, "plan_slot_dit_depth", 2)),
+        plan_learned_encoder_norm=bool(getattr(config, "plan_learned_encoder_norm", True)),
     ).to(device)
 
     # Train state template (only used to plumb EMA params + step/epoch).
-    optimizer = get_optimizer(model, config, lr=1e-4)
     g = torch.Generator(device="cpu").manual_seed(config.seed)
     state = TrainState(
-        model=model, optimizer=optimizer, lr_scheduler=None,
+        model=model, optimizer=None, lr_scheduler=None,
         ema_params1=TrainState.init_ema(model), step=0, epoch=0,
         dropout_generator=g,
     )
@@ -148,7 +152,7 @@ def main():
         config.sampling_configs = load_sampling_configs(config.sampling_configs_path)
 
     log_for_0(f"Loading checkpoint from: {args.checkpoint_path}")
-    state, _ = load_checkpoint(args.checkpoint_path, state)
+    state, _ = load_checkpoint(args.checkpoint_path, state, load_optimizer=False)
     state.model = state.model.to(device).eval()
 
     rank = dist.get_rank() if dist.is_initialized() else 0

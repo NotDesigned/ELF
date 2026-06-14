@@ -45,6 +45,8 @@ class T5Encoder(nn.Module):
 
     def __init__(self, config: T5EncoderConfig, *, pretrained: bool = True):
         super().__init__()
+        import transformers
+        from packaging.version import parse as parse_version
         from transformers import T5EncoderModel, T5Config
 
         if pretrained:
@@ -62,6 +64,7 @@ class T5Encoder(nn.Module):
         config.num_heads = hf.num_heads
         config.is_gated_act = bool(getattr(hf, "is_gated_act", False))
         self.config = config
+        self._expand_3d_attention_mask = parse_version(transformers.__version__) >= parse_version("4.45.0")
 
     def forward(
         self,
@@ -72,6 +75,10 @@ class T5Encoder(nn.Module):
         was_training = self.model.training
         if deterministic:
             self.model.eval()
+        if attention_mask is not None and attention_mask.dtype.is_floating_point:
+            attention_mask = attention_mask != 0
+        if attention_mask is not None and attention_mask.ndim == 3 and self._expand_3d_attention_mask:
+            attention_mask = attention_mask[:, None, :, :]
         try:
             out = self.model(input_ids=input_ids, attention_mask=attention_mask)
         finally:

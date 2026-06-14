@@ -80,6 +80,14 @@ def _generate_samples_single_batch(
 
     z = restore_cond(z, cond_seq, cond_seq_mask)
     x_pred = restore_cond(torch.zeros_like(z), cond_seq, cond_seq_mask)
+    plan_z = None
+    if bool(getattr(config, "use_sentence_plan", False)):
+        plan_shape = (batch_size, int(getattr(config, "sentence_emb_dim", 768)))
+        if z.is_cuda:
+            plan_z = torch.randn(plan_shape, dtype=z.dtype, device=z.device)
+        else:
+            plan_z = torch.randn(plan_shape, generator=generator, dtype=z.dtype, device=z.device)
+        plan_z = plan_z * float(getattr(config, "plan_noise_scale", 1.0))
 
     n = t_steps.shape[0]
     sde_gamma = getattr(sampling_config, "sde_gamma", 0.0)
@@ -90,25 +98,43 @@ def _generate_samples_single_batch(
             t = t_steps[i].item()
             t_next = t_steps[i + 1].item()
             if method == "sde":
-                z, x_pred = _sde_step(
+                step_out = _sde_step(
                     z=z, t=t, t_next=t_next, x_pred_prev=x_pred,
                     gamma=sde_gamma, generator=generator, **step_kwargs,
+                    plan_z=plan_z,
                 )
             elif method == "ode":
-                z, x_pred = _ode_step(z=z, t=t, t_next=t_next, x_pred_prev=x_pred, **step_kwargs)
+                step_out = _ode_step(
+                    z=z, t=t, t_next=t_next, x_pred_prev=x_pred,
+                    plan_z=plan_z, **step_kwargs,
+                )
             else:
                 raise ValueError(f"Invalid sampling method: {method}")
+            if plan_z is None:
+                z, x_pred = step_out
+            else:
+                z, x_pred, plan_z, _ = step_out
 
         # Last step always with ODE.
         t = t_steps[-2].item()
         t_next = t_steps[-1].item()
-        z, x_pred = _ode_step(z=z, t=t, t_next=t_next, x_pred_prev=x_pred, **step_kwargs)
-    return z
+        step_out = _ode_step(
+            z=z, t=t, t_next=t_next, x_pred_prev=x_pred,
+            plan_z=plan_z, **step_kwargs,
+        )
+        if plan_z is None:
+            z, x_pred = step_out
+        else:
+            z, x_pred, plan_z, _ = step_out
+    if plan_z is None:
+        return z
+    return z, plan_z
 
 
 @torch.no_grad()
 def _dlm_decode_batch(z: torch.Tensor, model: nn.Module, t_final_val,
-                      config, self_cond_cfg_scale: float) -> torch.Tensor:
+                      config, self_cond_cfg_scale: float,
+                      plan_z: Optional[torch.Tensor] = None) -> torch.Tensor:
     """Decode z -> tokens with the DLM decoder head."""
     batch_size = z.shape[0]
     if isinstance(t_final_val, torch.Tensor) and t_final_val.dim() == 0:
@@ -120,12 +146,18 @@ def _dlm_decode_batch(z: torch.Tensor, model: nn.Module, t_final_val,
         if config.num_self_cond_cfg_tokens > 0 else None
     )
     z_input = torch.cat([z, torch.zeros_like(z)], dim=-1) if config.self_cond_prob > 0 else z
+    plan_kwargs = {}
+    if bool(getattr(config, "use_sentence_plan", False)):
+        if plan_z is None:
+            raise ValueError("plan_z is required for decoding when use_sentence_plan=True")
+        plan_kwargs = {"plan_z": plan_z, "plan_t": t_final}
     use_bf16 = bool(getattr(config, "use_bf16", True)) and z.is_cuda
     with torch.amp.autocast('cuda', dtype=torch.bfloat16, enabled=use_bf16):
         _, decoder_logits = model(
             z_input, t_final, deterministic=True,
             self_cond_cfg_scale=sc_batch,
             decoder_step_active=True,
+            **plan_kwargs,
         )
     return decoder_logits.argmax(dim=-1)
 

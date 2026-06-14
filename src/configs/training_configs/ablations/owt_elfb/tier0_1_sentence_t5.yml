@@ -1,0 +1,15 @@
+base_config: ../../train_owt_ELF-B.yml
+
+# Tier 0: frozen Sentence-T5 plan sanity check.
+use_sentence_plan: true
+sentence_encoder_type: sentence_t5
+plan_adapter_type: slot_mlp
+num_plan_tokens: 8
+plan_loss_weight: 1.0
+plan_noise_scale: 1.0
+
+output_dir: outputs/ablations/owt_elfb/tier0_1_sentence_t5
+resume: null
+warm_start: null
+wandb_run_name: tier0_1_owt_elfb_sentence_t5
+wandb_tag: tier0,owt,elfb,sentence_t5

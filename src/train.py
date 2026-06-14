@@ -21,16 +21,23 @@ from tqdm import tqdm
 from transformers import AutoTokenizer
 
 from modules.t5_encoder import get_encoder
+from modules.sentence_plan import build_sentence_plan_encoder
 from utils.logging_utils import log_for_0
 from utils.checkpoint_utils import (
-    save_checkpoint, load_checkpoint, find_latest_checkpoint,
+    save_checkpoint, load_checkpoint, load_warm_start_checkpoint, find_latest_checkpoint,
 )
 from utils.train_utils import (
     TrainState, prefetch_to_device, get_optimizer, create_learning_rate_fn,
-    attach_lr_scheduler,
+    attach_lr_scheduler, local_rank_zero_first,
 )
 from generation import run_generation
-from configs.config import load_config_from_yaml, apply_config_overrides, load_sampling_configs, SamplingConfig
+from configs.config import (
+    load_config_from_yaml,
+    apply_config_overrides,
+    load_sampling_configs,
+    resolve_batch_sizes,
+    SamplingConfig,
+)
 from modules.model import ELF_models
 from utils.data_utils import get_dataloader, prepare_batch, load_dataset, get_pad_token_id
 from train_step import train_step
@@ -69,6 +76,73 @@ def _world_size() -> int:
     return dist.get_world_size() if dist.is_initialized() else 1
 
 
+def _format_param_count(num_params: int) -> str:
+    if num_params >= 1_000_000_000:
+        return f"{num_params / 1_000_000_000:.2f}B"
+    if num_params >= 1_000_000:
+        return f"{num_params / 1_000_000:.1f}M"
+    if num_params >= 1_000:
+        return f"{num_params / 1_000:.1f}K"
+    return str(num_params)
+
+
+def _count_named_params(model, prefixes, *, trainable_only: bool = False) -> int:
+    prefixes = tuple(prefixes)
+    return sum(
+        p.numel()
+        for name, p in model.named_parameters()
+        if name.startswith(prefixes) and (not trainable_only or p.requires_grad)
+    )
+
+
+def _log_model_parameter_summary(model) -> None:
+    total_params = sum(p.numel() for p in model.parameters())
+    total_trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    log_for_0(
+        f"ELF parameters: {total_params:,} ({_format_param_count(total_params)}) | "
+        f"trainable={total_trainable:,} ({_format_param_count(total_trainable)})"
+    )
+
+    plan_prefixes = (
+        "plan_tokens",
+        "plan_in.",
+        "plan_in_dit.",
+        "plan_out_input.",
+        "plan_out_dit.",
+        "plan_time_embedder.",
+        "plan_norm.",
+        "plan_out.",
+        "plan_encoder_query",
+        "plan_encoder_output_norm.",
+    )
+    plan_params = _count_named_params(model, plan_prefixes)
+    if plan_params == 0:
+        return
+
+    base_params = total_params - plan_params
+    log_for_0(
+        f"Base ELF parameters excluding sentence plan: {base_params:,} "
+        f"({_format_param_count(base_params)})"
+    )
+    log_for_0(
+        f"Sentence plan parameters: {plan_params:,} "
+        f"({_format_param_count(plan_params)}, {plan_params / total_params:.1%} of model)"
+    )
+
+    plan_groups = [
+        (
+            "SlotMLPPlanAdapter",
+            ("plan_tokens", "plan_in.", "plan_time_embedder.", "plan_norm.", "plan_out."),
+        ),
+        ("SlotDiTPlanAdapter", ("plan_in_dit.", "plan_out_input.", "plan_out_dit.")),
+        ("LearnedPlanEncoderExtras", ("plan_encoder_query", "plan_encoder_output_norm.")),
+    ]
+    for label, prefixes in plan_groups:
+        count = _count_named_params(model, prefixes)
+        if count:
+            log_for_0(f"  - {label}: {count:,} ({_format_param_count(count)})")
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Train ELF Diffusion Model (PyTorch).")
     parser.add_argument("--config", type=str, default=None,
@@ -98,11 +172,25 @@ def run_training(config, *, force_cpu: bool = False):
     log_for_0(f"Max sequence length: {config.max_length}")
     log_for_0(f"Output dir: {config.output_dir}")
     log_for_0(f"HF Repo ID: {config.hf_repo_id}")
+    log_for_0(f"Resume: {config.resume}")
+    log_for_0(
+        f"Warm start: {getattr(config, 'warm_start', None)} "
+        f"(use_ema={bool(getattr(config, 'warm_start_use_ema', False))})"
+    )
     log_for_0(f"Batch size per device: {config.batch_size}")
     log_for_0(f"Number of epochs: {config.epochs}")
     log_for_0(f"PyTorch device: {device}, world_size={world}")
     log_for_0(f"BF16 autocast: {bool(getattr(config, 'use_bf16', True)) and device.type == 'cuda'}")
     log_for_0(f"Gradient checkpointing: {bool(getattr(config, 'gradient_checkpointing', True))}")
+    if bool(getattr(config, "use_sentence_plan", False)):
+        log_for_0(
+            "Sentence plan: "
+            f"type={config.sentence_encoder_type}, adapter={getattr(config, 'plan_adapter_type', 'slot_mlp')}, "
+            f"slots={config.num_plan_tokens}, dim={config.sentence_emb_dim}, "
+            f"grad={getattr(config, 'sentence_encoder_grad', 'none')}, "
+            f"aux_passes={getattr(config, 'plan_aux_passes', 1)}, "
+            f"aux_context={getattr(config, 'plan_aux_token_context', 'denoiser_z')}"
+        )
     log_for_0("=" * 60)
 
     if config.use_wandb and rank == 0 and wandb is not None:
@@ -130,19 +218,29 @@ def run_training(config, *, force_cpu: bool = False):
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
 
-    log_for_0("Loading tokenizer...")
-    tokenizer = AutoTokenizer.from_pretrained(config.tokenizer_name or config.encoder_model_name)
-    pad_token_id = get_pad_token_id(tokenizer, config.pad_token)
-    log_for_0(f"Using {'EOS' if config.pad_token == 'eos' else 'PAD'} token for padding: {pad_token_id}")
+    with local_rank_zero_first():
+        log_for_0("Loading tokenizer...")
+        tokenizer = AutoTokenizer.from_pretrained(config.tokenizer_name or config.encoder_model_name)
+        pad_token_id = get_pad_token_id(tokenizer, config.pad_token)
+        log_for_0(f"Using {'EOS' if config.pad_token == 'eos' else 'PAD'} token for padding: {pad_token_id}")
 
-    train_dataset, eval_dataset = load_dataset(config)
+        train_dataset, eval_dataset = load_dataset(config)
 
-    log_for_0(f"Loading Encoder config: {config.encoder_model_name}...")
-    encoder_config, encoder = get_encoder(config.encoder_model_name, torch.float32)
-    encoder = encoder.to(device).eval()
-    for p in encoder.parameters():
-        p.requires_grad_(False)
-    log_for_0(f"Encoder d_model: {encoder_config.d_model}")
+        log_for_0(f"Loading Encoder config: {config.encoder_model_name}...")
+        encoder_config, encoder = get_encoder(config.encoder_model_name, torch.float32)
+        encoder = encoder.to(device).eval()
+        for p in encoder.parameters():
+            p.requires_grad_(False)
+        log_for_0(f"Encoder d_model: {encoder_config.d_model}")
+
+        sentence_encoder = build_sentence_plan_encoder(config, device)
+        if sentence_encoder is not None:
+            if sentence_encoder.embedding_dim != int(config.sentence_emb_dim):
+                raise ValueError(
+                    f"Sentence-T5 dim {sentence_encoder.embedding_dim} does not match "
+                    f"config.sentence_emb_dim={config.sentence_emb_dim}"
+                )
+            log_for_0(f"Sentence-T5 encoder loaded: dim={sentence_encoder.embedding_dim}")
 
     log_for_0(f"Creating {config.model} model...")
     # Use the full tokenizer length for CE heads; tokenizer.vocab_size can exclude
@@ -161,12 +259,16 @@ def run_training(config, *, force_cpu: bool = False):
         num_model_mode_tokens=config.num_model_mode_tokens,
         bottleneck_dim=config.bottleneck_dim,
         gradient_checkpointing=bool(getattr(config, "gradient_checkpointing", True)),
+        use_sentence_plan=bool(getattr(config, "use_sentence_plan", False)),
+        sentence_encoder_type=getattr(config, "sentence_encoder_type", "sentence_t5"),
+        sentence_emb_dim=int(getattr(config, "sentence_emb_dim", 768)),
+        num_plan_tokens=int(getattr(config, "num_plan_tokens", 8)),
+        plan_adapter_type=getattr(config, "plan_adapter_type", "slot_mlp"),
+        plan_slot_dit_depth=int(getattr(config, "plan_slot_dit_depth", 2)),
+        plan_learned_encoder_norm=bool(getattr(config, "plan_learned_encoder_norm", True)),
     ).to(device)
 
-    total_params = sum(p.numel() for p in model.parameters())
-    log_for_0(f"ELF parameters: {total_params:,}")
-    total_trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    log_for_0(f"Total trainable parameters: {total_trainable:,}")
+    _log_model_parameter_summary(model)
 
     # Keep initialization identical across ranks, then make runtime stochastic
     # ops (e.g. dropout) rank-specific.
@@ -176,18 +278,16 @@ def run_training(config, *, force_cpu: bool = False):
 
     if config.global_batch_size is not None:
         log_for_0(f"Using global batch size: {config.global_batch_size}")
-        total_batch_size = config.global_batch_size
-        local_batch_size = total_batch_size // world
-        config.batch_size = local_batch_size
     elif config.batch_size is not None:
         log_for_0(f"Using batch size per device: {config.batch_size}")
-        total_batch_size = config.batch_size * world
-        local_batch_size = config.batch_size
-        config.global_batch_size = total_batch_size
-    else:
-        raise ValueError("Either global_batch_size or batch_size must be specified")
+    total_batch_size, local_batch_size = resolve_batch_sizes(config, world, context="training")
 
     steps_per_epoch = len(train_dataset) // total_batch_size
+    if steps_per_epoch <= 0:
+        raise ValueError(
+            f"Training dataset has {len(train_dataset)} examples, smaller than "
+            f"global_batch_size={total_batch_size}; steps_per_epoch would be 0."
+        )
     num_train_steps = steps_per_epoch * config.epochs
     if config.warmup_steps >= 0:
         num_warmup_steps = config.warmup_steps
@@ -250,14 +350,34 @@ def run_training(config, *, force_cpu: bool = False):
             start_epoch = int(state.epoch)
             log_for_0(f"Resumed from step {resume_step} (epoch {resume_epoch_fractional:.2f})")
         except Exception as e:
-            log_for_0(f"Error loading checkpoint: {e}")
-            log_for_0("Continuing training from scratch")
+            raise RuntimeError(f"Failed to load resume checkpoint from {config.resume!r}: {e}") from e
+
+    if getattr(config, "warm_start", None):
+        if resume_step > 0:
+            log_for_0("Warm-start skipped because training resumed from an existing checkpoint")
+        else:
+            try:
+                state, warm_stats = load_warm_start_checkpoint(
+                    config.warm_start,
+                    state,
+                    use_ema=bool(getattr(config, "warm_start_use_ema", False)),
+                )
+                log_for_0(
+                    "Warm-start complete: "
+                    f"loaded={warm_stats['loaded']}, missing={warm_stats['missing']}, "
+                    f"shape_mismatch={warm_stats['shape_mismatch']}"
+                )
+            except Exception as e:
+                log_for_0(f"Error warm-starting checkpoint: {e}")
+                raise
 
     # torch.compile before DDP so only the inner module is compiled and
     # checkpoint I/O (which uses unwrap_model -> _orig_mod) still works.
-    if device.type == "cuda":
+    if device.type == "cuda" and bool(getattr(config, "use_compile", False)):
         log_for_0("Compiling ELF model with torch.compile (first step will be slower)...")
         state = state.replace(model=torch.compile(state.model))
+    elif device.type == "cuda":
+        log_for_0("torch.compile disabled")
 
     if world > 1:
         # find_unused_parameters=False is safe: 0-mult sinks in train_step
@@ -355,7 +475,10 @@ def run_training(config, *, force_cpu: bool = False):
             if epoch == start_epoch and step_in_epoch < steps_to_skip_in_epoch:
                 continue
             batch = prepare_batch(batch, config, generator=g)
-            state, metrics = train_step(state, encoder=encoder, batch=batch, config=config)
+            state, metrics = train_step(
+                state, encoder=encoder, batch=batch, config=config,
+                tokenizer=tokenizer, sentence_encoder=sentence_encoder,
+            )
 
             # Sync only on first step to measure torch.compile time;
             # float() on the loss below already forces a device-to-host sync.
@@ -373,13 +496,23 @@ def run_training(config, *, force_cpu: bool = False):
                     torch.stack([m["loss"] for m in train_metrics]).mean(),
                     torch.stack([m["l2_loss"] for m in train_metrics]).mean(),
                     torch.stack([m["ce_loss"] for m in train_metrics]).mean(),
+                    torch.stack([m["plan_loss"] for m in train_metrics]).mean(),
+                    torch.stack([m["plan_aux_loss"] for m in train_metrics]).mean(),
+                    torch.stack([m["plan_emb_batch_var"] for m in train_metrics]).mean(),
+                    torch.stack([m["plan_emb_norm"] for m in train_metrics]).mean(),
+                    torch.stack([m["plan_pred_batch_var"] for m in train_metrics]).mean(),
+                    torch.stack([m["plan_pred_norm"] for m in train_metrics]).mean(),
                 ])
                 # Average each metric across DDP ranks before logging — done
                 # once per log_freq so we never sync on every train step.
                 if dist.is_available() and dist.is_initialized():
                     dist.all_reduce(stacked, op=dist.ReduceOp.SUM)
                     stacked = stacked / dist.get_world_size()
-                avg_loss, avg_l2, avg_ce = (float(x) for x in stacked.tolist())
+                (
+                    avg_loss, avg_l2, avg_ce, avg_plan, avg_plan_aux,
+                    avg_plan_emb_var, avg_plan_emb_norm,
+                    avg_plan_pred_var, avg_plan_pred_norm,
+                ) = (float(x) for x in stacked.tolist())
                 now = time.time()
                 steps_per_sec = (global_step - last_log_step) / max(now - last_log_time, 1e-8)
                 current_lr = state.optimizer.param_groups[0]["lr"]
@@ -387,6 +520,8 @@ def run_training(config, *, force_cpu: bool = False):
                 postfix_dict = {
                     "step": f"{global_step}", "loss": f"{avg_loss:.4f}",
                     "l2": f"{avg_l2:.4f}", "ce": f"{avg_ce:.4f}",
+                    "plan": f"{avg_plan:.4f}", "plan_aux": f"{avg_plan_aux:.4f}",
+                    "emb_var": f"{avg_plan_emb_var:.2e}", "pred_var": f"{avg_plan_pred_var:.2e}",
                     "sps": f"{steps_per_sec:.1f}", "lr": f"{current_lr:.2e}",
                 }
                 log_for_0(postfix_dict)
@@ -396,6 +531,8 @@ def run_training(config, *, force_cpu: bool = False):
                     tqdm.write(
                         f"INFO - engine - Step {global_step}: loss={avg_loss:.4f}, "
                         f"l2={avg_l2:.4f}, ce={avg_ce:.4f}, "
+                        f"plan={avg_plan:.4f}, plan_aux={avg_plan_aux:.4f}, "
+                        f"emb_var={avg_plan_emb_var:.3e}, pred_var={avg_plan_pred_var:.3e}, "
                         f"lr={current_lr:.2e}, steps/sec={steps_per_sec:.2f}"
                     )
                     if config.use_wandb and wandb is not None:
@@ -403,7 +540,12 @@ def run_training(config, *, force_cpu: bool = False):
                         try:
                             wandb.log({
                                 "train_loss": avg_loss, "train_l2_loss": avg_l2,
-                                "train_ce_loss": avg_ce, "lr": current_lr,
+                                "train_ce_loss": avg_ce, "train_plan_loss": avg_plan,
+                                "train_plan_aux_loss": avg_plan_aux, "lr": current_lr,
+                                "train_plan_emb_batch_var": avg_plan_emb_var,
+                                "train_plan_emb_norm": avg_plan_emb_norm,
+                                "train_plan_pred_batch_var": avg_plan_pred_var,
+                                "train_plan_pred_norm": avg_plan_pred_norm,
                                 "epoch": current_epoch_progress, "step": global_step,
                             }, step=global_step)
                         except Exception:

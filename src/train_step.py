@@ -27,11 +27,26 @@ def _trainable_params(model: nn.Module):
     return [p for p in model.parameters() if p.requires_grad]
 
 
+def _decode_continuation_texts(input_ids: torch.Tensor, loss_mask: torch.Tensor, tokenizer) -> list:
+    """Decode target/continuation tokens selected by loss_mask for Sentence-T5."""
+    if tokenizer is None:
+        raise ValueError("tokenizer is required for sentence_encoder_type='sentence_t5'")
+    ids_cpu = input_ids.detach().cpu()
+    mask_cpu = loss_mask.detach().cpu().bool()
+    texts = []
+    for ids_row, mask_row in zip(ids_cpu, mask_cpu):
+        continuation_ids = ids_row[mask_row].tolist()
+        texts.append(tokenizer.decode(continuation_ids, skip_special_tokens=True))
+    return texts
+
+
 def train_step(
     state: TrainState,
     encoder: nn.Module,
     batch: Dict[str, torch.Tensor],
     config,
+    tokenizer=None,
+    sentence_encoder=None,
 ) -> Tuple[TrainState, Dict[str, float]]:
     """Perform a single training step."""
     device = next(state.model.parameters()).device
@@ -42,6 +57,8 @@ def train_step(
     latent_mean, latent_std = config.latent_mean, config.latent_std
     decoder_prob = config.decoder_prob
     decoder_noise_scale = config.decoder_noise_scale
+    use_sentence_plan = bool(getattr(config, "use_sentence_plan", False))
+    sentence_encoder_type = getattr(config, "sentence_encoder_type", "sentence_t5")
 
     gen = state.dropout_generator
 
@@ -139,23 +156,90 @@ def train_step(
 
     model = state.model
 
-    def compute_shared_uncond(z, t_input, x_tokens):
+    plan_z_denoiser = None
+    plan_z_mixed = None
+    plan_target = None
+    plan_loss = x0.new_tensor(0.0)
+    plan_aux_loss = x0.new_tensor(0.0)
+    plan_loss_for_backward = x0.new_tensor(0.0)
+    plan_emb_batch_var = x0.new_tensor(0.0)
+    plan_emb_norm = x0.new_tensor(0.0)
+    plan_pred_batch_var = x0.new_tensor(0.0)
+    plan_pred_norm = x0.new_tensor(0.0)
+    grad_mode = getattr(config, "sentence_encoder_grad", "none")
+    plan_aux_passes = int(getattr(config, "plan_aux_passes", 1))
+    if plan_aux_passes < 0:
+        raise ValueError("plan_aux_passes must be >= 0")
+    plan_aux_token_context = str(getattr(config, "plan_aux_token_context", "denoiser_z")).lower()
+    valid_aux_contexts = {"denoiser_z", "resampled_z", "mixed_z", "clean_x0"}
+    if plan_aux_token_context not in valid_aux_contexts:
+        raise ValueError(
+            "plan_aux_token_context must be one of "
+            f"{sorted(valid_aux_contexts)}, got {plan_aux_token_context!r}"
+        )
+    if use_sentence_plan:
+        if sentence_encoder_type == "sentence_t5":
+            if sentence_encoder is None:
+                raise ValueError("sentence_encoder is required for sentence_encoder_type='sentence_t5'")
+            continuation_texts = _decode_continuation_texts(input_ids, loss_mask, tokenizer)
+            s0 = sentence_encoder.encode(continuation_texts, device=device, dtype=dtype)
+        elif sentence_encoder_type == "learned":
+            encoder_sc_cfg_scale = (
+                torch.ones_like(t) if config.num_self_cond_cfg_tokens > 0 else None
+            )
+            with torch.amp.autocast('cuda', dtype=torch.bfloat16, enabled=use_bf16):
+                _, _, s0 = model(
+                    x0, torch.ones_like(t),
+                    attention_mask=loss_mask,
+                    deterministic=True,
+                    self_cond_cfg_scale=encoder_sc_cfg_scale,
+                    learned_plan_encode=True,
+                    return_plan=True,
+                )
+            s0 = s0.to(dtype)
+        else:
+            raise ValueError(f"Unknown sentence_encoder_type: {sentence_encoder_type}")
+
+        expected_dim = int(getattr(config, "sentence_emb_dim", s0.shape[-1]))
+        if s0.shape[-1] != expected_dim:
+            raise ValueError(f"Sentence embedding dim {s0.shape[-1]} does not match sentence_emb_dim={expected_dim}")
+
+        if grad_mode not in {"none", "detached_target", "full"}:
+            raise ValueError("sentence_encoder_grad must be 'none', 'detached_target', or 'full'")
+        plan_target = s0 if grad_mode == "full" else s0.detach()
+        s0_detached_for_metrics = s0.detach().float()
+        plan_emb_batch_var = s0_detached_for_metrics.var(dim=0, unbiased=False).mean()
+        plan_emb_norm = s0_detached_for_metrics.norm(dim=-1).mean()
+
+        plan_noise = torch.randn_like(s0) * float(getattr(config, "plan_noise_scale", 1.0))
+        plan_z_denoiser = t.reshape(-1, 1) * s0 + (1.0 - t.reshape(-1, 1)) * plan_noise
+        plan_z_mixed = decoder_mask_B1 * s0 + (1.0 - decoder_mask_B1) * plan_z_denoiser
+
+    def compute_shared_uncond(z, t_input, x_tokens, plan_z_input=None):
         """Unconditional forward shared by self-cond-init and sc-cfg-uncond."""
         z_uncond = restore_cond(torch.zeros_like(z), x_tokens, cond_seq_mask)
         z_input_uncond = torch.cat([z, z_uncond], dim=-1)
+        plan_kwargs = {}
+        if use_sentence_plan:
+            plan_kwargs = {"plan_z": plan_z_input, "plan_t": t_input}
         with torch.no_grad(), torch.amp.autocast('cuda', dtype=torch.bfloat16, enabled=use_bf16):
             net_out_uncond = model(
                 z_input_uncond, t_input,
                 deterministic=True, self_cond_cfg_scale=self_cond_cfg_scale,
+                **plan_kwargs,
             )
         return net_out_uncond
 
-    def get_sc_cond_and_uncond(z, t_input, cond_mask, x_tokens, shared_net_out_uncond):
+    def get_sc_cond_and_uncond(z, t_input, cond_mask, x_tokens, shared_net_out_uncond, plan_z_input=None):
+        plan_kwargs = {}
+        if use_sentence_plan:
+            plan_kwargs = {"plan_z": plan_z_input, "plan_t": t_input}
         if config.self_cond_prob == 0:
             with torch.no_grad(), torch.amp.autocast('cuda', dtype=torch.bfloat16, enabled=use_bf16):
                 net_out_uncond = model(
                     z, t_input,
                     deterministic=True, self_cond_cfg_scale=self_cond_cfg_scale,
+                    **plan_kwargs,
                 )
             v_uncond, _ = net_out_to_v_x(net_out_uncond, z, t_input, t_eps)
             return v_uncond, v_uncond
@@ -168,27 +252,30 @@ def train_step(
             net_out_cond = model(
                 z_input_cond, t_input,
                 deterministic=True, self_cond_cfg_scale=self_cond_cfg_scale,
+                **plan_kwargs,
             )
         v_cond, _ = net_out_to_v_x(net_out_cond, z, t_input, t_eps)
         return v_cond, v_uncond
 
-    def get_sc_guided_v(z, t_input, base_v_target, x_tokens, shared_net_out_uncond):
+    def get_sc_guided_v(z, t_input, base_v_target, x_tokens, shared_net_out_uncond, plan_z_input=None):
         """v target with self-conditioning guidance."""
         v_cond, v_uncond = get_sc_cond_and_uncond(
             z, t_input, cond_mask=cond_seq_mask, x_tokens=x_tokens,
             shared_net_out_uncond=shared_net_out_uncond,
+            plan_z_input=plan_z_input,
         )
         sc_w = self_cond_cfg_scale.reshape(batch_size, 1, 1)
         sc_guidance = (1 - 1 / sc_w) * (v_cond - v_uncond)
         sc_guidance = torch.where(use_self_cond_mask.bool(), sc_guidance, torch.zeros_like(sc_guidance))
         return (base_v_target + sc_guidance).detach()
 
-    def get_v_target(z, t_input, base_v_target, x_tokens, shared_net_out_uncond):
+    def get_v_target(z, t_input, base_v_target, x_tokens, shared_net_out_uncond, plan_z_input=None):
         """Compute final v target with self-conditioning guidance."""
         if config.num_self_cond_cfg_tokens > 0 and config.self_cond_prob > 0:
             return get_sc_guided_v(
                 z, t_input, base_v_target=base_v_target, x_tokens=x_tokens,
                 shared_net_out_uncond=shared_net_out_uncond,
+                plan_z_input=plan_z_input,
             )
         return base_v_target
 
@@ -205,7 +292,9 @@ def train_step(
     # Self-cond shared forward (run on denoiser_z / t — only relevant for
     # denoiser-mode rows; decoder-mode rows zero out the self-cond half below).
     if self_cond_prob > 0 or config.num_self_cond_cfg_tokens > 0:
-        shared_net_out_uncond = compute_shared_uncond(denoiser_z, denoiser_t, x0)
+        shared_net_out_uncond = compute_shared_uncond(
+            denoiser_z, denoiser_t, x0, plan_z_input=plan_z_denoiser,
+        )
     else:
         shared_net_out_uncond = None
 
@@ -221,13 +310,91 @@ def train_step(
     else:
         model_input = z_mixed
 
+    plan_kwargs = {}
+    if use_sentence_plan:
+        plan_kwargs = {
+            "plan_z": plan_z_mixed,
+            "plan_t": t_mixed,
+            "return_plan": True,
+        }
     with torch.amp.autocast('cuda', dtype=torch.bfloat16, enabled=use_bf16):
-        net_out, decoder_logits = model(
+        model_out = model(
             model_input, t_mixed,
             deterministic=False,
             self_cond_cfg_scale=self_cond_cfg_scale,
             decoder_step_active=decoder_step_active,  # (B,) tensor
+            **plan_kwargs,
         )
+    if use_sentence_plan:
+        net_out, decoder_logits, plan_pred = model_out
+        plan_loss = ((plan_pred.float() - plan_target.float()) ** 2).mean(dim=-1).mean()
+        plan_pred_detached = plan_pred.detach().float()
+        plan_pred_batch_var = plan_pred_detached.var(dim=0, unbiased=False).mean()
+        plan_pred_norm = plan_pred_detached.norm(dim=-1).mean()
+        plan_loss_for_backward = plan_loss
+        if grad_mode == "none" and sentence_encoder_type == "learned" and s0.requires_grad:
+            # STAR-LDM topology: the main pass keeps Enc in the field/CE graph,
+            # but diffusion MSE is detached so it cannot train Enc through either
+            # the target or the noised-input path. A detached aux pass below trains
+            # the plan denoiser/head on the same kind of joint input. The zero
+            # sink keeps plan-head hooks alive for DDP when plan_aux_passes=0.
+            plan_loss_for_backward = plan_loss.detach() + 0.0 * plan_loss
+    else:
+        net_out, decoder_logits = model_out
+
+    if (
+        use_sentence_plan
+        and sentence_encoder_type == "learned"
+        and grad_mode == "none"
+        and s0.requires_grad
+        and plan_aux_passes > 0
+    ):
+        s0_detached = s0.detach()
+        for _ in range(plan_aux_passes):
+            if plan_aux_token_context == "denoiser_z":
+                t_aux = denoiser_t
+                token_z_aux = denoiser_z.detach()
+            elif plan_aux_token_context == "mixed_z":
+                t_aux = t_mixed
+                token_z_aux = z_mixed.detach()
+            else:
+                t_aux = sample_timesteps(
+                    batch_size,
+                    P_mean=config.denoiser_p_mean, P_std=config.denoiser_p_std,
+                    time_schedule=config.time_schedule,
+                    device=device, dtype=dtype,
+                )
+                if plan_aux_token_context == "clean_x0":
+                    token_z_aux = x0.detach()
+                else:
+                    token_noise_aux = torch.randn_like(x0)
+                    token_z_aux = add_noise(x0.detach(), token_noise_aux, t_aux, config, cond_seq_mask=cond_seq_mask)
+                    if config.label_drop_prob > 0:
+                        token_z_aux = torch.where(
+                            drop.unsqueeze(-1) & (cond_seq_mask > 0),
+                            torch.zeros_like(token_z_aux),
+                            token_z_aux,
+                        )
+
+            plan_noise_aux = torch.randn_like(s0_detached) * float(getattr(config, "plan_noise_scale", 1.0))
+            plan_z_aux = (
+                t_aux.reshape(-1, 1) * s0_detached
+                + (1.0 - t_aux.reshape(-1, 1)) * plan_noise_aux
+            )
+            with torch.amp.autocast('cuda', dtype=torch.bfloat16, enabled=use_bf16):
+                _, _, plan_pred_aux = model(
+                    token_z_aux.detach(), t_aux,
+                    deterministic=False,
+                    self_cond_cfg_scale=self_cond_cfg_scale,
+                    plan_z=plan_z_aux,
+                    plan_t=t_aux,
+                    return_plan=True,
+                )
+            plan_aux_loss = (
+                plan_aux_loss
+                + ((plan_pred_aux.float() - s0_detached.float()) ** 2).mean(dim=-1).mean()
+            )
+        plan_loss_for_backward = plan_loss_for_backward + plan_aux_loss
 
     # CE per-token (used on decoder-mode rows).
     log_probs = F.log_softmax(decoder_logits.to(torch.float32), dim=-1)
@@ -240,6 +407,7 @@ def train_step(
     v_final_target = get_v_target(
         denoiser_z, denoiser_t, base_v_target=v_target, x_tokens=x0,
         shared_net_out_uncond=shared_net_out_uncond,
+        plan_z_input=plan_z_denoiser,
     )
     l2_per_token = ((v_pred - v_final_target) ** 2).mean(dim=-1)
 
@@ -252,6 +420,7 @@ def train_step(
     # decoder_prob * mean_CE + (1 - decoder_prob) * mean_L2.
     total_sum = (ce_per_token * ce_mask).sum() + (l2_per_token * l2_mask).sum()
     loss = total_sum / torch.clamp(loss_mask_f.sum(), min=1.0)
+    loss = loss + float(getattr(config, "plan_loss_weight", 1.0)) * plan_loss_for_backward
 
     # Per-branch metrics: mean per-token within each branch.
     ce_loss_val = ((ce_per_token * ce_mask).sum()
@@ -279,5 +448,11 @@ def train_step(
         "loss": loss.detach(),
         "l2_loss": l2_loss_val,
         "ce_loss": ce_loss_val,
+        "plan_loss": plan_loss.detach(),
+        "plan_aux_loss": plan_aux_loss.detach(),
+        "plan_emb_batch_var": plan_emb_batch_var.detach(),
+        "plan_emb_norm": plan_emb_norm.detach(),
+        "plan_pred_batch_var": plan_pred_batch_var.detach(),
+        "plan_pred_norm": plan_pred_norm.detach(),
     }
     return state, metrics

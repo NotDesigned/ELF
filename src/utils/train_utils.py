@@ -3,7 +3,9 @@
 Extracted from train.py for reuse and readability.
 """
 
+import contextlib
 import math
+import os
 import queue
 import threading
 from dataclasses import dataclass, field
@@ -15,6 +17,27 @@ from torch.optim import Optimizer
 from torch.optim.lr_scheduler import LambdaLR
 
 from utils.logging_utils import log_for_0
+
+
+@contextlib.contextmanager
+def local_rank_zero_first():
+    """Let each node's local rank 0 run cache-populating work before peer ranks.
+
+    Hugging Face model/dataset downloads write shared cache directories. In
+    multi-GPU containers, concurrent rank-local downloads can leave `.incomplete`
+    cache entries that other ranks try to read as valid datasets.
+    """
+    if torch.distributed.is_available() and torch.distributed.is_initialized():
+        local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+        if local_rank != 0:
+            torch.distributed.barrier()
+        try:
+            yield
+        finally:
+            if local_rank == 0:
+                torch.distributed.barrier()
+    else:
+        yield
 
 
 # ============================================

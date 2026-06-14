@@ -1,7 +1,7 @@
 import logging
 import os
 import re
-from typing import Any, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 import torch
 
@@ -128,21 +128,19 @@ def _restore_checkpoint(checkpoint_path: str) -> Any:
     return None
 
 
-def _validate_checkpoint(ckpt: Any):
+def _validate_checkpoint(ckpt: Any, require_optimizer: bool = True):
     if ckpt is None:
         raise ValueError("checkpoint restore returned None")
-    required_keys = ("params", "opt_state", "step", "epoch")
+    required_keys = ["params", "step", "epoch"]
+    if require_optimizer:
+        required_keys.append("opt_state")
     missing_keys = [key for key in required_keys if key not in ckpt]
     if missing_keys:
         raise ValueError(f"checkpoint restore missing keys: {missing_keys}")
 
 
-def load_checkpoint(checkpoint_path: str, state) -> Tuple[Any, int]:
-    """Load an ELF checkpoint.
-
-    Uses an existing local path first; otherwise tries HF and then local fallback.
-    """
-    log_for_0(f"Loading ELF checkpoint from {checkpoint_path}...")
+def _load_checkpoint_payload(checkpoint_path: str, require_optimizer: bool) -> Tuple[Any, str]:
+    """Load a checkpoint payload from local path or HF fallback."""
     ckpt, loaded_from = None, None
     errors = []
 
@@ -151,7 +149,7 @@ def load_checkpoint(checkpoint_path: str, state) -> Tuple[Any, int]:
         try:
             log_for_0(f"Loading local checkpoint from {local_path}...")
             ckpt = _restore_checkpoint(local_path)
-            _validate_checkpoint(ckpt)
+            _validate_checkpoint(ckpt, require_optimizer=require_optimizer)
             loaded_from = "local"
         except Exception as e:
             errors.append(f"local: {e}")
@@ -162,7 +160,7 @@ def load_checkpoint(checkpoint_path: str, state) -> Tuple[Any, int]:
             if hf_path:
                 log_for_0(f"Loading HF checkpoint from {hf_path}...")
                 ckpt = _restore_checkpoint(hf_path)
-                _validate_checkpoint(ckpt)
+                _validate_checkpoint(ckpt, require_optimizer=require_optimizer)
                 loaded_from = "HF"
         except Exception as e:
             errors.append(f"HF: {e}")
@@ -172,6 +170,18 @@ def load_checkpoint(checkpoint_path: str, state) -> Tuple[Any, int]:
         raise ValueError(
             f"Failed to load checkpoint from {checkpoint_path}. Tried: {'; '.join(errors)}"
         )
+    return ckpt, loaded_from
+
+
+def load_checkpoint(checkpoint_path: str, state, load_optimizer: bool = True) -> Tuple[Any, int]:
+    """Load an ELF checkpoint.
+
+    Uses an existing local path first; otherwise tries HF and then local fallback.
+    """
+    log_for_0(f"Loading ELF checkpoint from {checkpoint_path}...")
+    ckpt, loaded_from = _load_checkpoint_payload(
+        checkpoint_path, require_optimizer=load_optimizer,
+    )
 
     log_for_0(f"Loaded checkpoint keys: {list(ckpt.keys())}")
 
@@ -185,8 +195,9 @@ def load_checkpoint(checkpoint_path: str, state) -> Tuple[Any, int]:
     state.ema_params1 = {
         n: t.to(device_map.get(n, fallback_device)) for n, t in ema_src.items()
     }
-    state.optimizer.load_state_dict(ckpt["opt_state"])
-    if state.lr_scheduler is not None and ckpt.get("lr_scheduler") is not None:
+    if load_optimizer and state.optimizer is not None and ckpt.get("opt_state") is not None:
+        state.optimizer.load_state_dict(ckpt["opt_state"])
+    if load_optimizer and state.lr_scheduler is not None and ckpt.get("lr_scheduler") is not None:
         state.lr_scheduler.load_state_dict(ckpt["lr_scheduler"])
     state.step = int(ckpt["step"])
     state.epoch = int(ckpt["epoch"])
@@ -213,3 +224,87 @@ def load_checkpoint(checkpoint_path: str, state) -> Tuple[Any, int]:
     step = int(ckpt["step"])
     log_for_0(f"Loaded {loaded_from} checkpoint from step {step} (epoch {state.epoch})")
     return state, step
+
+
+def _init_ema_from_model(state) -> None:
+    inner_model = unwrap_model(state.model)
+    state.ema_params1 = {
+        name: param.detach().clone()
+        for name, param in inner_model.named_parameters()
+    }
+
+
+def load_warm_start_checkpoint(
+    checkpoint_path: str,
+    state,
+    use_ema: bool = False,
+) -> Tuple[Any, Dict[str, Any]]:
+    """Partially initialize a model from a checkpoint without restoring training state.
+
+    Only same-name, same-shape tensors are copied. Optimizer, scheduler, step,
+    epoch, dropout RNG, and grad-accum buffers are intentionally left untouched.
+    This is for trunk warm-starts such as old ELF -> sentence-plan ELF.
+    """
+    log_for_0(
+        f"Warm-starting model from {checkpoint_path} "
+        f"({'ema_params1' if use_ema else 'params'})..."
+    )
+    ckpt, loaded_from = _load_checkpoint_payload(checkpoint_path, require_optimizer=False)
+    source_name = "ema_params1" if use_ema and ckpt.get("ema_params1") is not None else "params"
+    source_state = ckpt[source_name]
+
+    inner_model = unwrap_model(state.model)
+    target_state = inner_model.state_dict()
+    loadable = {}
+    missing_keys = []
+    shape_mismatch_keys = []
+    unexpected_keys = []
+
+    for name, target_tensor in target_state.items():
+        source_tensor = source_state.get(name)
+        if source_tensor is None:
+            missing_keys.append(name)
+            continue
+        if tuple(source_tensor.shape) != tuple(target_tensor.shape):
+            shape_mismatch_keys.append(name)
+            continue
+        loadable[name] = source_tensor.to(dtype=target_tensor.dtype)
+
+    for name in source_state.keys():
+        if name not in target_state:
+            unexpected_keys.append(name)
+
+    if not loadable:
+        raise ValueError(f"Warm-start from {checkpoint_path} found no matching tensors")
+
+    merged_state = dict(target_state)
+    merged_state.update(loadable)
+    inner_model.load_state_dict(merged_state, strict=True)
+    _init_ema_from_model(state)
+
+    stats = {
+        "source": source_name,
+        "loaded_from": loaded_from,
+        "checkpoint_step": int(ckpt.get("step", -1)),
+        "checkpoint_epoch": int(ckpt.get("epoch", -1)),
+        "loaded": len(loadable),
+        "missing": len(missing_keys),
+        "shape_mismatch": len(shape_mismatch_keys),
+        "unexpected": len(unexpected_keys),
+        "loaded_keys": sorted(loadable.keys()),
+        "missing_keys": sorted(missing_keys),
+        "shape_mismatch_keys": sorted(shape_mismatch_keys),
+        "unexpected_keys": sorted(unexpected_keys),
+    }
+    log_for_0(
+        "Warm-start loaded "
+        f"{stats['loaded']} tensors from {loaded_from} checkpoint "
+        f"(step={stats['checkpoint_step']}, epoch={stats['checkpoint_epoch']}); "
+        f"missing={stats['missing']}, shape_mismatch={stats['shape_mismatch']}, "
+        f"unexpected={stats['unexpected']}"
+    )
+    if missing_keys:
+        log_for_0(f"Warm-start missing target keys (first 20): {stats['missing_keys'][:20]}")
+    if shape_mismatch_keys:
+        log_for_0(f"Warm-start shape-mismatch keys (first 20): {stats['shape_mismatch_keys'][:20]}")
+    return state, stats

@@ -1,0 +1,45 @@
+.git
+.gitignore
+.dockerignore
+
+# Local environments and tool caches
+.env
+.venv/
+venv/
+env/
+.claude/
+.cache/
+hf_cache/
+huggingface/
+
+# Python/cache
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+*.egg-info/
+
+# Experiment outputs and datasets
+outputs/
+output_dir/
+saved_models/
+checkpoints/
+wandb/
+runs/
+data/
+
+# Heavy artifacts
+*.log
+*.tar.gz
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
