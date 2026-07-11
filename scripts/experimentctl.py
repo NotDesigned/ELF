@@ -39,6 +39,7 @@ from experiment_control.runner import (  # noqa: E402
     CommandRunner,
     SubprocessRunner,
 )
+from experiment_control.states import FailureClass, classify_failure  # noqa: E402
 
 
 _COMMAND_RUNNER: CommandRunner = SubprocessRunner()
@@ -532,7 +533,19 @@ def annotate_collection(
     annotated = dict(summary)
     annotated["runtime_state"] = summary.get("state")
     annotated["scheduler_state"] = scheduler_status.get("state")
-    annotated["worker_state"] = summary.get("worker_state", "UNKNOWN")
+    process_evidence = summary.get("process_evidence", {})
+    process_observed = bool(
+        isinstance(process_evidence, dict) and process_evidence.get("observed")
+    )
+    annotated["worker_state"] = summary.get(
+        "worker_state", "ALLOCATED" if process_observed else "UNKNOWN"
+    )
+    annotated["process_state"] = summary.get("state") or "UNKNOWN"
+    if scheduler_status.get("state") == "FAILED" and process_observed:
+        annotated["process_state"] = "FAILED"
+        failure = classify_failure(json.dumps(process_evidence, ensure_ascii=False))
+        if failure is not FailureClass.UNKNOWN:
+            annotated["failure_class"] = failure.value
     model_evidence = (
         summary.get("model_observed"),
         summary.get("step"),
@@ -683,7 +696,7 @@ def main(argv: list[str] | None = None) -> int:
                     if collection else "UNKNOWN"
                 },
                 "process": {
-                    "state": collection.get("runtime_state", "UNKNOWN")
+                    "state": collection.get("process_state", "UNKNOWN")
                     if collection else "UNKNOWN"
                 },
                 "model": collection,

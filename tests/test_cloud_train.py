@@ -105,3 +105,22 @@ def test_local_dataset_override_is_validated_as_a_directory(tmp_path):
         capture_output=True,
     )
     assert result.returncode == 0, result.stderr
+
+
+def test_launcher_bootstraps_staged_experiment_control_source(tmp_path):
+    env = offline_env(tmp_path)
+    env.update({
+        "PYTHONPATH": "/path/that/does/not/exist",
+        "REQUIRE_OFFLINE_CACHE": "0",
+        "HYDRATE_ONLY": "1",
+    })
+    result = subprocess.run(
+        ["bash", str(SCRIPT), str(CONFIG_ROOT / "tier0_0_pure_elf_len256.yml")],
+        cwd=REPO_ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "experiment_control=" in result.stdout
+    assert "packages/experiment-control/src/experiment_control" in result.stdout

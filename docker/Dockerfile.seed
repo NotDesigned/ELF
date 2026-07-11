@@ -37,7 +37,7 @@ ARG ELF_B_CHECKPOINT_FILE=checkpoint_95085
 ARG SOURCE_ID=unknown
 
 ENV PROJECT_NAME=${PROJECT_NAME} \
-    PYTHONPATH=/app/src \
+    PYTHONPATH=/app/src:/app/packages/experiment-control/src \
     HF_ENDPOINT=https://hf-mirror.com \
     HF_HOME=/data/.cache/huggingface \
     HF_DATASETS_CACHE=/data/.cache/huggingface/datasets \

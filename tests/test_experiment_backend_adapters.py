@@ -1,4 +1,5 @@
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -226,16 +227,27 @@ def test_slurm_collection_reports_latest_remote_completed_checkpoint(tmp_path):
     fake = QueueRunner([
         CommandResult(("collect-rsync",), 0),
         CommandResult(("checkpoint-probe",), 0, "checkpoint_8\ncheckpoint_21\n"),
+        CommandResult(("stdout-probe",), 1),
+        CommandResult(("stderr-probe",), 1),
     ])
     services = backend_services()
     services = type(services)(
-        fake.run, services.local_run_dir, services.backend_record,
+        fake.run, services.local_run_dir,
+        lambda campaign, run: {
+            "attempt_id": "attempt-001", "backend_job_id": "1760"
+        },
         lambda campaign, path: {"run_id": run["run_id"]}, services.parse_metric,
         services.parse_checkpoint, services.atomic_write, services.utc_now,
     )
     summary = WydSlurmBackend(services).collect(campaign, run)
     assert summary["latest_completed_checkpoint"].endswith("/checkpoint_21")
     assert summary["latest_completed_checkpoint_step"] == 21
+    assert summary["process_evidence"] == {
+        "observed": False,
+        "sources": {"stdout": None, "stderr": None},
+        "stdout_tail": [],
+        "stderr_tail": [],
+    }
 
 
 def test_slurm_submission_intent_recovers_job_by_unique_comment(tmp_path: Path, monkeypatch):
@@ -375,6 +387,7 @@ def test_slurm_stage_reuses_remote_source_and_sif_markers(tmp_path: Path, monkey
             CommandResult(("mkdir",), 0),
             CommandResult(("source-marker",), 0),
             CommandResult(("sif-marker",), 0),
+            CommandResult(("required-path",), 0),
         ]
     )
     set_command_runner(fake)
@@ -383,8 +396,36 @@ def test_slurm_stage_reuses_remote_source_and_sif_markers(tmp_path: Path, monkey
         WydSlurmBackend(backend_services()).stage(campaign, run, "source-fixed", bundle)
     finally:
         set_command_runner(SubprocessRunner())
-    assert len(fake.commands) == 3
+    assert len(fake.commands) == 4
     assert not any(command and command[0] == "rsync" for command in fake.commands)
+    assert "test -s" in " ".join(fake.commands[-1])
+    assert "experiment_control/__init__.py" in " ".join(fake.commands[-1])
+
+
+def test_slurm_ssh_control_socket_is_scoped_to_current_process():
+    backend = WydSlurmBackend(backend_services())
+    assert f"-{os.getpid()}-" in backend.ssh_control_path
+    assert backend.ssh_control_path in backend.ssh_transport()
+
+
+def test_slurm_stage_fails_when_required_source_path_is_missing(tmp_path: Path):
+    campaign = slurm_campaign(tmp_path)
+    run = materialize_run(campaign, campaign["runs"][0], "source-fixed")
+    fake = QueueRunner([
+        CommandResult(("mkdir",), 0),
+        CommandResult(("source-marker",), 0),
+        CommandResult(("sif-marker",), 0),
+        CommandResult(("required-path",), 1, "", "missing path"),
+    ])
+    services = backend_services()
+    services = type(services)(
+        fake.run, services.local_run_dir, services.backend_record,
+        services.summarize_run, services.parse_metric, services.parse_checkpoint,
+        services.atomic_write, services.utc_now,
+    )
+    bundle = ElfProjectAdapter().source_bundle(Path(__file__).resolve().parents[1])
+    with pytest.raises(RuntimeError, match="missing required project path"):
+        WydSlurmBackend(services).stage(campaign, run, "source-fixed", bundle)
 
 
 def test_slurm_logs_bound_carriage_return_progress(tmp_path: Path, monkeypatch):
@@ -396,8 +437,16 @@ def test_slurm_logs_bound_carriage_return_progress(tmp_path: Path, monkeypatch):
     record_submission(campaign, run, "attempt-001", "1234")
     fake = QueueRunner(
         [
-            CommandResult(("stdout",), 0, "one\rtwo\rthree\n"),
-            CommandResult(("stderr",), 0, "four\rfive\rsix\n"),
+            CommandResult(
+                ("stdout",), 0,
+                f"{run['storage']['run_dir']}/attempts/attempt-001/stdout.log\n"
+                "one\rtwo\rthree\n",
+            ),
+            CommandResult(
+                ("stderr",), 0,
+                f"{run['storage']['run_dir']}/attempts/attempt-001/stderr.log\n"
+                "four\rfive\rsix\n",
+            ),
         ]
     )
     set_command_runner(fake)
@@ -407,6 +456,103 @@ def test_slurm_logs_bound_carriage_return_progress(tmp_path: Path, monkeypatch):
         set_command_runner(SubprocessRunner())
     assert logs["stdout"] == ["two", "three"]
     assert logs["stderr"] == ["five", "six"]
+
+
+def test_slurm_logs_fall_back_to_job_qualified_files_and_redact(tmp_path: Path):
+    campaign = slurm_campaign(tmp_path)
+    run = materialize_run(campaign, campaign["runs"][0], "source-fixed")
+    run_dir = run["storage"]["run_dir"]
+    fake = QueueRunner([
+        CommandResult(
+            ("stdout",), 0,
+            f"{run_dir}/slurm-1760.out\nlauncher started\n",
+        ),
+        CommandResult(
+            ("stderr",), 0,
+            f"{run_dir}/slurm-1760.err\n"
+            "token=top-secret\nModuleNotFoundError: No module named 'dependency'\n",
+        ),
+    ])
+    services = backend_services()
+    services = type(services)(
+        fake.run, services.local_run_dir,
+        lambda campaign, run: {
+            "attempt_id": "attempt-001", "backend_job_id": "1760"
+        },
+        services.summarize_run, services.parse_metric, services.parse_checkpoint,
+        services.atomic_write, services.utc_now,
+    )
+    logs = WydSlurmBackend(services).logs(campaign, run, tail=20)
+    assert logs["sources"] == {
+        "stdout": f"{run_dir}/slurm-1760.out",
+        "stderr": f"{run_dir}/slurm-1760.err",
+    }
+    assert logs["stdout"] == ["launcher started"]
+    assert logs["stderr"] == [
+        "token=<redacted>",
+        "ModuleNotFoundError: No module named 'dependency'",
+    ]
+    commands = "\n".join(" ".join(command) for command in fake.commands)
+    assert "slurm-1760.out" in commands
+    assert "slurm-1760.err" in commands
+    assert "*" not in commands
+
+
+def test_slurm_collection_includes_sanitized_process_failure_evidence(
+    tmp_path: Path,
+):
+    campaign = slurm_campaign(tmp_path)
+    run = materialize_run(campaign, campaign["runs"][0], "source-fixed")
+    run_dir = run["storage"]["run_dir"]
+    fake = QueueRunner([
+        CommandResult(("collect-rsync",), 0),
+        CommandResult(("checkpoint-probe",), 0),
+        CommandResult(("stdout",), 1),
+        CommandResult(
+            ("stderr",), 0,
+            f"{run_dir}/attempts/attempt-001/slurm-1760.err\n"
+            "access_key_secret=do-not-persist\n"
+            "ModuleNotFoundError: No module named 'experiment_control'\n",
+        ),
+    ])
+    services = backend_services()
+    services = type(services)(
+        fake.run, services.local_run_dir,
+        lambda campaign, run: {
+            "attempt_id": "attempt-001", "backend_job_id": "1760"
+        },
+        lambda campaign, path: {"run_id": run["run_id"]},
+        services.parse_metric, services.parse_checkpoint, services.atomic_write,
+        services.utc_now,
+    )
+    summary = WydSlurmBackend(services).collect(campaign, run)
+    evidence = summary["process_evidence"]
+    assert evidence["observed"] is True
+    assert evidence["stdout_tail"] == []
+    assert evidence["stderr_tail"] == [
+        "access_key_secret=<redacted>",
+        "ModuleNotFoundError: No module named 'experiment_control'",
+    ]
+    assert "do-not-persist" not in json.dumps(summary)
+
+
+@pytest.mark.parametrize("tail", [0, 10001])
+def test_slurm_logs_reject_unbounded_tail_before_remote_access(tmp_path: Path, tail: int):
+    campaign = slurm_campaign(tmp_path)
+    run = materialize_run(campaign, campaign["runs"][0], "source-fixed")
+    fake = QueueRunner([])
+    services = backend_services()
+    services = type(services)(
+        fake.run, services.local_run_dir,
+        lambda campaign, run: {
+            "attempt_id": "attempt-001", "backend_job_id": "1760"
+        },
+        services.summarize_run, services.parse_metric, services.parse_checkpoint,
+        services.atomic_write, services.utc_now,
+    )
+    with pytest.raises(ValueError, match="tail must be between"):
+        WydSlurmBackend(services).logs(campaign, run, tail=tail)
+    assert fake.commands == []
 
 
 def test_sensecore_logs_classify_expired_stream(tmp_path: Path):

@@ -28,3 +28,4 @@ def test_failure_classifier_does_not_hide_resource_or_model_failures():
     assert classify_failure("CUDA out of memory") is FailureClass.RESOURCE
     assert classify_failure("loss became NaN") is FailureClass.MODEL
     assert classify_failure("TLS EOF") is FailureClass.TRANSPORT
+    assert classify_failure("ModuleNotFoundError: No module named 'pkg'") is FailureClass.CONFIGURATION

@@ -321,4 +321,24 @@ def test_collection_separates_stale_runtime_from_scheduler_truth():
     assert result["runtime_state"] == "RUNNING"
     assert result["scheduler_state"] == "CANCELLED"
     assert result["worker_state"] == "UNKNOWN"
+    assert result["process_state"] == "RUNNING"
     assert result["model_state"] == "OBSERVED"
+
+
+def test_collection_classifies_pretraining_import_failure():
+    result = annotate_collection(
+        {
+            "state": "UNKNOWN",
+            "process_evidence": {
+                "observed": True,
+                "stderr_tail": [
+                    "ModuleNotFoundError: No module named 'experiment_control'"
+                ],
+            },
+        },
+        {"state": "FAILED"},
+    )
+    assert result["worker_state"] == "ALLOCATED"
+    assert result["process_state"] == "FAILED"
+    assert result["model_state"] == "NOT_OBSERVED"
+    assert result["failure_class"] == "configuration"

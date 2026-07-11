@@ -12,6 +12,18 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
 DEFAULT_CONFIG="src/configs/training_configs/ablations/owt_elfb/tier0_0_pure_elf.yml"
 
+# A staged source tree may be newer than the immutable runtime image. Prefer
+# its in-repository packages so controller/runtime schemas stay aligned even
+# when an older dependency SIF is reused.
+export PYTHONPATH="$REPO_ROOT/src:$REPO_ROOT/packages/experiment-control/src:/app/src:/app/packages/experiment-control/src:${PYTHONPATH:-}"
+export PYTHONUNBUFFERED=1
+
+python - <<'PY'
+import experiment_control
+from experiment_control.project import AssetRequirement
+print(f"[cloud_train] experiment_control={experiment_control.__file__}")
+PY
+
 if [[ $# -gt 0 ]]; then
     CONFIG="$1"
     shift
@@ -316,9 +328,6 @@ export WANDB_DIR
 export WANDB_CACHE_DIR
 export SAVE_DIR
 export ELF_B_OWT_CHECKPOINT
-export PYTHONPATH="$REPO_ROOT/src:/app/src:${PYTHONPATH:-}"
-export PYTHONUNBUFFERED=1
-
 if [[ "${DRY_RUN:-0}" != "1" ]]; then
     mkdir -p "$OUTPUT_DIR" "$HF_HOME" "$HF_DATASETS_CACHE" "$WANDB_DIR" \
         "$WANDB_CACHE_DIR" "$SAVE_DIR" "$CHECKPOINT_ROOT"

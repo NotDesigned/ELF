@@ -139,4 +139,7 @@ class ElfProjectAdapter:
             ),
             container_path="/app",
             identity_command=("bash", "scripts/source_identity.sh", "--runtime"),
+            required_paths=(
+                "packages/experiment-control/src/experiment_control/__init__.py",
+            ),
         )

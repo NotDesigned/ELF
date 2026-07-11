@@ -206,6 +206,13 @@ worker; it never treats the controller's local `/data` as SenseCore AFS. Asset
 transfer/hydration is a separate future transport interface; verification
 never downloads implicitly inside a GPU job.
 
+ELF declares the `experiment_control` package entry point as a required staged
+source path, which WYD verifies before submission. The container launcher then
+bootstraps the staged package source on `PYTHONPATH`, imports it before any
+training work, and prints its resolved module path. This split is intentional:
+login nodes may not have `/dev/fuse` permission to mount the SIF for a true
+container-side preflight.
+
 `observe` records scheduler evidence and collects process/model evidence as
 separate objects. `decide` writes `decision.json`. It permits a retry only for
 classified transport, scheduler/node, or preemption failures within the
@@ -328,6 +335,9 @@ same committed path from sanitized launcher logs while they remain available.
 - Collection rsyncs only manifests, status, training JSONL, and nested
   evaluation `metrics.jsonl` to the controller, then summarizes locally.
   Checkpoints and generated sample payloads remain on shared storage.
+- Log observation checks exact canonical stream paths and then exact
+  `slurm-<job-id>.out/.err` paths; bounded redacted tails are retained as
+  `process_evidence` for failures that occur before metrics/status exist.
 
 ## Offline preflight
 

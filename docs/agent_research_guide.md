@@ -72,6 +72,12 @@ Both mutations enforce their own scoped preflight. Real submit repeats the
 identity gate, so bypassing the documented order cannot silently duplicate a
 job.
 
+For WYD, `stage` also verifies the project-declared required files in the
+staged source tree. The ELF launcher performs the actual import check as its
+first container-side action. Login nodes may lack permission to mount SIF
+images through `/dev/fuse`, so do not treat a login-side `apptainer exec` as a
+portable pre-submit gate.
+
 WYD can verify assets on persistent storage. SenseCore may report that asset
 verification requires a running AFS-mounted worker; preserve that as an open
 gate. Before a long preemptible run, estimate time to the first useful metric
