@@ -5,6 +5,12 @@ fields, command-line flags, and container launcher environment variables.
 Defaults below come from `src/configs/config.py`; an experiment manifest stores
 the fully resolved values used by a run.
 
+For an autonomous experiment, first use
+[`agent_research_guide.md`](agent_research_guide.md) to define the comparison
+and lifecycle. Use this document to verify the exact meaning of every field;
+use [`experiment_workflow.md`](experiment_workflow.md) for campaign and backend
+schema rather than treating training flags as scheduler configuration.
+
 ## Configuration rules
 
 - YAML keys and `--config_override field=value` must name a declared `Config`

@@ -13,6 +13,12 @@ the shared ELF trunk. The older STAR-LDM-specific adapter name/path is removed.
 It is written in the style of STAR-LDM's `docs/architecture.md` (mermaid
 topology + formulas), but it now tracks the implemented code path.
 
+This document owns the scientific hypothesis and ablation axes. An agent that
+will schedule or monitor the experiments should next follow
+[`agent_research_guide.md`](agent_research_guide.md); exact flags are maintained
+in [`config_reference.md`](config_reference.md), and durable execution
+contracts in [`experiment_workflow.md`](experiment_workflow.md).
+
 ## Why
 
 STAR-LDM's learned-encoder recipe failed because the sentence latent is

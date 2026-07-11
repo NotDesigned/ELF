@@ -2,7 +2,10 @@
 
 This document is the operational contract for preparing, observing, and
 comparing ELF experiments. Architecture motivation lives in
-`fusion_architecture.md`; configuration fields live in `config_reference.md`.
+[`fusion_architecture.md`](fusion_architecture.md); configuration fields live
+in [`config_reference.md`](config_reference.md). An autonomous operator should
+start with [`agent_research_guide.md`](agent_research_guide.md), which turns
+these contracts into a guarded research loop and report format.
 
 ## Canonical run layout
 
@@ -23,7 +26,7 @@ checkpoint_<step>.complete    checkpoint completion marker
 Do not infer scientific success from scheduler success. A completed run must
 also contain its required evaluation records and readable artifacts.
 
-## Manifest helper: `scripts/experiment_manifest.py`
+## Manifest and state helper: `scripts/experiment_manifest.py`
 
 The helper has two commands. The default command prepares a run/attempt; the
 `record` command appends a lifecycle transition.
@@ -32,13 +35,17 @@ The helper has two commands. The default command prepares a run/attempt; the
 
 | Function | Input | Output / side effect | Failure meaning |
 | --- | --- | --- | --- |
-| `resolved_config` | YAML path and typed overrides | Fully inherited `Config` mapping | Invalid config or override |
-| `scientific_config` | Resolved mapping | Mapping without attempt-only fields | Pure transformation |
 | `sanitize_command` | Argument vector | Secret-redacted argument vector | Pure transformation |
-| `atomic_write` | Path and JSON/YAML payload | fsync + atomic replacement | Durable state was not committed |
+| `atomic_write` / `atomic_create` | Path and JSON/YAML payload | fsync + atomic replacement, or exclusive creation | Durable state was not committed or immutable state already exists |
 | `append_event` | Event path and mapping | One fsynced JSONL event | Lifecycle record was not committed |
-| `prepare` | Parsed prepare arguments | Run manifest, attempt manifest, initial state/event | Identity conflict, reused attempt, or mutable source/image identity |
+| `ExperimentStateStore` | One local run directory | Run/attempt creation, status transitions, submission intent, and reconciliation | Identity conflict, invalid transition, or duplicate scheduler identity |
+| `prepare` | Parsed prepare arguments | Canonical run manifest, attempt manifest, initial state/event | Identity conflict, reused attempt, or mutable source/image identity |
 | `record` | Parsed transition arguments | New `status.json` and appended event | Transition does not belong to a prepared run/attempt |
+
+ELF config resolution and scientific-field selection belong to
+`scripts/experiment_projects/elf.py`, not this backend-neutral state helper.
+Controller and runtime construct the shared manifest schema through
+`experiment_run_manifest.build_run_manifest`.
 
 Detailed argument, return, and exception semantics are also kept beside each
 Python function as docstrings, so `help()` and IDE hover remain authoritative.
