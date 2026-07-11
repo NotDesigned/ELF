@@ -90,6 +90,10 @@ Available training configs:
 - `src/configs/training_configs/train_de-en_ELF-B.yml` — WMT14 De-En machine translation
 - `src/configs/training_configs/train_xsum_ELF-B.yml` — XSum abstractive summarization
 
+See [`docs/config_reference.md`](docs/config_reference.md) for every training,
+sampling, CLI, and cloud-launcher flag, including gradient accumulation and
+resume semantics.
+
 **Estimated wall-clock:** ~4 h per epoch on 8× H200 (OpenWebText, ELF-B,
 global batch size 512, bf16). The default ELF-B OWT run is 5 epochs.
 

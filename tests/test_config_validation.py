@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 import pytest
@@ -6,6 +7,7 @@ import yaml
 
 from configs.config import (
     Config,
+    SamplingConfig,
     apply_config_overrides,
     load_config_from_yaml,
     load_sampling_configs,
@@ -179,3 +181,25 @@ def test_owt_elfb_ablation_configs_are_unique_and_expected():
     full = load_config_from_yaml(str(root / "tier2_grad_full.yml"))
     assert detached.plan_aux_passes == 1
     assert full.plan_aux_passes == 1
+
+
+def test_config_reference_covers_config_sampling_cli_and_launcher_flags():
+    reference = Path("docs/config_reference.md").read_text(encoding="utf-8")
+
+    declared_fields = set(Config.__annotations__) | set(SamplingConfig.__annotations__)
+    missing_fields = sorted(name for name in declared_fields if f"`{name}`" not in reference)
+    assert not missing_fields, f"config reference is missing fields: {missing_fields}"
+
+    shell_sources = "\n".join(
+        Path(path).read_text(encoding="utf-8")
+        for path in ("scripts/cloud_train.sh", "scripts/launch.sh")
+    )
+    env_names = set(re.findall(r"\$\{([A-Z][A-Z0-9_]*)", shell_sources))
+    env_names -= {"EXTRA", "PYTHONPATH"}  # Internal shell plumbing, not public controls.
+    missing_env = sorted(name for name in env_names if f"`{name}`" not in reference)
+    assert not missing_env, f"config reference is missing launcher variables: {missing_env}"
+
+    for cli_flag in (
+        "--config", "--config_override", "--use_cpu", "--seed", "--seeds", "--checkpoint_path",
+    ):
+        assert f"`{cli_flag}`" in reference

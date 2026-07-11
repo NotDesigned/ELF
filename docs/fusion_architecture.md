@@ -382,10 +382,12 @@ runs.
 
 ## Warm Start
 
-Old ELF checkpoints remain directly usable when `use_sentence_plan=false`, because
-the model state dict is unchanged on that path. When `use_sentence_plan=true`,
-old ELF checkpoints cannot be strict-resumed: the plan modules add new keys and
-the optimizer state no longer matches.
+Old ELF checkpoints remain directly usable for evaluation or warm start when
+`use_sentence_plan=false`, because the model state dict is unchanged on that
+path. Strict resume now additionally requires an atomic `.complete` marker and
+full optimizer/RNG state. When `use_sentence_plan=true`, old ELF checkpoints
+also cannot be strict-resumed because the plan modules add new keys and the
+optimizer state no longer matches.
 
 For that case, use `warm_start` instead of `resume`:
 
@@ -400,9 +402,11 @@ resume: null
 `warm_start` copies only same-name, same-shape tensors into the current model,
 then starts training from step 0 with a fresh optimizer and EMA initialized from
 the warm-started model. This is a trunk initialization ablation, not a continuation
-of the old ELF run. If `output_dir` already contains a checkpoint, auto-resume
-takes priority and `warm_start` is skipped so interrupted warm-start runs can
-continue normally.
+of the old ELF run. If `output_dir` already contains a completed checkpoint,
+auto-resume takes priority and `warm_start` is skipped so interrupted warm-start
+runs can continue normally. The cloud launcher creates a unique run directory
+by default; intentional spot recovery keeps `RUN_ID`, chooses a new
+`ATTEMPT_ID`, and sets `RESUME` explicitly.
 
 ## What is reused
 
