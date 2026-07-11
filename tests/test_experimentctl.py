@@ -496,6 +496,26 @@ def test_read_operations_can_recover_frozen_source_identity(tmp_path, monkeypatc
     assert frozen_source_identity(campaign, run, "new-dirty-source") == "source-fixed"
 
 
+def test_controller_uses_baked_identity_without_git(tmp_path, monkeypatch):
+    monkeypatch.setenv("ELF_SOURCE_ID", "runtime.baked-source")
+    monkeypatch.setenv("ELF_GIT_COMMIT", "baked-commit")
+    monkeypatch.setattr(
+        experimentctl.PROJECTS,
+        "get",
+        lambda _project: (_ for _ in ()).throw(AssertionError("source probe should not run")),
+    )
+    assert experimentctl.source_identity({"project": "elf", "source_id": "auto"}) == "runtime.baked-source"
+
+    def fake_run(command, *, cwd=None, **_kwargs):
+        if command[:2] == ["git", "rev-parse"]:
+            raise subprocess.CalledProcessError(128, command)
+        return experimentctl.CommandResult(tuple(command), 0, "campaign.baked\n", "")
+
+    monkeypatch.setattr(experimentctl, "run_command", fake_run)
+    result = experimentctl.provenance_identity(tmp_path / "campaign.yml")
+    assert result == {"git_commit": "baked-commit", "campaign_id": "campaign.baked"}
+
+
 def test_parses_structured_training_metric_from_sensecore_log():
     record = parse_training_metric_line(
         "INFO - engine - Step 120: loss=3.1, l2=1.2, ce=9.8, plan=0.0, "

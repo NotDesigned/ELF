@@ -41,6 +41,7 @@ Build and push:
 docker build . \
   -f docker/Dockerfile.seed \
   --build-arg SOURCE_ID="$(bash scripts/source_identity.sh --runtime)" \
+  --build-arg GIT_COMMIT="$(git rev-parse HEAD)" \
   --build-context hf_cache=/home/proton/.cache/elf/docker-hf-cache \
   --build-context elf_b_ckpt=/home/proton/.cache/elf/checkpoints/ELF-B-owt-torch \
   -t "$IMAGE:seed"
@@ -69,6 +70,7 @@ After `/data` is hydrated:
 ```bash
 docker build . -f docker/Dockerfile \
   --build-arg SOURCE_ID="$(bash scripts/source_identity.sh --runtime)" \
+  --build-arg GIT_COMMIT="$(git rev-parse HEAD)" \
   -t "$IMAGE:runtime"
 docker push "$IMAGE:runtime"
 ```

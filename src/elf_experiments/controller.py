@@ -7,7 +7,9 @@ import argparse
 import base64
 from dataclasses import asdict
 import json
+import os
 import re
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any, Iterable
@@ -179,6 +181,9 @@ def source_identity(campaign: dict[str, Any]) -> str:
     configured = str(campaign.get("source_id", "auto"))
     if configured != "auto":
         return configured
+    baked = os.environ.get("ELF_SOURCE_ID", "")
+    if baked and baked != "unknown":
+        return baked
     bundle = PROJECTS.get(str(campaign["project"])).source_bundle(REPO_ROOT)
     if not bundle.identity_command:
         raise ValueError(f"project {campaign['project']} has no source identity command")
@@ -188,7 +193,14 @@ def source_identity(campaign: dict[str, Any]) -> str:
 
 def provenance_identity(campaign_path: Path) -> dict[str, str]:
     """Keep Git and campaign provenance separate from runtime artifact identity."""
-    commit = run_command(["git", "rev-parse", "HEAD"], cwd=REPO_ROOT).stdout.strip()
+    try:
+        commit = run_command(["git", "rev-parse", "HEAD"], cwd=REPO_ROOT).stdout.strip()
+    except subprocess.CalledProcessError as error:
+        commit = os.environ.get("ELF_GIT_COMMIT", "")
+        if not commit or commit == "unknown":
+            raise RuntimeError(
+                "Git metadata is unavailable; build the image with GIT_COMMIT"
+            ) from error
     campaign_id = run_command(
         ["bash", "scripts/source_identity.sh", "--campaign", str(campaign_path)], cwd=REPO_ROOT
     ).stdout.strip()
