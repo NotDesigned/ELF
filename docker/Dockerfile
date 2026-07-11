@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1.7
 ARG PYTORCH_IMAGE=pytorch/pytorch:2.10.0-cuda12.6-cudnn9-runtime
 FROM ${PYTORCH_IMAGE}
 
@@ -18,7 +19,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && git lfs install --system \
     && rm -rf /var/lib/apt/lists/*
 
-# Install deps first for layer cache.
 COPY requirements.txt .
 RUN python -m pip install --break-system-packages --upgrade pip setuptools wheel \
     && python -m pip install --break-system-packages -r requirements.txt
@@ -29,14 +29,30 @@ COPY tests/ tests/
 COPY docs/ docs/
 COPY README.md ./
 
-ENV PYTHONPATH=/app/src \
+ARG PROJECT_NAME=elf
+ARG BAKED_HF_HOME=/opt/elf/hf-cache
+ARG BAKED_CHECKPOINT_ROOT=/opt/elf/checkpoints
+ARG ELF_B_CHECKPOINT_FILE=checkpoint_95085
+
+ENV PROJECT_NAME=${PROJECT_NAME} \
+    PYTHONPATH=/app/src \
     HF_ENDPOINT=https://hf-mirror.com \
     HF_HOME=/data/.cache/huggingface \
-    WANDB_DIR=/data/wandb \
-    SAVE_DIR=/data/saved_models \
-    NCCL_DEBUG=WARN
+    HF_DATASETS_CACHE=/data/.cache/huggingface/datasets \
+    BAKED_HF_HOME=${BAKED_HF_HOME} \
+    BAKED_CHECKPOINT_ROOT=${BAKED_CHECKPOINT_ROOT} \
+    ELF_B_OWT_CHECKPOINT=/data/${PROJECT_NAME}/checkpoints/ELF-B-owt-torch/${ELF_B_CHECKPOINT_FILE} \
+    WANDB_DIR=/data/${PROJECT_NAME}/wandb \
+    WANDB_CACHE_DIR=/data/${PROJECT_NAME}/wandb_cache \
+    SAVE_DIR=/data/${PROJECT_NAME}/saved_models \
+    NCCL_DEBUG=WARN \
+    HF_HUB_OFFLINE=1 \
+    TRANSFORMERS_OFFLINE=1 \
+    HF_DATASETS_OFFLINE=1
 
 RUN chmod +x scripts/launch.sh scripts/cloud_train.sh \
-    && mkdir -p /data/.cache/huggingface /data/wandb /data/outputs /data/saved_models
+    && mkdir -p /data/.cache/huggingface /data/${PROJECT_NAME}/wandb \
+        /data/${PROJECT_NAME}/wandb_cache /data/${PROJECT_NAME}/outputs \
+        /data/${PROJECT_NAME}/saved_models /data/${PROJECT_NAME}/checkpoints
 
 CMD ["bash"]

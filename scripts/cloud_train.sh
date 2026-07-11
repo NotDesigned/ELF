@@ -4,7 +4,8 @@
 # Examples:
 #   bash scripts/cloud_train.sh src/configs/training_configs/ablations/owt_elfb/tier0_0_pure_elf.yml
 #   CONFIG=src/configs/training_configs/ablations/owt_elfb/tier0_2_learned_main.yml \
-#       NGPU=8 OUTPUT_ROOT=/data/outputs bash scripts/cloud_train.sh
+#       NGPU=8 PROJECT_NAME=elf bash scripts/cloud_train.sh
+#   HYDRATE_ONLY=1 bash scripts/cloud_train.sh
 set -euo pipefail
 
 DEFAULT_CONFIG="src/configs/training_configs/ablations/owt_elfb/tier0_0_pure_elf.yml"
@@ -16,14 +17,180 @@ else
     CONFIG="${CONFIG:-$DEFAULT_CONFIG}"
 fi
 
+PROJECT_NAME="${PROJECT_NAME:-elf}"
 DATA_ROOT="${DATA_ROOT:-/data}"
-OUTPUT_ROOT="${OUTPUT_ROOT:-$DATA_ROOT/outputs}"
+PROJECT_DATA_ROOT="${PROJECT_DATA_ROOT:-$DATA_ROOT/$PROJECT_NAME}"
+OUTPUT_ROOT="${OUTPUT_ROOT:-$PROJECT_DATA_ROOT/outputs}"
+CHECKPOINT_ROOT="${CHECKPOINT_ROOT:-$PROJECT_DATA_ROOT/checkpoints}"
 
 run_path="${CONFIG#src/configs/training_configs/}"
 run_path="${run_path%.yml}"
 run_path="${run_path%.yaml}"
 
 OUTPUT_DIR="${OUTPUT_DIR:-$OUTPUT_ROOT/$run_path}"
+HF_ENDPOINT="${HF_ENDPOINT:-https://hf-mirror.com}"
+HF_HOME="${HF_HOME:-$DATA_ROOT/.cache/huggingface}"
+HF_DATASETS_CACHE="${HF_DATASETS_CACHE:-$HF_HOME/datasets}"
+WANDB_DIR="${WANDB_DIR:-$PROJECT_DATA_ROOT/wandb}"
+WANDB_CACHE_DIR="${WANDB_CACHE_DIR:-$PROJECT_DATA_ROOT/wandb_cache}"
+SAVE_DIR="${SAVE_DIR:-$PROJECT_DATA_ROOT/saved_models}"
+BAKED_HF_HOME="${BAKED_HF_HOME:-/opt/$PROJECT_NAME/hf-cache}"
+BAKED_CHECKPOINT_ROOT="${BAKED_CHECKPOINT_ROOT:-/opt/$PROJECT_NAME/checkpoints}"
+DATASET_ID="${DATASET_ID:-embedded-language-flows/openwebtext-t5}"
+ENCODER_MODEL="${ENCODER_MODEL:-t5-small}"
+ELF_B_CHECKPOINT_FILE="${ELF_B_CHECKPOINT_FILE:-checkpoint_95085}"
+ELF_B_OWT_CHECKPOINT="${ELF_B_OWT_CHECKPOINT:-$CHECKPOINT_ROOT/ELF-B-owt-torch/$ELF_B_CHECKPOINT_FILE}"
+
+truthy() {
+    case "${1:-}" in
+        1|true|TRUE|yes|YES|y|Y|on|ON) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+cache_key_model() {
+    printf 'models--%s\n' "$(printf '%s' "$1" | sed 's#/#--#g')"
+}
+
+cache_key_dataset() {
+    printf '%s\n' "$(printf '%s' "$1" | sed 's#/#___#g')"
+}
+
+dir_id() {
+    local source_dir="$1"
+    local id_file="$2"
+
+    if [[ -f "$source_dir/$id_file" ]]; then
+        tr -d '[:space:]' < "$source_dir/$id_file"
+        return
+    fi
+
+    find "$source_dir" -type f ! -name "$id_file" -printf '%P %s %T@\n' \
+        | LC_ALL=C sort \
+        | sha256sum \
+        | awk '{print $1}'
+}
+
+same_dir() {
+    local left="$1"
+    local right="$2"
+    [[ "$(readlink -f "$left" 2>/dev/null || printf '%s' "$left")" == \
+       "$(readlink -f "$right" 2>/dev/null || printf '%s' "$right")" ]]
+}
+
+copy_baked_dir_once() {
+    local source_dir="$1"
+    local dest_dir="$2"
+    local id_file="$3"
+    local marker_subdir="$4"
+    local label="$5"
+
+    if [[ ! -d "$source_dir" ]]; then
+        echo "[cloud_train] no baked $label at $source_dir; skip hydrate"
+        return
+    fi
+
+    local content_id marker_dir marker_file lock_dir waited
+    content_id="$(dir_id "$source_dir" "$id_file")"
+    if [[ -z "$content_id" ]]; then
+        echo "[cloud_train] failed to compute baked $label id from $source_dir" >&2
+        exit 1
+    fi
+
+    marker_dir="$dest_dir/$marker_subdir"
+    marker_file="$marker_dir/$content_id"
+    lock_dir="$marker_dir/$content_id.lock"
+
+    mkdir -p "$dest_dir" "$marker_dir"
+    if [[ -f "$marker_file" ]]; then
+        echo "[cloud_train] baked $label already hydrated: $content_id"
+        return
+    fi
+
+    if mkdir "$lock_dir" 2>/dev/null; then
+        (
+            trap 'rmdir "$lock_dir" 2>/dev/null || true' EXIT
+            echo "[cloud_train] hydrating baked $label $content_id -> $dest_dir"
+            if ! same_dir "$source_dir" "$dest_dir"; then
+                cp -a --no-preserve=ownership "$source_dir"/. "$dest_dir"/
+            fi
+            touch "$marker_file"
+        )
+        return
+    fi
+
+    echo "[cloud_train] waiting for another process to hydrate baked $label: $content_id"
+    waited=0
+    while [[ -d "$lock_dir" && ! -f "$marker_file" ]]; do
+        sleep 5
+        waited=$((waited + 5))
+        if [[ "$waited" -ge "${HYDRATE_LOCK_TIMEOUT_SECONDS:-3600}" ]]; then
+            echo "[cloud_train] timed out waiting for hydrate lock: $lock_dir" >&2
+            exit 1
+        fi
+    done
+
+    if [[ -f "$marker_file" ]]; then
+        echo "[cloud_train] baked $label hydrated by peer: $content_id"
+        return
+    fi
+
+    copy_baked_dir_once "$source_dir" "$dest_dir" "$id_file" "$marker_subdir" "$label"
+}
+
+hydrate_baked_assets() {
+    copy_baked_dir_once \
+        "$BAKED_HF_HOME" \
+        "$HF_HOME" \
+        ".baked-cache-id" \
+        ".baked-cache-markers" \
+        "hf-cache"
+
+    copy_baked_dir_once \
+        "$BAKED_CHECKPOINT_ROOT" \
+        "$CHECKPOINT_ROOT" \
+        ".baked-checkpoints-id" \
+        ".baked-checkpoint-markers" \
+        "checkpoints"
+}
+
+require_dir() {
+    if [[ ! -d "$1" ]]; then
+        echo "[cloud_train] required directory is missing: $1" >&2
+        exit 1
+    fi
+}
+
+require_file() {
+    if [[ ! -s "$1" ]]; then
+        echo "[cloud_train] required file is missing or empty: $1" >&2
+        exit 1
+    fi
+}
+
+fail_fast_for_offline_cache() {
+    local require_offline_cache="${REQUIRE_OFFLINE_CACHE:-}"
+    if [[ -z "$require_offline_cache" ]]; then
+        require_offline_cache=0
+        if truthy "${HF_HUB_OFFLINE:-0}" || truthy "${TRANSFORMERS_OFFLINE:-0}" || truthy "${HF_DATASETS_OFFLINE:-0}"; then
+            require_offline_cache=1
+        fi
+    fi
+
+    if ! truthy "$require_offline_cache"; then
+        return
+    fi
+
+    require_dir "$HF_HOME/hub/$(cache_key_model "$ENCODER_MODEL")"
+    require_dir "$HF_DATASETS_CACHE/$(cache_key_dataset "$DATASET_ID")"
+
+    if truthy "${USE_ELF_B_WARM_START:-0}" || truthy "${REQUIRE_ELF_B_CHECKPOINT:-0}"; then
+        require_file "$ELF_B_OWT_CHECKPOINT"
+    fi
+    if [[ -n "${WARM_START:-}" ]]; then
+        require_file "$WARM_START"
+    fi
+}
 
 detect_ngpu() {
     if [[ -n "${NGPU:-}" ]]; then
@@ -62,14 +229,26 @@ if ! [[ "$NGPU" =~ ^[0-9]+$ ]] || [[ "$NGPU" -lt 1 ]]; then
 fi
 export NGPU
 
-export HF_ENDPOINT="${HF_ENDPOINT:-https://hf-mirror.com}"
-export HF_HOME="${HF_HOME:-$DATA_ROOT/.cache/huggingface}"
-export WANDB_DIR="${WANDB_DIR:-$DATA_ROOT/wandb}"
-export SAVE_DIR="${SAVE_DIR:-$DATA_ROOT/saved_models}"
+export PROJECT_NAME
+export PROJECT_DATA_ROOT
+export HF_ENDPOINT
+export HF_HOME
+export HF_DATASETS_CACHE
+export WANDB_DIR
+export WANDB_CACHE_DIR
+export SAVE_DIR
+export ELF_B_OWT_CHECKPOINT
 export PYTHONPATH="/app/src:${PYTHONPATH:-}"
 
 if [[ "${DRY_RUN:-0}" != "1" ]]; then
-    mkdir -p "$OUTPUT_DIR" "$HF_HOME" "$WANDB_DIR" "$SAVE_DIR"
+    mkdir -p "$OUTPUT_DIR" "$HF_HOME" "$HF_DATASETS_CACHE" "$WANDB_DIR" \
+        "$WANDB_CACHE_DIR" "$SAVE_DIR" "$CHECKPOINT_ROOT"
+    hydrate_baked_assets
+    fail_fast_for_offline_cache
+fi
+
+if truthy "${USE_ELF_B_WARM_START:-0}" && [[ -z "${WARM_START:-}" ]]; then
+    WARM_START="$ELF_B_OWT_CHECKPOINT"
 fi
 
 overrides=(
@@ -114,7 +293,12 @@ fi
 echo "[cloud_train] config=$CONFIG"
 echo "[cloud_train] output_dir=$OUTPUT_DIR"
 echo "[cloud_train] data_root=$DATA_ROOT"
-echo "[cloud_train] hf_home=$HF_HOME hf_endpoint=$HF_ENDPOINT"
+echo "[cloud_train] project_data_root=$PROJECT_DATA_ROOT"
+echo "[cloud_train] hf_home=$HF_HOME hf_datasets_cache=$HF_DATASETS_CACHE"
+echo "[cloud_train] hf_endpoint=$HF_ENDPOINT offline=${HF_HUB_OFFLINE:-0}/${TRANSFORMERS_OFFLINE:-0}/${HF_DATASETS_OFFLINE:-0}"
+echo "[cloud_train] wandb_dir=$WANDB_DIR save_dir=$SAVE_DIR"
+echo "[cloud_train] checkpoint_root=$CHECKPOINT_ROOT"
+echo "[cloud_train] baked_hf_home=$BAKED_HF_HOME baked_checkpoint_root=$BAKED_CHECKPOINT_ROOT"
 echo "[cloud_train] NGPU=$NGPU NNODES=${NNODES:-1} NODE_RANK=${NODE_RANK:-0}"
 
 cmd=(bash scripts/launch.sh train "$CONFIG" "${overrides[@]}" "$@")
@@ -123,6 +307,11 @@ printf ' %q' "${cmd[@]}"
 printf '\n'
 
 if [[ "${DRY_RUN:-0}" == "1" ]]; then
+    exit 0
+fi
+
+if truthy "${HYDRATE_ONLY:-0}"; then
+    echo "[cloud_train] HYDRATE_ONLY=1, exiting after cache/checkpoint hydration"
     exit 0
 fi
 
