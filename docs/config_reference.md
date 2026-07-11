@@ -109,7 +109,7 @@ schema rather than treating training flags as scheduler configuration.
 | `adam_b2` | `0.95` | AdamW beta 2. |
 | `grad_accum_steps` | `1` | Microsteps per optimizer update; tail windows are flushed. |
 | `use_bf16` | `true` | Enable CUDA bfloat16 autocast. |
-| `use_compile` | `false` | Enable `torch.compile` for the training model. |
+| `use_compile` | `false` | Enable `torch.compile` for eligible model execution in training and generation/evaluation. |
 | `gradient_checkpointing` | `false` | Recompute block activations during backward to save memory. |
 | `ema_decay1` | `0.9999` | EMA decay applied at optimizer boundaries. |
 
@@ -256,7 +256,10 @@ Execution controls:
 - `HYDRATE_ONLY` set to `1` hydrates baked assets and exits.
 - `PREPARE_ONLY` set to `1` writes/validates manifest records and exits before training.
 
-The cloud launcher writes canonical state under `/data/<project>/runs/<run-id>`:
+The cloud launcher writes canonical state under resolved `$OUTPUT_DIR`, which
+corresponds to campaign `storage.run_dir`. Its shared root is backend-specific:
+SenseCore commonly uses `/data/elf`, L40S uses `/data/liangluocheng/elf`, and
+H100 uses `/datapool/liangluocheng/elf`. The state includes:
 `manifest.yaml`, `status.json`, `backend.json`, `events.jsonl`,
 `train_metrics.jsonl`, completed checkpoints, and attempt-specific process
 logs. W&B and Hugging Face uploads are mirrors, not the source of truth.

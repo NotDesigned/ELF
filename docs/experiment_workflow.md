@@ -37,7 +37,7 @@ The helper has two commands. The default command prepares a run/attempt; the
 ELF config resolution and scientific-field selection belong to
 `src/elf_experiments/projects/elf.py`, not this backend-neutral state helper.
 Controller and runtime construct the shared manifest schema through
-`experiment_run_manifest.build_run_manifest`.
+`elf_experiments.run_manifest.build_run_manifest`.
 
 Argument, return, and failure semantics live beside each Python function as
 tested docstrings; this document records only cross-module contracts.
@@ -45,7 +45,7 @@ tested docstrings; this document records only cross-module contracts.
 Prepare example:
 
 ```bash
-python -m elf_experiments.manifest \
+python tools/experiment_manifest.py \
   --project elf \
   --run-id fusion-l256-learned-none-aux1-s42-SOURCE \
   --attempt-id attempt-001 \
@@ -133,14 +133,16 @@ without network access:
 
 | Module | Responsibility |
 | --- | --- |
-| `experiment_campaign.py` | Resolve defaults, profiles, matrices, and authored runs. |
-| `instantiate_campaign.py` | Render one explicit fresh ELF campaign instance without overwriting history. |
-| `experiment_manifest.py` | Atomic run/attempt store, lifecycle states, submission outbox, reconciliation. |
-| `experiment_assets.py` | ELF asset discovery and Hugging Face cache layout used by the ELF project adapter. |
-| `experiment_overrides.py` | ELF's ordered environment-to-config override sequence. |
-| `experiment_policy.py` | Classify failures and recommend bounded next actions without mutating a scheduler. |
-| `experiment_control/runner.py` | Independently versioned injectable command boundary for production subprocesses and hermetic fakes. |
-| `experiment_control/preflight.py` | Independently versioned sanitized readiness checks and fail-closed reports. |
+| `src/elf_experiments/campaign.py` | Resolve defaults, profiles, matrices, and authored runs. |
+| `tools/instantiate_campaign.py` | Render one explicit fresh ELF campaign instance without overwriting history. |
+| `src/elf_experiments/manifest.py` and `tools/experiment_manifest.py` | Atomic run/attempt store and its thin state-helper CLI. |
+| `src/elf_experiments/run_manifest.py` | Construct the canonical manifest schema shared by controller and runtime. |
+| `src/elf_experiments/assets.py` | ELF asset discovery and Hugging Face cache layout used by the ELF project adapter. |
+| `src/elf_experiments/overrides.py` | ELF's ordered environment-to-config override sequence. |
+| `src/elf_experiments/policy.py` | Classify failures and recommend bounded next actions without mutating a scheduler. |
+| `src/elf_experiments/controller.py` and `tools/experimentctl.py` | Repository integration layer and its thin controller CLI. |
+| Installed `experiment_control/runner.py` | Independently versioned injectable command boundary for production subprocesses and hermetic fakes. |
+| Installed `experiment_control/preflight.py` | Independently versioned sanitized readiness checks and fail-closed reports. |
 | [`ml-experiment-control`](https://github.com/NotDesigned/ml-experiment-control) | Commit-pinned backend, preflight, runner, state, sanitizer, project protocol, and adapter template package. |
 | `src/elf_experiments/projects/elf.py` | The only adapter that knows ELF Config, `cloud_train.sh`, ELF checkpoints, metrics, and summaries. |
 | `experiment_control/backends/wyd.py` | SSH, rsync, Slurm, identity probes, Apptainer staging/status/collection/cancellation. |
@@ -297,10 +299,11 @@ Files under `experiments/campaigns/` are immutable authored/history records.
 Fresh executable identities come from templates. For example:
 
 ```bash
+INSTANCE=$(date -u +%Y%m%dT%H%M%SZ)
 python tools/instantiate_campaign.py \
   experiments/templates/backend_smoke_slurm.yml \
-  --instance 20260712T120000 \
-  --local-root /tmp/elf-controller-state
+  --instance "$INSTANCE" \
+  --local-root "outputs/experiment_campaigns/state/$INSTANCE"
 ```
 
 The generator renders only `{instance}`, preserves controller placeholders
@@ -361,7 +364,7 @@ For SenseCore, collection obtains the exact job's worker table through a
 schema-checked sanitizer that drops host/pod IP columns and retains only worker
 identity and phase.
 
-Controller and runtime use `experiment_run_manifest.build_run_manifest` for
+Controller and runtime use `elf_experiments.run_manifest.build_run_manifest` for
 the same canonical `manifest.yaml` schema. Slurm stages that manifest before
 the job script; the runtime validates it before creating attempt/process
 records. Checkpoint collection accepts only `checkpoint_<step>` payloads whose
@@ -373,9 +376,11 @@ same committed path from sanitized launcher logs while they remain available.
 
 - `ssh_alias` is a login route only; `partition` and typed GPU `gres` remain
   explicit and independently validated before every submission.
-- Set Slurm storage roots to `/data/liangluocheng/elf`, including HF cache,
-  checkpoints, W&B, and saved-model directories. The container image's
-  SenseCore-oriented `/data/elf` defaults are not writable on WYD.
+- Resolve Slurm storage roots from the selected backend profile. L40S uses
+  `/data/liangluocheng/elf`; H100 uses `/datapool/liangluocheng/elf`. Keep HF
+  cache, checkpoints, W&B, and saved-model directories on that profile's shared
+  filesystem. The container image's SenseCore-oriented `/data/elf` defaults are
+  not writable on WYD.
 - On the currently observed Slurm installation, batch jobs failed before the
   shell when `#SBATCH --output/--error` named normal shared files. Generated
   scripts therefore point Slurm's pre-shell streams at `/dev/null`, then the
@@ -454,6 +459,7 @@ must use matched training budgets and additional seeds.
 - Compare quality within seed/backend blocks. Compare throughput only on the
   same GPU type/count and checkpoint/evaluation policy.
 
-SenseCore spot attempts use `/data/elf/runs`; Slurm attempts use
-`/data/liangluocheng/elf/runs`. A preemption creates a new `attempt_id` but
+SenseCore spot attempts use `/data/elf/runs`. Slurm attempts use the selected
+backend profile: L40S uses `/data/liangluocheng/elf/runs`, while H100 uses
+`/datapool/liangluocheng/elf/runs`. A preemption creates a new `attempt_id` but
 keeps the same scientific `run_id` and resumes only a completed checkpoint.

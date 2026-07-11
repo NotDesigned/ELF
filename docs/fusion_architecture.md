@@ -420,12 +420,14 @@ by default; intentional spot recovery keeps `RUN_ID`, chooses a new
   `build_context`, `BottleneckTextProj`, `FinalLayer`, factored unembed
   (`proj_kernel`/`unembed_kernel`), `TextRotaryEmbeddingFast(num_empty_token=…)`.
 - **ELF** (`src/train_step.py`): per-example Bernoulli decoder/denoiser branch,
-  `add_noise`, `net_out_to_v_x`, self-cond / SC-CFG plumbing — `L_sent` joins the
-  single-denominator combine here.
+  `add_noise`, `net_out_to_v_x`, self-cond / SC-CFG plumbing. CE and L2 token
+  sums share the token denominator; weighted `L_sent`/plan loss is added after
+  token normalization.
 - **ELF** (`src/utils/generation_utils.py`): `_generate_samples_single_batch`,
   `_dlm_decode_batch`.
-- **STAR-LDM** (`star_ldm/data/dataset_utils.py`, `star_ldm/models/transfusion.py`)
-  as templates: continuation-text preparation, frozen Sentence-T5 target path,
+- **Historical/external STAR-LDM reference** (`star_ldm/data/dataset_utils.py`,
+  `star_ldm/models/transfusion.py`; not vendored in this repository) as a
+  template: continuation-text preparation, frozen Sentence-T5 target path,
   `_encoder_forward` (the learned-arm encoder pass), and `emb_batch_var` as a
   collapse probe. The current implementation keeps STAR-LDM-specific plan-head
   names out of the code; plan capacity is controlled locally by

@@ -48,10 +48,11 @@ standard ELF Slurm smoke, create a reviewable fresh definition with an explicit
 unique instance (do not overwrite an existing output):
 
 ```bash
+INSTANCE=$(date -u +%Y%m%dT%H%M%SZ)
 CAMPAIGN=$(python tools/instantiate_campaign.py \
   experiments/templates/backend_smoke_slurm.yml \
-  --instance 20260712T120000 \
-  --local-root /tmp/elf-controller-state)
+  --instance "$INSTANCE" \
+  --local-root "outputs/experiment_campaigns/state/$INSTANCE")
 ```
 
 Review the generated YAML and validate the relevant code/config. Then use one
