@@ -22,7 +22,7 @@ from transformers import AutoTokenizer
 
 from modules.t5_encoder import get_encoder
 from modules.sentence_plan import build_sentence_plan_encoder
-from utils.logging_utils import log_for_0
+from utils.logging_utils import append_jsonl_for_0, log_for_0
 from utils.checkpoint_utils import (
     save_checkpoint, load_checkpoint, load_warm_start_checkpoint, find_latest_checkpoint,
 )
@@ -621,32 +621,45 @@ def run_training(config, *, force_cpu: bool = False):
                     "l2": f"{avg_l2:.4f}", "ce": f"{avg_ce:.4f}",
                     "plan": f"{avg_plan:.4f}", "plan_aux": f"{avg_plan_aux:.4f}",
                     "emb_var": f"{avg_plan_emb_var:.2e}", "pred_var": f"{avg_plan_pred_var:.2e}",
+                    "emb_norm": f"{avg_plan_emb_norm:.2f}", "pred_norm": f"{avg_plan_pred_norm:.2f}",
                     "sps": f"{steps_per_sec:.1f}", "lr": f"{current_lr:.2e}",
                 }
                 log_for_0(postfix_dict)
                 epoch_pbar.set_postfix(**postfix_dict)
 
                 if rank == 0:
+                    current_epoch_progress = epoch + (step_in_epoch + 1) / steps_per_epoch
+                    metric_record = {
+                        "timestamp": now,
+                        "epoch": current_epoch_progress,
+                        "step": global_step,
+                        "train_loss": avg_loss,
+                        "train_l2_loss": avg_l2,
+                        "train_ce_loss": avg_ce,
+                        "train_plan_loss": avg_plan,
+                        "train_plan_aux_loss": avg_plan_aux,
+                        "train_plan_emb_batch_var": avg_plan_emb_var,
+                        "train_plan_emb_norm": avg_plan_emb_norm,
+                        "train_plan_pred_batch_var": avg_plan_pred_var,
+                        "train_plan_pred_norm": avg_plan_pred_norm,
+                        "lr": current_lr,
+                        "steps_per_sec": steps_per_sec,
+                    }
+                    append_jsonl_for_0(
+                        os.path.join(config.output_dir, "train_metrics.jsonl"),
+                        metric_record,
+                    )
                     tqdm.write(
                         f"INFO - engine - Step {global_step}: loss={avg_loss:.4f}, "
                         f"l2={avg_l2:.4f}, ce={avg_ce:.4f}, "
                         f"plan={avg_plan:.4f}, plan_aux={avg_plan_aux:.4f}, "
                         f"emb_var={avg_plan_emb_var:.3e}, pred_var={avg_plan_pred_var:.3e}, "
+                        f"emb_norm={avg_plan_emb_norm:.2f}, pred_norm={avg_plan_pred_norm:.2f}, "
                         f"lr={current_lr:.2e}, steps/sec={steps_per_sec:.2f}"
                     )
                     if config.use_wandb and wandb is not None:
-                        current_epoch_progress = epoch + (step_in_epoch + 1) / steps_per_epoch
                         try:
-                            wandb.log({
-                                "train_loss": avg_loss, "train_l2_loss": avg_l2,
-                                "train_ce_loss": avg_ce, "train_plan_loss": avg_plan,
-                                "train_plan_aux_loss": avg_plan_aux, "lr": current_lr,
-                                "train_plan_emb_batch_var": avg_plan_emb_var,
-                                "train_plan_emb_norm": avg_plan_emb_norm,
-                                "train_plan_pred_batch_var": avg_plan_pred_var,
-                                "train_plan_pred_norm": avg_plan_pred_norm,
-                                "epoch": current_epoch_progress, "step": global_step,
-                            }, step=global_step)
+                            wandb.log(metric_record, step=global_step)
                         except Exception:
                             pass
 
