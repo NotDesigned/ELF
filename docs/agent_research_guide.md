@@ -13,7 +13,8 @@ contracts stay in the linked references.
 3. The selected file in
    [`experiments/campaigns/`](../experiments/campaigns/) or a fresh file created
    from [`experiments/templates/`](../experiments/templates/): run IDs,
-   comparison block, resources, immutable image, storage, and retry budget.
+   research contract/roles, comparison block, resources, immutable image,
+   storage, and retry budget.
 4. [`experiment_workflow.md`](experiment_workflow.md): durable state, campaign
    schema, backend behavior, artifacts, and failure policy.
 5. [`packages/experiment-control/README.md`](../packages/experiment-control/README.md):
@@ -29,6 +30,8 @@ quota, partition, credentials, or run IDs are usable now.
 
 - State one falsifiable question, its matched control, decision metric, and
   early-stop gate before allocating GPUs.
+- Prefer a validated `research_contract`; do not turn prose gates into private
+  Agent thresholds. Missing contract evidence is inconclusive.
 - A `run_id` is scientific identity. Infrastructure retries use a new
   `attempt_id`; changed scientific config requires a new run.
 - Freeze Git, runtime-tree, campaign, and image/SIF identities.
@@ -72,6 +75,10 @@ Both mutations enforce their own scoped preflight. Real submit repeats the
 identity gate, so bypassing the documented order cannot silently duplicate a
 job.
 
+For a retry or historical inspection, pass the same explicit
+`--attempt-id attempt-NNN` to `status`, `logs`, `collect`, `observe`, `cancel`,
+and `decide`. A retry uses a new attempt ID and a new scheduler resource name.
+
 For WYD, `stage` also verifies the project-declared required files in the
 staged source tree. The ELF launcher performs the actual import check as its
 first container-side action. Login nodes may lack permission to mount SIF
@@ -110,6 +117,10 @@ the declared retry budget remains. OOM, timeout, configuration, model, and
 evaluation failures require explicit analysis or approval. Compare treatments
 only within matched seed/backend blocks; missing evidence is inconclusive, not
 a negative scientific result.
+
+`STOP_RECOMMENDED`, `DO_NOT_EXTEND`, and `EXTEND` are recommendations. Only an
+explicit `cancel` mutates a running scheduler job. `EXTEND` requires all
+contract roles to pass and their declared comparison fields to match.
 
 ## Stop before remote mutation
 

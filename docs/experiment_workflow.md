@@ -17,7 +17,7 @@ backend.json                  current scheduler backend/job identity
 status.json                   normalized current state
 events.jsonl                  append-only lifecycle events
 train_metrics.jsonl           rank-zero structured training metrics
-attempts/attempt-NNN/         immutable attempt metadata and process logs
+attempts/attempt-NNN/         canonical attempt state/decision and process logs
 checkpoint_<step>             checkpoint payload
 checkpoint_<step>.complete    checkpoint completion marker
 */metrics.jsonl               generation/reconstruction evaluation metrics
@@ -25,6 +25,9 @@ checkpoint_<step>.complete    checkpoint completion marker
 
 Do not infer scientific success from scheduler success. A completed run must
 also contain its required evaluation records and readable artifacts.
+The root `backend.json`, `status.json`, `collection.json`, and `decision.json`
+are read-model mirrors of the current attempt. Attempt-local files are the
+canonical history; observing an older attempt cannot move the root mirror.
 
 ## Manifest and state helper: `scripts/experiment_manifest.py`
 
@@ -177,6 +180,12 @@ intent remains unresolved, the controller refuses to create a second job.
 Existing legacy events are also audited: two recorded job IDs for one attempt
 are an ambiguity error, never a “latest job wins” choice.
 
+SenseCore resource names are attempt-qualified and actual creates use the
+manifest's immutable `repository@sha256:...` reference while retaining the
+authored source-qualified tag as provenance. WYD permits a new attempt in an
+existing run directory only after the remote `manifest.yaml` digest exactly
+matches the controller's frozen manifest.
+
 ### Identity separation
 
 The ELF project adapter selects `source_identity.sh --runtime`, which hashes
@@ -255,6 +264,22 @@ until the immutable source identity and run are materialized. Executable
 examples live under [`experiments/campaigns/`](../experiments/campaigns/), so
 schema examples cannot drift independently from validated campaigns.
 
+An executable research campaign may declare one top-level
+`research_contract` and exactly one `research_role` per required run. The
+contract uses only fixed predicates (`finite`, ordered numeric comparisons,
+bounded ranges, and non-finite early-stop detection); arbitrary expressions or
+code are rejected. It declares normalized metrics and artifact counts, a
+completed-checkpoint requirement, and fields that must match across roles.
+The project adapter owns the mapping from repository files to normalized
+evidence; scheduler backends do not know ELF metric names.
+
+`decide` distinguishes `PENDING`, `PASS`, `FAIL`, and `INCONCLUSIVE`. Missing,
+conflicting, expired, or inaccessible evidence is always `INCONCLUSIVE`, never
+a failed hypothesis. A live non-finite metric produces `STOP_RECOMMENDED` but
+never cancels automatically. `EXTEND` requires every role to pass and every
+declared match field to agree. The reviewable four-run example is
+[`experiments/templates/fusion_len256_gate_slurm.yml`](../experiments/templates/fusion_len256_gate_slurm.yml).
+
 Files under `experiments/campaigns/` are immutable authored/history records.
 Fresh executable identities come from templates. For example:
 
@@ -308,7 +333,9 @@ for `PREEMPTED` classification.
 
 `observe` reports scheduler, worker, process, and model layers separately.
 Unavailable worker evidence is explicitly `UNKNOWN`; it is never inferred from
-scheduler success. Collection records `scheduler_state`, `runtime_state`,
+scheduler success. A terminal scheduler observation marks its allocation
+`RELEASED` without inventing a process result. Collection records
+`scheduler_state`, `runtime_state`,
 `worker_state`, and `model_state` alongside the underlying metrics/artifacts.
 
 Controller and runtime use `experiment_run_manifest.build_run_manifest` for
@@ -332,9 +359,9 @@ same committed path from sanitized launcher logs while they remain available.
   bash process immediately tees stdout/stderr into the attempt directory under
   `/data`. This preserves early application errors without relying on slurmd
   to create the shared log file.
-- Collection rsyncs only manifests, status, training JSONL, and nested
-  evaluation `metrics.jsonl` to the controller, then summarizes locally.
-  Checkpoints and generated sample payloads remain on shared storage.
+- Collection rsyncs manifests, status, training/evaluation JSONL, and generated
+  or reconstructed sample JSONL to the controller, then summarizes locally.
+  Checkpoint payloads remain on shared storage.
 - Log observation checks exact canonical stream paths and then exact
   `slurm-<job-id>.out/.err` paths; bounded redacted tails are retained as
   `process_evidence` for failures that occur before metrics/status exist.
