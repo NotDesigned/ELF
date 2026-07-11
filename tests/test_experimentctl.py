@@ -13,9 +13,9 @@ from experimentctl import (
     materialize_run,
     prepare_run,
     parse_training_metric_line,
-    render_slurm_script,
     record_submission,
 )
+from experiment_control.backends.slurm import render_job
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -64,7 +64,7 @@ def test_prepare_and_render_preserve_explicit_partition(tmp_path, monkeypatch):
     campaign = slurm_campaign(tmp_path)
     run = materialize_run(campaign, campaign["runs"][0], "source-fixed")
     manifest = prepare_run(campaign, run, "source-fixed", attempt_id="attempt-001")
-    script = render_slurm_script(manifest)
+    script = render_job(manifest)
 
     assert "#SBATCH --partition=h100" in script
     assert "#SBATCH --gres=gpu:h100:1" in script
@@ -102,7 +102,7 @@ def test_render_supports_datapool_storage_mount(tmp_path, monkeypatch):
     campaign["runs"][0]["storage"]["run_dir"] = "/datapool/liangluocheng/elf/runs/smoke-h100"
     run = materialize_run(campaign, campaign["runs"][0], "source-fixed")
     manifest = prepare_run(campaign, run, "source-fixed", attempt_id="attempt-001")
-    script = render_slurm_script(manifest)
+    script = render_job(manifest)
 
     assert "--bind /datapool:/datapool" in script
     assert "export APPTAINER_CACHEDIR=/datapool/liangluocheng/elf/apptainer/cache" in script
@@ -115,6 +115,15 @@ def test_rejects_relative_slurm_mount_root(tmp_path):
     path = tmp_path / "campaign.yml"
     path.write_text(yaml.safe_dump(campaign), encoding="utf-8")
     with pytest.raises(ValueError, match="mount_root must be an absolute path"):
+        load_campaign(path)
+
+
+def test_rejects_mixed_slurm_storage_profiles(tmp_path):
+    campaign = slurm_campaign(tmp_path)
+    campaign["runs"][0]["backend"]["mount_root"] = "/datapool"
+    path = tmp_path / "campaign.yml"
+    path.write_text(yaml.safe_dump(campaign), encoding="utf-8")
+    with pytest.raises(ValueError, match="must be under declared mount_root"):
         load_campaign(path)
 
 

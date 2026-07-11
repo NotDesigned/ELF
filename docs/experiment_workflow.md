@@ -99,6 +99,10 @@ python scripts/experimentctl.py experiments/campaigns/CAMPAIGN.yml render
 python scripts/experimentctl.py experiments/campaigns/CAMPAIGN.yml submit --run RUN_ID
 python scripts/experimentctl.py experiments/campaigns/CAMPAIGN.yml status --run RUN_ID
 python scripts/experimentctl.py experiments/campaigns/CAMPAIGN.yml collect --run RUN_ID
+python scripts/experimentctl.py experiments/campaigns/CAMPAIGN.yml observe --run RUN_ID
+python scripts/experimentctl.py experiments/campaigns/CAMPAIGN.yml decide --run RUN_ID
+python scripts/experimentctl.py experiments/campaigns/CAMPAIGN.yml assets-plan --run RUN_ID
+python scripts/experimentctl.py experiments/campaigns/CAMPAIGN.yml assets-verify --run RUN_ID
 python scripts/experimentctl.py experiments/campaigns/CAMPAIGN.yml cancel --run RUN_ID
 ```
 
@@ -110,24 +114,96 @@ python scripts/experimentctl.py experiments/campaigns/CAMPAIGN.yml cancel --run 
 | Function | Responsibility |
 | --- | --- |
 | `load_campaign` / `validate_run` | Validate schema, backend fields, safe environment allowlist, explicit Slurm GRES, and SenseCore spot policy. |
-| `source_identity` / `materialize_run` | Compute commit+diff identity and expand immutable path placeholders. |
-| `prepare_run` | Resolve config/overrides and atomically freeze a local control manifest before submission. |
-| `stage_slurm` | Rsync one immutable source path and verify the configured digest-addressed SIF. |
-| `render_slurm_script` | Render explicit partition/account/QOS/GRES/time and Apptainer bindings. |
-| `submit_slurm` | Copy the frozen sbatch file, call `sbatch --parsable`, and return the numeric job ID. |
-| `submit_sensecore` | Check exact-name uniqueness, submit one spot job, and verify it through sanitized describe. |
-| `status_slurm` / `status_sensecore` | Normalize scheduler state without claiming model progress. |
-| `collect_slurm` | Execute the canonical run summarizer on shared `/data`. |
-| `collect_sensecore_logs` | Fetch a bounded, redacted metric-bearing log snapshot. |
-| `cancel_slurm` / `cancel_sensecore` | Cancel only the recorded nonterminal scheduler identity, then re-observe it. |
+| `source_identity` / `materialize_run` | Compute runtime-tree identity and expand immutable path placeholders. |
+| `prepare_run` | Resolve config/overrides and atomically freeze the canonical local run/attempt manifests before submission. |
+| `WydSlurmBackend` | Stage immutable source/SIF artifacts and implement Slurm render, submit, status, collect, and cancel. |
+| `SenseCoreBackend` | Implement exact-name SCO submit/status/log collection/cancel through immediate sanitization. |
+| `BackendRegistry` | Dispatch the common backend contract without platform branches in the CLI. |
 
 Every Python function also carries its detailed input/output/failure semantics
 as an IDE-visible docstring.
 
+### Controller module boundaries
+
+`experimentctl.py` is the compatibility CLI and orchestration loop. Platform
+and pure-policy code is split so it can be exercised without network access:
+
+| Module | Responsibility |
+| --- | --- |
+| `experiment_campaign.py` | Resolve defaults, profiles, matrices, and authored runs. |
+| `experiment_manifest.py` | Atomic run/attempt store, lifecycle states, submission outbox, reconciliation. |
+| `experiment_assets.py` | Load a config once and plan/verify its offline model, dataset, and checkpoint requirements. |
+| `experiment_overrides.py` | Produce the one ordered environment-to-config override sequence used by controller and launcher. |
+| `experiment_policy.py` | Classify failures and recommend bounded next actions without mutating a scheduler. |
+| `experiment_control/runner.py` | Injectable command boundary for production subprocesses and hermetic fakes. |
+| `experiment_control/backends/wyd.py` | SSH, rsync, Slurm, Apptainer staging/status/collection/cancellation. |
+| `experiment_control/backends/sensecore.py` | SCO submission/status/logging/cancellation through repository-local sanitization. |
+
+The backend registry dispatches the common `stage`, `render`, `submit`,
+`status`, `collect`, and `cancel` contract. Adding a backend does not add a new
+backend-kind branch to the CLI loop.
+
+### Submission recovery
+
+Before calling `sbatch` or `sco ... create`, the controller atomically writes a
+`SUBMITTING` record under the attempt. Scheduler acceptance is then reconciled
+to one job ID. Repeating reconciliation with the same ID repairs derived
+`backend.json`, `status.json`, and lifecycle events; a different job ID is
+rejected.
+
+SenseCore recovery queries the exact unique resource name. Slurm scripts carry
+`campaign/run/attempt` in `#SBATCH --comment`, allowing a controller that
+crashed after `sbatch` acceptance to recover the job from the queue. If an
+intent remains unresolved, the controller refuses to create a second job.
+
+### Identity separation
+
+`source_identity.sh --runtime` hashes only Docker/training runtime inputs.
+Campaign YAML and documentation changes therefore do not force an identical
+image or SIF rebuild. Manifests record four separate provenance values:
+
+- full Git commit;
+- runtime tree identity;
+- campaign-file identity;
+- registry image digest or SIF SHA-256.
+
+The default `source_identity.sh --full` remains available for complete dirty
+working-tree provenance.
+
+### Offline assets and decisions
+
+`assets-plan` shows config-dependent requirements without accessing a backend.
+`assets-verify` checks the resolved cache paths. Asset transfer/hydration is a
+separate future transport interface; verification intentionally fails before
+GPU allocation rather than downloading implicitly.
+
+`observe` records scheduler evidence and collects process/model evidence as
+separate objects. `decide` writes `decision.json`. It permits a retry only for
+classified transport, scheduler/node, or preemption failures within the
+declared `max_infra_retries`; OOM, timeout, configuration, model, and
+evaluation failures are never silently retried or resource-adjusted.
+
+### Registry publication
+
+SenseCore output sanitization lives in `scripts/safe_sco.py`, so the repository
+does not depend on a particular user's `~/.codex` directory. Publish immutable
+images with `scripts/push_registry_image.sh`; it distinguishes authorization
+from transport failures, bounds every operation, uses archive plus native
+crane/skopeo only as a transport fallback, verifies the remote digest, and
+removes temporary archives on exit.
+
 ### Campaign schema
 
-The Slurm SSH alias is only a login entry point. Compute placement is explicit
-per run and may target any current WYD partition:
+Campaign authoring supports recursive `defaults`, named `profiles`, and
+cartesian `matrix` entries. Resolution order is defaults, selected profiles in
+the listed order, then the individual run. Mapping fields merge recursively;
+lists such as `config_overrides` are replaced as a whole. The controller
+validates only the fully expanded runs, and freezes that expanded form in the
+canonical manifest.
+
+Known matrix tokens use `{axis}` or `{axis.field}`. Controller-time tokens such
+as `{source_id}`, `{run_id}`, `{project}`, and `{campaign}` remain untouched
+until the immutable source identity and run are materialized. For example:
 
 ```yaml
 schema_version: 1
@@ -136,15 +212,15 @@ project: elf
 source_id: auto
 local_root: outputs/experiment_campaigns
 
-runs:
-  - run_id: smoke-slurm-h100
-    config: src/configs/training_configs/ablations/owt_elfb/tier0_0_pure_elf_len256.yml
-    config_overrides: [epochs=1]
-    image_id: sha256:<SIF_SHA256>
-    resources: {gpus: 1, cpus: 8}
-    env: {BATCH_SIZE: "4", LOG_FREQ: "10"}
-    storage:
-      run_dir: /data/liangluocheng/elf/runs/smoke-slurm-h100
+defaults:
+  image_id: sha256:<SIF_SHA256>
+  resources: {gpus: 1, cpus: 8}
+  config_overrides: [epochs=1]
+  storage:
+    run_dir: /datapool/liangluocheng/elf/runs/{run_id}
+
+profiles:
+  wyd-h100:
     backend:
       kind: slurm
       ssh_alias: wyd-l40s
@@ -153,13 +229,33 @@ runs:
       qos: normal
       gres: gpu:h100:1
       time: "00:10:00"
-      source_dir: /data/liangluocheng/elf/sources/{source_id}
-      sif_path: /data/liangluocheng/elf/images/<SIF_SHA256>.sif
-      data_root: /data/liangluocheng
-      project_data_root: /data/liangluocheng/elf
-      hf_home: /data/liangluocheng/elf/cache/huggingface
-      hf_datasets_cache: /data/liangluocheng/elf/cache/huggingface/datasets
+      mount_root: /datapool
+      source_dir: /datapool/liangluocheng/elf/sources/{source_id}
+      sif_path: /datapool/liangluocheng/elf/images/<SIF_SHA256>.sif
+      data_root: /datapool/liangluocheng
+      project_data_root: /datapool/liangluocheng/elf
+      hf_home: /datapool/liangluocheng/.cache/huggingface
+      hf_datasets_cache: /datapool/liangluocheng/.cache/huggingface/datasets
+
+runs:
+  - matrix:
+      variant:
+        - {name: a0, config: configs/a0.yml}
+        - {name: a1, config: configs/a1.yml}
+      seed: [42, 43]
+    template:
+      profile: wyd-h100
+      run_id: "fusion-{variant.name}-s{seed}"
+      config: "{variant.config}"
 ```
+
+`profile` may also be an ordered list, for example
+`[wyd-common, l40s]`, so shared login/storage settings and accelerator
+placement remain independently reusable. Lists are intentionally not appended:
+a run-level override list is the complete ordered override set for that run.
+
+The Slurm SSH alias is only a login entry point. Compute placement is explicit
+in the resolved backend and may target any current WYD partition.
 
 For nodes whose persistent filesystem is mounted elsewhere, declare
 `mount_root`, `apptainer_cache_dir`, and `apptainer_tmp_dir` explicitly. For
