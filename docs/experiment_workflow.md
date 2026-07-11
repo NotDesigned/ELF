@@ -29,13 +29,13 @@ The root `backend.json`, `status.json`, `collection.json`, and `decision.json`
 are read-model mirrors of the current attempt. Attempt-local files are the
 canonical history; observing an older attempt cannot move the root mirror.
 
-## Manifest and state helper: `scripts/experiment_manifest.py`
+## Manifest and state helper: `elf_experiments.manifest`
 
 The helper has two commands. The default command prepares a run/attempt; the
 `record` command appends a lifecycle transition.
 
 ELF config resolution and scientific-field selection belong to
-`scripts/experiment_projects/elf.py`, not this backend-neutral state helper.
+`src/elf_experiments/projects/elf.py`, not this backend-neutral state helper.
 Controller and runtime construct the shared manifest schema through
 `experiment_run_manifest.build_run_manifest`.
 
@@ -45,7 +45,7 @@ tested docstrings; this document records only cross-module contracts.
 Prepare example:
 
 ```bash
-python scripts/experiment_manifest.py \
+python -m elf_experiments.manifest \
   --project elf \
   --run-id fusion-l256-learned-none-aux1-s42-SOURCE \
   --attempt-id attempt-001 \
@@ -59,41 +59,41 @@ python scripts/experiment_manifest.py \
   -- bash scripts/launch.sh train CONFIG
 ```
 
-## Campaign summary: `scripts/summarize_experiments.py`
+## Campaign summary: `tools/summarize_experiments.py`
 
 The summary command is read-only. It discovers every `manifest.yaml` under the
 given roots, combines run identity/status with the latest training and
 evaluation metrics, and emits JSON or CSV.
 
 ```bash
-python scripts/summarize_experiments.py /data/elf/runs --format json
-python scripts/summarize_experiments.py /data/liangluocheng/elf/runs \
+python tools/summarize_experiments.py /data/elf/runs --format json
+python tools/summarize_experiments.py /data/liangluocheng/elf/runs \
   --format csv --output fusion-len256-v1.csv
 ```
 
 `plan_ppl_gap = shuffled_plan_ppl - oracle_plan_ppl`; positive is better because
 the correct plan produced lower perplexity than a mismatched plan.
 
-## Cross-platform controller: `scripts/experimentctl.py`
+## Cross-platform controller: `tools/experimentctl.py`
 
 The controller freezes campaign metadata locally before scheduler submission
 and exposes the same operations for SenseCore and WYD Slurm:
 
 ```bash
-python scripts/experimentctl.py experiments/campaigns/CAMPAIGN.yml check-identity --run RUN_ID
-python scripts/experimentctl.py experiments/campaigns/CAMPAIGN.yml assets-plan
-python scripts/experimentctl.py experiments/campaigns/CAMPAIGN.yml prepare
-python scripts/experimentctl.py experiments/campaigns/CAMPAIGN.yml preflight --scope submit
-python scripts/experimentctl.py experiments/campaigns/CAMPAIGN.yml submit --run RUN_ID --dry-run
-python scripts/experimentctl.py experiments/campaigns/CAMPAIGN.yml assets-verify --run RUN_ID
-python scripts/experimentctl.py experiments/campaigns/CAMPAIGN.yml stage
-python scripts/experimentctl.py experiments/campaigns/CAMPAIGN.yml submit --run RUN_ID
-python scripts/experimentctl.py experiments/campaigns/CAMPAIGN.yml status --run RUN_ID
-python scripts/experimentctl.py experiments/campaigns/CAMPAIGN.yml collect --run RUN_ID
-python scripts/experimentctl.py experiments/campaigns/CAMPAIGN.yml observe --run RUN_ID
-python scripts/experimentctl.py experiments/campaigns/CAMPAIGN.yml logs --run RUN_ID --tail 100
-python scripts/experimentctl.py experiments/campaigns/CAMPAIGN.yml decide --run RUN_ID
-python scripts/experimentctl.py experiments/campaigns/CAMPAIGN.yml cancel --run RUN_ID
+python tools/experimentctl.py experiments/campaigns/CAMPAIGN.yml check-identity --run RUN_ID
+python tools/experimentctl.py experiments/campaigns/CAMPAIGN.yml assets-plan
+python tools/experimentctl.py experiments/campaigns/CAMPAIGN.yml prepare
+python tools/experimentctl.py experiments/campaigns/CAMPAIGN.yml preflight --scope submit
+python tools/experimentctl.py experiments/campaigns/CAMPAIGN.yml submit --run RUN_ID --dry-run
+python tools/experimentctl.py experiments/campaigns/CAMPAIGN.yml assets-verify --run RUN_ID
+python tools/experimentctl.py experiments/campaigns/CAMPAIGN.yml stage
+python tools/experimentctl.py experiments/campaigns/CAMPAIGN.yml submit --run RUN_ID
+python tools/experimentctl.py experiments/campaigns/CAMPAIGN.yml status --run RUN_ID
+python tools/experimentctl.py experiments/campaigns/CAMPAIGN.yml collect --run RUN_ID
+python tools/experimentctl.py experiments/campaigns/CAMPAIGN.yml observe --run RUN_ID
+python tools/experimentctl.py experiments/campaigns/CAMPAIGN.yml logs --run RUN_ID --tail 100
+python tools/experimentctl.py experiments/campaigns/CAMPAIGN.yml decide --run RUN_ID
+python tools/experimentctl.py experiments/campaigns/CAMPAIGN.yml cancel --run RUN_ID
 ```
 
 `--run` is repeatable; omitting it selects every campaign run. `--dry-run` on
@@ -142,7 +142,7 @@ without network access:
 | `experiment_control/runner.py` | Independently versioned injectable command boundary for production subprocesses and hermetic fakes. |
 | `experiment_control/preflight.py` | Independently versioned sanitized readiness checks and fail-closed reports. |
 | [`ml-experiment-control`](https://github.com/NotDesigned/ml-experiment-control) | Commit-pinned backend, preflight, runner, state, sanitizer, project protocol, and adapter template package. |
-| `scripts/experiment_projects/elf.py` | The only adapter that knows ELF Config, `cloud_train.sh`, ELF checkpoints, metrics, and summaries. |
+| `src/elf_experiments/projects/elf.py` | The only adapter that knows ELF Config, `cloud_train.sh`, ELF checkpoints, metrics, and summaries. |
 | `experiment_control/backends/wyd.py` | SSH, rsync, Slurm, identity probes, Apptainer staging/status/collection/cancellation. |
 | `experiment_control/backends/sensecore.py` | Sanitized SCO identity/submission/status/logging/cancellation. |
 
@@ -257,7 +257,7 @@ observation or vice versa.
 SenseCore output sanitization lives in the installed `experiment_control`
 package, so the repository does not depend on a particular user's `~/.codex`
 directory. Publish immutable
-images with `scripts/push_registry_image.sh`; it distinguishes authorization
+images with `tools/push_registry_image.sh`; it distinguishes authorization
 from transport failures, bounds every operation, uses archive plus native
 crane/skopeo only as a transport fallback, verifies the remote digest, and
 removes temporary archives on exit.
@@ -297,7 +297,7 @@ Files under `experiments/campaigns/` are immutable authored/history records.
 Fresh executable identities come from templates. For example:
 
 ```bash
-python scripts/instantiate_campaign.py \
+python tools/instantiate_campaign.py \
   experiments/templates/backend_smoke_slurm.yml \
   --instance 20260712T120000 \
   --local-root /tmp/elf-controller-state

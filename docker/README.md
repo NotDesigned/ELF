@@ -80,8 +80,8 @@ bounded repository helper and record the digest it prints:
 SOURCE_ID=$(bash scripts/source_identity.sh --runtime)
 IMMUTABLE_IMAGE="$IMAGE:runtime-$SOURCE_ID"
 docker tag "$IMAGE:runtime" "$IMMUTABLE_IMAGE"
-scripts/push_registry_image.sh --dry-run "$IMMUTABLE_IMAGE"
-scripts/push_registry_image.sh "$IMMUTABLE_IMAGE"
+tools/push_registry_image.sh --dry-run "$IMMUTABLE_IMAGE"
+tools/push_registry_image.sh "$IMMUTABLE_IMAGE"
 ```
 
 The helper tries Docker first, stops on authentication/authorization errors,

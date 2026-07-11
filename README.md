@@ -182,7 +182,7 @@ Both flags are also editable in the YAML config under the same names. You can al
 PPL script afterwards:
 
 ```bash
-python scripts/eval_ppl.py \
+python tools/eval_ppl.py \
     --input outputs/<run>/<sampling_dir>/all_generated_*.jsonl \
     --batch_size 16
 ```

@@ -48,7 +48,7 @@ standard ELF Slurm smoke, create a reviewable fresh definition with an explicit
 unique instance (do not overwrite an existing output):
 
 ```bash
-CAMPAIGN=$(python scripts/instantiate_campaign.py \
+CAMPAIGN=$(python tools/instantiate_campaign.py \
   experiments/templates/backend_smoke_slurm.yml \
   --instance 20260712T120000 \
   --local-root /tmp/elf-controller-state)
@@ -58,7 +58,7 @@ Review the generated YAML and validate the relevant code/config. Then use one
 run at a time while establishing a new execution path:
 
 ```bash
-CTL="python scripts/experimentctl.py $CAMPAIGN"
+CTL="python tools/experimentctl.py $CAMPAIGN"
 $CTL check-identity --run RUN_ID
 $CTL assets-plan --run RUN_ID
 $CTL submit --run RUN_ID --dry-run
