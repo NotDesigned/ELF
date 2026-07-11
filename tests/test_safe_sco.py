@@ -70,6 +70,31 @@ def test_job_summary_tolerates_missing_external_state() -> None:
     assert json.loads(result.stdout)["normalized_state"] == "UNKNOWN"
 
 
+def test_worker_list_keeps_phase_but_drops_network_addresses() -> None:
+    table = """\
++----------+----------+---------+--------+---------+
+| WORKER_NAME | RESOURCE | HOST_IP | POD_IP | PHASE |
++----------+----------+---------+--------+---------+
+| job-worker-0 | 4 accelerators | 10.0.0.1 | 10.0.0.2 | Pending |
+|              | 56 CPUs        |          |          |         |
++----------+----------+---------+--------+---------+
+"""
+    result = run_safe("worker-list", table)
+    assert result.returncode == 0
+    workers = json.loads(result.stdout)
+    assert workers == [{
+        "phase": "Pending", "worker_name": "job-worker-0",
+    }]
+    assert "10.0.0" not in result.stdout
+
+
+def test_worker_list_fails_closed_on_unknown_table_schema() -> None:
+    result = run_safe("worker-list", "| NAME | TOKEN |\n| worker | secret |\n")
+    assert result.returncode != 0
+    assert "secret" not in result.stderr
+    assert "raw response suppressed" in result.stderr
+
+
 def test_malformed_json_is_not_echoed() -> None:
     result = run_safe("job-summary", "secret=must-not-echo {")
     assert result.returncode != 0

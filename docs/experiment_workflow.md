@@ -351,6 +351,9 @@ scheduler success. A terminal scheduler observation marks its allocation
 `RELEASED` without inventing a process result. Collection records
 `scheduler_state`, `runtime_state`,
 `worker_state`, and `model_state` alongside the underlying metrics/artifacts.
+For SenseCore, collection obtains the exact job's worker table through a
+schema-checked sanitizer that drops host/pod IP columns and retains only worker
+identity and phase.
 
 Controller and runtime use `experiment_run_manifest.build_run_manifest` for
 the same canonical `manifest.yaml` schema. Slurm stages that manifest before

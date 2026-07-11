@@ -959,8 +959,46 @@ def test_sensecore_collection_extracts_committed_checkpoint_from_logs(monkeypatc
         ],
         "expired": False,
     })
+    monkeypatch.setattr(backend, "workers", lambda campaign, run: {
+        "worker_state": "RELEASED", "worker_phases": ["Deleted"],
+        "worker_evidence_available": True,
+    })
     summary = backend.collect(
         {"project": "elf"}, {"run_id": "run", "backend": {}}
     )
     assert summary["latest_completed_checkpoint"].endswith("checkpoint_21")
     assert summary["latest_completed_checkpoint_step"] == 21
+    assert summary["worker_state"] == "RELEASED"
+
+
+@pytest.mark.parametrize(
+    ("phase", "expected"),
+    [("Pending", "PENDING"), ("Running", "ALLOCATED"), ("Deleted", "RELEASED")],
+)
+def test_sensecore_worker_query_is_sanitized_and_normalized(
+    tmp_path: Path, phase: str, expected: str
+):
+    resource_name = "sensecore-run--attempt-001"
+    fake = QueueRunner([
+        CommandResult(("workers",), 0, json.dumps([{
+            "worker_name": "worker-0", "resource": "4 accelerators",
+            "phase": phase,
+        }])),
+    ])
+    services = backend_services()
+    services = type(services)(
+        fake.run, lambda campaign, run: tmp_path,
+        lambda campaign, run: {
+            "attempt_id": "attempt-001", "backend_job_id": resource_name,
+        },
+        services.summarize_run, services.parse_metric, services.parse_checkpoint,
+        services.atomic_write, services.utc_now,
+    )
+    result = SenseCoreBackend(services).workers(
+        {}, {"run_id": "sensecore-run", "backend": {
+            "kind": "sensecore", "workspace": "workspace",
+        }}
+    )
+    assert result["worker_state"] == expected
+    assert resource_name in fake.commands[0][-1]
+    assert "worker-list" in fake.commands[0][-1]
