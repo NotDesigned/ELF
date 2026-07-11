@@ -6,7 +6,6 @@ from __future__ import annotations
 import argparse
 from dataclasses import asdict
 import json
-import os
 import sys
 from pathlib import Path
 from typing import Any, Iterable
@@ -31,7 +30,7 @@ from experiment_manifest import (  # noqa: E402
 )
 from experiment_campaign import load_and_resolve_campaign  # noqa: E402
 from experiment_policy import decide_next_action  # noqa: E402
-from experiment_run_manifest import build_run_manifest, comparable_manifest  # noqa: E402
+from experiment_run_manifest import build_run_manifest  # noqa: E402
 from experiment_control.backends import build_registry  # noqa: E402
 from experiment_control.backends.services import BackendServices  # noqa: E402
 from experiment_projects import build_project_registry  # noqa: E402
@@ -284,7 +283,7 @@ def prepare_run(
 ) -> dict[str, Any]:
     """Freeze local control metadata before any scheduler mutation occurs."""
     local_dir = local_run_dir(campaign, run)
-    manifest_path = local_dir / "manifest.yaml"
+    store = ExperimentStateStore(local_dir)
     remote_run_dir = str(run["storage"]["run_dir"])
     project = PROJECTS.get(str(campaign["project"]))
     overrides = resolved_run_overrides(campaign, run, remote_run_dir)
@@ -301,14 +300,7 @@ def prepare_run(
         run_dir=remote_run_dir,
         max_infra_retries=int(retry.get("max_infra_retries", 0)),
     )
-    if manifest_path.exists():
-        existing = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
-        if comparable_manifest(existing) != comparable_manifest(manifest):
-            raise ValueError(f"existing control manifest conflicts: {manifest_path}")
-        base_manifest = existing
-    else:
-        atomic_write(manifest_path, manifest, yaml_format=True)
-        base_manifest = manifest
+    base_manifest = store.ensure_manifest(manifest)
     effective = dict(base_manifest)
     effective["attempt_id"] = attempt_id
     effective["backend"] = run["backend"]
@@ -318,30 +310,16 @@ def prepare_run(
     effective["retry"] = retry
     effective["command"] = sanitize_command(command)
     effective["execution"] = {"source_mount": bundle.container_path, "workdir": bundle.container_path}
-    attempt_path = local_dir / "attempts" / attempt_id / "attempt.yaml"
+    attempt_path = store.attempt_path(attempt_id)
     if attempt_path.exists():
-        previous_attempt = yaml.safe_load(attempt_path.read_text(encoding="utf-8"))
+        previous_attempt = store.load_attempt(attempt_id)
+        effective["created_at"] = previous_attempt["created_at"]
         if previous_attempt != effective:
             raise ValueError(f"existing control attempt conflicts: {attempt_path}")
     else:
-        atomic_write(attempt_path, effective, yaml_format=True)
-        append_event(
-            local_dir / "events.jsonl",
-            {
-                "timestamp": utc_now(),
-                "run_id": run["run_id"],
-                "attempt_id": attempt_id,
-                "backend": run["backend"]["kind"],
-                "event": "control_attempt_created",
-                "payload": {"remote_run_dir": remote_run_dir},
-            },
-        )
-    status_path = local_dir / "status.json"
-    if not status_path.exists():
-        atomic_write(
-            status_path,
-            {"run_id": run["run_id"], "attempt_id": attempt_id, "state": "CREATED", "updated_at": utc_now()},
-        )
+        effective["created_at"] = utc_now()
+        store.create_attempt(effective)
+    store.initialize_attempt_records(attempt_id)
     return effective
 
 
@@ -505,7 +483,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("campaign", type=Path)
     parser.add_argument(
         "command", choices=(
-            "prepare", "preflight", "stage", "render", "submit", "status", "collect", "cancel",
+            "prepare", "preflight", "stage", "submit", "status", "collect", "cancel",
             "observe", "logs", "decide", "assets-plan", "assets-verify",
         )
     )
@@ -538,7 +516,7 @@ def main(argv: list[str] | None = None) -> int:
         backend_kind = run["backend"]["kind"]
         backend_adapter = BACKENDS.get(backend_kind)
         manifest = None
-        if args.command in {"prepare", "stage", "render", "submit"}:
+        if args.command in {"prepare", "stage", "submit"}:
             manifest = prepare_run(campaign, run, identity, attempt_id=args.attempt_id)
         if args.command == "prepare":
             outputs.append({"run_id": run["run_id"], "state": "CREATED"})
@@ -550,10 +528,6 @@ def main(argv: list[str] | None = None) -> int:
             bundle = PROJECTS.get(str(campaign["project"])).source_bundle(REPO_ROOT)
             staged = backend_adapter.stage(campaign, run, identity, bundle)
             outputs.append({"run_id": run["run_id"], "staged": staged})
-        elif args.command == "render":
-            assert manifest is not None
-            rendered = backend_adapter.render(manifest)
-            outputs.append({"run_id": run["run_id"], "rendered": rendered})
         elif args.command == "submit":
             assert manifest is not None
             if not args.dry_run:

@@ -206,11 +206,16 @@ def test_control_status_is_created_before_submission(tmp_path, monkeypatch):
     campaign = slurm_campaign(tmp_path)
     run = materialize_run(campaign, campaign["runs"][0], "source-fixed")
     prepare_run(campaign, run, "source-fixed", attempt_id="attempt-007")
+    prepare_run(campaign, run, "source-fixed", attempt_id="attempt-007")
+    run_dir = tmp_path / "local/controller-test/smoke-h100"
     status = json.loads(
-        (tmp_path / "local/controller-test/smoke-h100/status.json").read_text(encoding="utf-8")
+        (run_dir / "status.json").read_text(encoding="utf-8")
     )
     assert status["state"] == "CREATED"
     assert status["attempt_id"] == "attempt-007"
+    assert json.loads((run_dir / "backend.json").read_text())["backend"] == "slurm"
+    events = [json.loads(line) for line in (run_dir / "events.jsonl").read_text().splitlines()]
+    assert [event["event"] for event in events].count("attempt_created") == 1
 
 
 def test_new_attempt_keeps_run_manifest_and_gets_its_own_command(tmp_path, monkeypatch):

@@ -1,6 +1,7 @@
 from pathlib import Path
 
-from experiment_assets import plan_assets, verify_assets
+from experiment_assets import cache_path, plan_assets
+from experiment_control.project import AssetRequirement
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -16,9 +17,12 @@ def test_asset_plan_is_config_aware(monkeypatch):
     assert any(item.identity == "sentence-transformers/sentence-t5-xl" for item in frozen)
 
 
-def test_asset_verify_reports_resolved_cache_path(tmp_path, monkeypatch):
-    monkeypatch.chdir(ROOT)
-    requirements = plan_assets(PURE, ["online_eval=false"])
-    missing = verify_assets(requirements, tmp_path / "hf", tmp_path / "datasets")
-    assert {item["kind"] for item in missing} == {"model", "dataset"}
-    assert all(Path(item["path"]).is_absolute() for item in missing)
+def test_asset_cache_path_maps_remote_identities(tmp_path):
+    hf_home = tmp_path / "hf"
+    datasets = tmp_path / "datasets"
+    model = AssetRequirement("model", "org/model", "encoder")
+    dataset = AssetRequirement("dataset", "org/data", "training")
+    checkpoint = AssetRequirement("file", "/data/checkpoint", "warm start")
+    assert cache_path(model, hf_home, datasets) == hf_home / "hub/models--org--model"
+    assert cache_path(dataset, hf_home, datasets) == datasets / "org___data"
+    assert cache_path(checkpoint, hf_home, datasets) == Path("/data/checkpoint")

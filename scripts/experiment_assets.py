@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Plan and verify config-dependent offline assets before GPU allocation."""
+"""Plan config-dependent offline assets before GPU allocation."""
 
 from __future__ import annotations
 
@@ -47,32 +47,14 @@ def cache_path(requirement: AssetRequirement, hf_home: Path, datasets_cache: Pat
     return Path(identity)
 
 
-def verify_assets(requirements: list[AssetRequirement], hf_home: Path, datasets_cache: Path) -> list[dict[str, str]]:
-    missing = []
-    for requirement in requirements:
-        path = cache_path(requirement, hf_home, datasets_cache)
-        valid = path.is_file() if requirement.kind == "file" else path.is_dir()
-        if not valid:
-            missing.append({**asdict(requirement), "path": str(path)})
-    return missing
-
-
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("plan", "verify"))
+    parser.add_argument("command", choices=("plan",))
     parser.add_argument("config")
     parser.add_argument("--config-override", action="append", default=[])
-    parser.add_argument("--hf-home", default="")
-    parser.add_argument("--datasets-cache", default="")
     parser.add_argument("--format", choices=("json", "tsv"), default="json")
     args = parser.parse_args(argv)
     requirements = plan_assets(args.config, args.config_override)
-    if args.command == "verify":
-        if not args.hf_home or not args.datasets_cache:
-            parser.error("verify requires --hf-home and --datasets-cache")
-        missing = verify_assets(requirements, Path(args.hf_home), Path(args.datasets_cache))
-        print(json.dumps({"requirements": [asdict(item) for item in requirements], "missing": missing}, indent=2))
-        return 1 if missing else 0
     if args.format == "tsv":
         for item in requirements:
             print(f"{item.kind}\t{item.identity}\t{item.reason}")

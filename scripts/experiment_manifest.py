@@ -273,6 +273,20 @@ class ExperimentStateStore:
             raise FileNotFoundError(f"run manifest does not exist: {self.manifest_path}")
         return yaml.safe_load(self.manifest_path.read_text(encoding="utf-8"))
 
+    def ensure_manifest(self, manifest: Mapping[str, Any]) -> dict[str, Any]:
+        """Publish one immutable run identity or validate the existing identity."""
+        candidate = dict(manifest)
+        if self.manifest_path.is_file():
+            existing = self.load_manifest()
+            if comparable_manifest(existing) != comparable_manifest(candidate):
+                raise ValueError("existing run manifest conflicts")
+            return existing
+        try:
+            atomic_create(self.manifest_path, candidate, yaml_format=True)
+        except FileExistsError:
+            return self.ensure_manifest(candidate)
+        return candidate
+
     def load_attempt(self, attempt_id: str) -> dict[str, Any]:
         path = self.attempt_path(attempt_id)
         if not path.is_file():
@@ -299,6 +313,12 @@ class ExperimentStateStore:
         """Idempotently initialize derived status, backend, and event records."""
         attempt = self.load_attempt(attempt_id)
         timestamp = attempt["created_at"]
+        attempt_backend = attempt["backend"]
+        backend_kind = (
+            attempt_backend["kind"]
+            if isinstance(attempt_backend, Mapping)
+            else attempt_backend
+        )
         backend = (
             json.loads(self.backend_path.read_text(encoding="utf-8"))
             if self.backend_path.is_file()
@@ -308,7 +328,7 @@ class ExperimentStateStore:
             atomic_write(
                 self.backend_path,
                 {
-                    "backend": attempt["backend"],
+                    "backend": backend_kind,
                     "backend_job_id": attempt.get("backend_job_id"),
                     "attempt_id": attempt_id,
                 },
@@ -335,7 +355,7 @@ class ExperimentStateStore:
                 "project": attempt["project"],
                 "run_id": attempt["run_id"],
                 "attempt_id": attempt_id,
-                "backend": attempt["backend"],
+                "backend": backend_kind,
                 "backend_job_id": attempt.get("backend_job_id"),
                 "event": "attempt_created",
                 "payload": {
@@ -646,18 +666,7 @@ def prepare(args: argparse.Namespace) -> dict[str, Any]:
         run_dir=str(run_dir), max_infra_retries=args.max_infra_retries,
     )
 
-    if manifest_path.exists():
-        existing = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
-        if comparable_manifest(existing) != comparable_manifest(manifest):
-            raise ValueError("existing run manifest conflicts")
-        manifest = existing
-    else:
-        try:
-            atomic_create(manifest_path, manifest, yaml_format=True)
-        except FileExistsError:
-            # A concurrent prepare published the run identity. Re-enter the
-            # normal immutable-manifest validation path before creating this attempt.
-            return prepare(args)
+    manifest = store.ensure_manifest(manifest)
 
     attempt = {
         "schema_version": 1,
