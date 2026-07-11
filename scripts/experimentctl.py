@@ -32,13 +32,14 @@ from experiment_manifest import (  # noqa: E402
     utc_now,
 )
 from experiment_campaign import load_and_resolve_campaign  # noqa: E402
-from experiment_assets import plan_assets, verify_assets  # noqa: E402
+from experiment_assets import cache_path, plan_assets  # noqa: E402
 from experiment_overrides import operational_overrides  # noqa: E402
 from experiment_policy import decide_next_action  # noqa: E402
 from experiment_control.backends.base import BackendRegistry  # noqa: E402
 from experiment_control.backends.services import BackendServices  # noqa: E402
 from experiment_control.backends.wyd import WydSlurmBackend  # noqa: E402
 from experiment_control.backends.sensecore import SenseCoreBackend as SenseCoreAdapter  # noqa: E402
+from experiment_control.backends.slurm import scheduler_job_name, shell_join  # noqa: E402
 from experiment_control.runner import (  # noqa: E402
     CommandResult,
     CommandRunner,
@@ -495,18 +496,23 @@ def reconcile_submission(
         job_id = backend["job_name"] if matches else None
     else:
         token = str(intent["submission_token"])
-        query = "squeue -u $(id -un) -h -o '%i|%k'"
+        expected_name = scheduler_job_name(str(run["run_id"]), attempt_id)
+        query = "squeue -u $(id -un) -h -o '%i|%j|%k'"
         result = remote_exec(backend["ssh_alias"], query, check=False)
-        matches = [line.split("|", 1)[0] for line in result.stdout.splitlines() if line.endswith(f"|{token}")]
+        matches = []
+        for line in result.stdout.splitlines():
+            fields = line.split("|", 2)
+            if len(fields) == 3 and (fields[1] == expected_name or fields[2] == token):
+                matches.append(fields[0])
         if not matches:
             accounting = remote_exec(
                 backend["ssh_alias"],
-                "sacct -S now-7days -u $(id -un) -X -n -P -o JobIDRaw,Comment",
+                "sacct -S now-7days -u $(id -un) -X -n -P -o JobIDRaw,JobName",
                 check=False,
             )
             matches = [
                 line.split("|", 1)[0] for line in accounting.stdout.splitlines()
-                if line.endswith(f"|{token}") and line.split("|", 1)[0].isdigit()
+                if line.endswith(f"|{expected_name}") and line.split("|", 1)[0].isdigit()
             ]
         job_id = matches[0] if len(matches) == 1 else None
     if job_id:
@@ -616,6 +622,16 @@ def write_local_collection(campaign: dict[str, Any], run: dict[str, Any], summar
     atomic_write(local_run_dir(campaign, run) / "collection.json", summary)
 
 
+def annotate_collection(
+    summary: dict[str, Any], scheduler_status: dict[str, Any]
+) -> dict[str, Any]:
+    """Keep scheduler truth separate from possibly stale runtime state."""
+    annotated = dict(summary)
+    annotated["runtime_state"] = summary.get("state")
+    annotated["scheduler_state"] = scheduler_status.get("state")
+    return annotated
+
+
 BACKENDS = BackendRegistry(
     WydSlurmBackend(backend_services()),
     SenseCoreAdapter(backend_services(), parse_training_metric_line),
@@ -641,12 +657,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "command", choices=(
             "prepare", "stage", "render", "submit", "status", "collect", "cancel",
-            "observe", "decide", "assets-plan", "assets-verify",
+            "observe", "logs", "decide", "assets-plan", "assets-verify",
         )
     )
     parser.add_argument("--run", action="append", default=[], help="limit to this run ID; repeatable")
     parser.add_argument("--attempt-id", default="attempt-001")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--tail", type=int, default=100, help="maximum log lines per stream")
     return parser.parse_args(argv)
 
 
@@ -660,7 +677,7 @@ def main(argv: list[str] | None = None) -> int:
     runs_with_identity = []
     for run in selected:
         identity = str(run.get("source_id", default_identity))
-        if args.command in {"status", "collect", "cancel"}:
+        if args.command in {"status", "collect", "cancel", "observe", "logs", "decide"}:
             identity = frozen_source_identity(campaign, run, identity)
         runs_with_identity.append((materialize_run(campaign, run, identity), identity))
     outputs: list[dict[str, Any]] = []
@@ -705,9 +722,15 @@ def main(argv: list[str] | None = None) -> int:
                 update_observed_status(campaign, run, status)
             outputs.append(status)
         elif args.command == "collect":
-            summary = backend_adapter.collect(campaign, run)
+            status = backend_adapter.status(campaign, run)
+            update_observed_status(campaign, run, status)
+            summary = annotate_collection(backend_adapter.collect(campaign, run), status)
             write_local_collection(campaign, run, summary)
             outputs.append(summary)
+        elif args.command == "logs":
+            if args.tail < 1 or args.tail > 10000:
+                raise ValueError("--tail must be between 1 and 10000")
+            outputs.append(backend_adapter.logs(campaign, run, tail=args.tail))
         elif args.command == "cancel":
             status = backend_adapter.cancel(campaign, run)
             update_observed_status(campaign, run, status)
@@ -719,7 +742,9 @@ def main(argv: list[str] | None = None) -> int:
             if backend_payload.get("backend_job_id"):
                 status = backend_adapter.status(campaign, run)
                 update_observed_status(campaign, run, status)
-                collection = backend_adapter.collect(campaign, run)
+                collection = annotate_collection(
+                    backend_adapter.collect(campaign, run), status
+                )
                 write_local_collection(campaign, run, collection)
             else:
                 status, collection = unsubmitted_status(campaign, run), None
@@ -753,7 +778,28 @@ def main(argv: list[str] | None = None) -> int:
                 env = command_environment(campaign, run, identity, args.attempt_id)
                 hf_home = Path(env.get("HF_HOME", "/data/.cache/huggingface"))
                 datasets_cache = Path(env.get("HF_DATASETS_CACHE", str(hf_home / "datasets")))
-                result["missing"] = verify_assets(requirements, hf_home, datasets_cache)
+                if backend_kind == "slurm":
+                    missing = []
+                    alias = str(run["backend"]["ssh_alias"])
+                    for requirement in requirements:
+                        path = cache_path(requirement, hf_home, datasets_cache)
+                        predicate = "-s" if requirement.kind == "file" else "-d"
+                        check = remote_exec(
+                            alias, shell_join(["test", predicate, str(path)]), check=False
+                        )
+                        if check.returncode != 0:
+                            missing.append({**asdict(requirement), "path": str(path)})
+                    result.update(
+                        {"missing": missing, "verification": "remote-ssh", "verified_on": alias}
+                    )
+                else:
+                    result.update(
+                        {
+                            "missing": None,
+                            "verification": "requires-running-sensecore-worker",
+                            "verified_on": None,
+                        }
+                    )
             outputs.append(result)
     print(json.dumps(outputs, ensure_ascii=False, indent=2, sort_keys=True))
     return 0

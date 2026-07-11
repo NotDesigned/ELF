@@ -1,5 +1,5 @@
 from experiment_control.backends.base import BackendRegistry
-from experiment_control.backends.slurm import parse_accounting
+from experiment_control.backends.slurm import parse_accounting, scheduler_job_name
 
 
 def test_slurm_accounting_contract_normalizes_exit_code():
@@ -19,3 +19,10 @@ def test_backend_registry_rejects_unknown_kind():
         assert "unsupported" in str(error)
     else:
         raise AssertionError("unknown backend was accepted")
+
+
+def test_attempt_qualified_slurm_name_is_bounded_and_deterministic():
+    name = scheduler_job_name("r" * 128, "attempt-123")
+    assert len(name) <= 128
+    assert name == scheduler_job_name("r" * 128, "attempt-123")
+    assert name != scheduler_job_name("r" * 128, "attempt-124")

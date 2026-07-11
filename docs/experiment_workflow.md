@@ -100,6 +100,7 @@ python scripts/experimentctl.py experiments/campaigns/CAMPAIGN.yml submit --run 
 python scripts/experimentctl.py experiments/campaigns/CAMPAIGN.yml status --run RUN_ID
 python scripts/experimentctl.py experiments/campaigns/CAMPAIGN.yml collect --run RUN_ID
 python scripts/experimentctl.py experiments/campaigns/CAMPAIGN.yml observe --run RUN_ID
+python scripts/experimentctl.py experiments/campaigns/CAMPAIGN.yml logs --run RUN_ID --tail 100
 python scripts/experimentctl.py experiments/campaigns/CAMPAIGN.yml decide --run RUN_ID
 python scripts/experimentctl.py experiments/campaigns/CAMPAIGN.yml assets-plan --run RUN_ID
 python scripts/experimentctl.py experiments/campaigns/CAMPAIGN.yml assets-verify --run RUN_ID
@@ -173,15 +174,29 @@ working-tree provenance.
 ### Offline assets and decisions
 
 `assets-plan` shows config-dependent requirements without accessing a backend.
-`assets-verify` checks the resolved cache paths. Asset transfer/hydration is a
-separate future transport interface; verification intentionally fails before
-GPU allocation rather than downloading implicitly.
+For Slurm, `assets-verify` checks the resolved cache paths through the declared
+SSH alias on the remote persistent filesystem. SenseCore reports
+`requires-running-sensecore-worker` until verification can run inside a mounted
+worker; it never treats the controller's local `/data` as SenseCore AFS. Asset
+transfer/hydration is a separate future transport interface; verification
+never downloads implicitly inside a GPU job.
 
 `observe` records scheduler evidence and collects process/model evidence as
 separate objects. `decide` writes `decision.json`. It permits a retry only for
 classified transport, scheduler/node, or preemption failures within the
 declared `max_infra_retries`; OOM, timeout, configuration, model, and
 evaluation failures are never silently retried or resource-adjusted.
+
+`logs` returns a bounded, redacted snapshot. Slurm reads attempt-local
+`stdout.log` and `stderr.log` from persistent storage; carriage-return progress
+bars are normalized before the final line bound is applied. SenseCore uses a
+20-second live stream and reports `expired: true` when the terminal job's log
+token has expired instead of retrying indefinitely.
+
+Collection records both `scheduler_state` and `runtime_state`. They may differ
+after preemption or cancellation because a killed process cannot always update
+its own status file; scheduler truth must not overwrite the historical runtime
+observation or vice versa.
 
 ### Registry publication
 

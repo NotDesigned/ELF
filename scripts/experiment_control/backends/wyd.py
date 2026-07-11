@@ -9,6 +9,7 @@ from typing import Any
 
 from .services import BackendServices
 from .slurm import parse_accounting, render_job, shell_join
+from safe_sco import redact_line
 
 
 class WydSlurmBackend:
@@ -140,3 +141,26 @@ class WydSlurmBackend:
         summary["collected_from"] = run["storage"]["run_dir"]
         summary["run_dir"] = run["storage"]["run_dir"]
         return summary
+
+    def logs(self, campaign, run, *, tail: int) -> dict[str, Any]:
+        record = self.s.backend_record(campaign, run)
+        attempt_id = str(record["attempt_id"])
+        attempt_dir = f"{run['storage']['run_dir']}/attempts/{attempt_id}"
+        streams: dict[str, list[str]] = {}
+        for stream in ("stdout", "stderr"):
+            path = f"{attempt_dir}/{stream}.log"
+            result = self.s.remote_exec(
+                run["backend"]["ssh_alias"],
+                f"test -f {shlex.quote(path)} && tail -n {tail} {shlex.quote(path)}",
+                check=False,
+            )
+            normalized = [
+                redact_line(line) for line in result.stdout.replace("\r", "\n").splitlines()
+                if line.strip()
+            ]
+            streams[stream] = normalized[-tail:]
+        return {
+            "run_id": run["run_id"], "backend": "slurm",
+            "backend_job_id": record["backend_job_id"], "attempt_id": attempt_id,
+            "tail": tail, **streams,
+        }

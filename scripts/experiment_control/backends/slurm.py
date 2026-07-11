@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import shlex
+import hashlib
 from typing import Any, Iterable
 
 from ..states import normalize_slurm_state
@@ -10,6 +11,15 @@ from ..states import normalize_slurm_state
 
 def shell_join(command: Iterable[str]) -> str:
     return " ".join(shlex.quote(str(argument)) for argument in command)
+
+
+def scheduler_job_name(run_id: str, attempt_id: str) -> str:
+    """Return a deterministic attempt-qualified Slurm job name."""
+    raw = f"{run_id}--{attempt_id}"
+    if len(raw) <= 128:
+        return raw
+    digest = hashlib.sha256(raw.encode()).hexdigest()[:12]
+    return f"{raw[:113]}--{digest}"
 
 
 def render_job(manifest: dict[str, Any]) -> str:
@@ -24,6 +34,7 @@ def render_job(manifest: dict[str, Any]) -> str:
     command = shell_join(manifest["command"])
     cpus = int(resources.get("cpus", 8))
     comment = shlex.quote(f"{manifest.get('campaign', 'campaign')}/{manifest['run_id']}/{manifest['attempt_id']}")
+    job_name = scheduler_job_name(str(manifest["run_id"]), str(manifest["attempt_id"]))
     return f"""#!/usr/bin/env bash
 #SBATCH --partition={backend['partition']}
 #SBATCH --account={backend['account']}
@@ -33,7 +44,7 @@ def render_job(manifest: dict[str, Any]) -> str:
 #SBATCH --cpus-per-task={cpus}
 #SBATCH --gres={backend['gres']}
 #SBATCH --time={backend['time']}
-#SBATCH --job-name={manifest['run_id']}
+#SBATCH --job-name={job_name}
 #SBATCH --comment={comment}
 #SBATCH --output=/dev/null
 #SBATCH --error=/dev/null

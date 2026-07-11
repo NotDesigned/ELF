@@ -7,6 +7,7 @@ import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 from experimentctl import (
+    annotate_collection,
     ensure_attempt_not_submitted,
     frozen_source_identity,
     load_campaign,
@@ -68,6 +69,7 @@ def test_prepare_and_render_preserve_explicit_partition(tmp_path, monkeypatch):
 
     assert "#SBATCH --partition=h100" in script
     assert "#SBATCH --gres=gpu:h100:1" in script
+    assert "#SBATCH --job-name=smoke-h100--attempt-001" in script
     assert "#SBATCH --output=/dev/null" in script
     assert "attempts/attempt-001" in script
     assert "--bind /data/liangluocheng/elf/sources/source-fixed:/app" in script
@@ -207,3 +209,9 @@ def test_parses_structured_training_metric_from_sensecore_log():
         "lr": 2.5e-05,
         "steps_per_sec": 2.95,
     }
+
+
+def test_collection_separates_stale_runtime_from_scheduler_truth():
+    result = annotate_collection({"state": "RUNNING", "step": 10}, {"state": "CANCELLED"})
+    assert result["runtime_state"] == "RUNNING"
+    assert result["scheduler_state"] == "CANCELLED"

@@ -127,6 +127,15 @@ class SenseCoreBackend:
         return self.status(campaign, run)
 
     def collect(self, campaign, run) -> dict[str, Any]:
+        snapshot = self.logs(campaign, run, tail=200)
+        lines = snapshot["lines"]
+        metrics = [metric for line in lines if (metric := self.metric_parser(line))]
+        metric_lines = [line for line in lines if "Step " in line or "gPPL:" in line or ("plan" in line.lower() and "ppl" in line.lower())]
+        return {"run_id": run["run_id"], "backend": "sensecore", "model_observed": bool(metrics),
+                "latest_metric": metrics[-1] if metrics else None, "metric_log_lines": metric_lines[-20:],
+                "live_logs_expired": snapshot["expired"]}
+
+    def logs(self, campaign, run, *, tail: int) -> dict[str, Any]:
         backend = run["backend"]
         result = self.s.run_command(
             ["timeout", "20s", "env", "-u", "http_proxy", "-u", "https_proxy", "-u", "all_proxy",
@@ -135,7 +144,12 @@ class SenseCoreBackend:
             check=False,
         )
         redacted = self._redact_error(result.stdout + "\n" + result.stderr)
-        lines = [line for line in redacted.splitlines() if "Step " in line or "gPPL:" in line or ("plan" in line.lower() and "ppl" in line.lower())]
-        metrics = [metric for line in lines if (metric := self.metric_parser(line))]
-        return {"run_id": run["run_id"], "backend": "sensecore", "model_observed": bool(metrics),
-                "latest_metric": metrics[-1] if metrics else None, "metric_log_lines": lines[-20:]}
+        lines = redacted.splitlines()[-tail:]
+        expired = result.returncode != 0 and any(
+            token in redacted.lower() for token in ("expired", "403", "offline log")
+        )
+        return {
+            "run_id": run["run_id"], "backend": "sensecore",
+            "backend_job_id": backend["job_name"], "tail": tail,
+            "lines": lines, "expired": expired, "stream_exit_code": result.returncode,
+        }
