@@ -1,4 +1,4 @@
-from experiment_policy import decide_next_action
+from elf_experiments.policy import decide_next_action
 
 
 def test_policy_allows_only_bounded_infrastructure_retry():

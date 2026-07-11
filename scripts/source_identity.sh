@@ -8,7 +8,7 @@ if [[ "$mode" == "--runtime" ]]; then
     # deliberately excludes campaign YAML and prose so scheduling edits do not
     # force a byte-identical image/SIF rebuild.
     digest="$({
-        git ls-files -co --exclude-standard -- .dockerignore docker requirements.txt scripts src \
+        git ls-files -co --exclude-standard -- .dockerignore docker requirements.txt scripts src tools \
           | LC_ALL=C sort \
           | while IFS= read -r path; do
                 [[ -f "$path" ]] || continue

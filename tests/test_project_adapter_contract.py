@@ -9,7 +9,7 @@ import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
-import experimentctl
+from elf_experiments import controller as experimentctl
 from experiment_control.backends.base import BackendRegistry
 from experiment_control.project import (
     AssetProbe,

@@ -10,9 +10,9 @@ import yaml
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
 
-from experiment_campaign import instantiate_campaign_template, resolve_campaign
-from experimentctl import load_campaign, materialize_run, prepare_run
-from research_contract import (
+from elf_experiments.campaign import instantiate_campaign_template, resolve_campaign
+from elf_experiments.controller import load_campaign, materialize_run, prepare_run
+from elf_experiments.research_contract import (
     evaluate_research_block,
     evaluate_research_run,
     validate_research_contract,

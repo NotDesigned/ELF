@@ -257,7 +257,7 @@ fail_fast_for_offline_cache() {
     fi
 
     local asset_output asset_kind asset_identity asset_reason
-    local asset_cmd=(python scripts/experiment_assets.py plan "$CONFIG" --format tsv)
+    local asset_cmd=(python -m elf_experiments.assets plan "$CONFIG" --format tsv)
     for preflight_override in "${preflight_config_overrides[@]}"; do
         asset_cmd+=(--config-override "$preflight_override")
     done
@@ -369,7 +369,7 @@ WANDB_RESUME="${WANDB_RESUME:-allow}"
 export RUN_ID WANDB_RUN_NAME WANDB_RUN_ID WANDB_RESUME
 export USE_WANDB WANDB_PROJECT WANDB_ENTITY GLOBAL_BATCH_SIZE BATCH_SIZE
 export NUM_WORKERS LOG_FREQ USE_COMPILE WARM_START WARM_START_USE_EMA RESUME HF_REPO_ID
-override_output="$(python scripts/experiment_overrides.py --output-dir "$OUTPUT_DIR" --format lines)"
+override_output="$(python -m elf_experiments.overrides --output-dir "$OUTPUT_DIR" --format lines)"
 while IFS= read -r planned_override; do
     [[ -n "$planned_override" ]] && add_override "$planned_override"
 done <<< "$override_output"
@@ -411,7 +411,7 @@ if truthy "${HYDRATE_ONLY:-0}"; then
 fi
 
 manifest_cmd=(
-    python scripts/experiment_manifest.py
+    python -m elf_experiments.manifest
     --project "$PROJECT_NAME"
     --run-id "$RUN_ID"
     --attempt-id "$ATTEMPT_ID"
@@ -458,7 +458,7 @@ record_lifecycle() {
     local state="$1"
     local event="$2"
     shift 2
-    python scripts/experiment_manifest.py record \
+    python -m elf_experiments.manifest record \
         --project "$PROJECT_NAME" \
         --run-id "$RUN_ID" \
         --attempt-id "$ATTEMPT_ID" \

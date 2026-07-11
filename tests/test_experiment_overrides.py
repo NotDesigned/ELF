@@ -1,5 +1,5 @@
-from experiment_overrides import operational_overrides
-from experiment_projects.elf import ElfProjectAdapter
+from elf_experiments.overrides import operational_overrides
+from elf_experiments.projects.elf import ElfProjectAdapter
 
 
 def test_batch_size_has_explicit_precedence_over_global_batch_size():

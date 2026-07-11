@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from experiment_assets import cache_path, plan_assets
+from elf_experiments.assets import cache_path, plan_assets
 from experiment_control.project import AssetRequirement
 
 

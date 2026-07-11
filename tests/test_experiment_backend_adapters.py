@@ -7,14 +7,14 @@ import pytest
 
 from experiment_control.runner import CommandResult, SubprocessRunner
 from experiment_control.backends.wyd import WydSlurmBackend
-from experiment_projects.elf import ElfProjectAdapter
+from elf_experiments.projects.elf import ElfProjectAdapter
 from experiment_control.backends.sensecore import (
     SenseCoreBackend,
     digest_pinned_image,
     scheduler_job_name as sensecore_scheduler_job_name,
 )
 from experiment_control.project import AssetProbe, AssetRequirement
-from experimentctl import (
+from elf_experiments.controller import (
     backend_services,
     materialize_run,
     prepare_run,

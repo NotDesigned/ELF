@@ -15,12 +15,9 @@ from typing import Any, Iterable
 import yaml
 
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
-SCRIPT_DIR = Path(__file__).resolve().parent
-if str(SCRIPT_DIR) not in sys.path:
-    sys.path.insert(0, str(SCRIPT_DIR))
+REPO_ROOT = Path(__file__).resolve().parents[2]
 
-from experiment_manifest import (  # noqa: E402
+from .manifest import (  # noqa: E402
     IDENTITY_RE,
     SECRET_KEY_RE,
     URL_USERINFO_RE,
@@ -31,17 +28,17 @@ from experiment_manifest import (  # noqa: E402
     sanitize_command,
     utc_now,
 )
-from experiment_campaign import load_and_resolve_campaign  # noqa: E402
-from experiment_policy import decide_next_action  # noqa: E402
-from experiment_run_manifest import build_run_manifest  # noqa: E402
-from research_contract import (  # noqa: E402
+from .campaign import load_and_resolve_campaign  # noqa: E402
+from .policy import decide_next_action  # noqa: E402
+from .run_manifest import build_run_manifest  # noqa: E402
+from .research_contract import (  # noqa: E402
     evaluate_research_block,
     evaluate_research_run,
     validate_research_contract,
 )
 from experiment_control.backends import build_registry  # noqa: E402
 from experiment_control.backends.services import BackendServices  # noqa: E402
-from experiment_projects import build_project_registry  # noqa: E402
+from .projects import build_project_registry  # noqa: E402
 from experiment_control.runner import (  # noqa: E402
     CommandResult,
     CommandRunner,

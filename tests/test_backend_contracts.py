@@ -1,7 +1,7 @@
 from experiment_control.backends.base import BackendRegistry
 from experiment_control.project import ProjectRegistry
 from experiment_control.backends.wyd import checkpoint_probe_command, parse_accounting, scheduler_job_name
-import experimentctl
+from elf_experiments import controller as experimentctl
 
 
 def test_slurm_accounting_contract_normalizes_exit_code():

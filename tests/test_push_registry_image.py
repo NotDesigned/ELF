@@ -7,7 +7,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SCRIPT = ROOT / "scripts" / "push_registry_image.sh"
+SCRIPT = ROOT / "tools" / "push_registry_image.sh"
 IMAGE = "registry.example.test/team/elf:runtime-source123"
 DIGEST = "sha256:" + "a" * 64
 

@@ -9,9 +9,8 @@ from pathlib import Path
 import pytest
 import yaml
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
-import experimentctl
-from experimentctl import (
+from elf_experiments import controller as experimentctl
+from elf_experiments.controller import (
     annotate_collection,
     ensure_attempt_not_submitted,
     frozen_source_identity,
@@ -25,9 +24,9 @@ from experimentctl import (
     identity_report,
 )
 from experiment_control.identity import IdentityReport
-from experiment_manifest import prepare as runtime_prepare
+from elf_experiments.manifest import prepare as runtime_prepare
 from experiment_control.backends.wyd import render_job
-from experiment_projects.elf import parse_training_metric_line
+from elf_experiments.projects.elf import parse_training_metric_line
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -39,7 +38,7 @@ def test_preflight_cli_returns_nonzero_when_a_required_tool_is_unavailable():
     env["EXPERIMENTCTL_SSH_BIN"] = "/bin/false"
     result = subprocess.run(
         [
-            sys.executable, "scripts/experimentctl.py",
+            sys.executable, "tools/experimentctl.py",
             "experiments/campaigns/backend_smoke_slurm_20260711.yml",
             "preflight", "--run", "elf-smoke-slurm-l40s-0711-1642",
         ],
@@ -128,7 +127,7 @@ def test_submit_dry_run_reports_local_artifacts_and_next_gates(tmp_path):
     path.write_text(yaml.safe_dump(campaign), encoding="utf-8")
     result = subprocess.run(
         [
-            sys.executable, "scripts/experimentctl.py", str(path), "submit",
+            sys.executable, "tools/experimentctl.py", str(path), "submit",
             "--run", "smoke-h100", "--attempt-id", "attempt-001", "--dry-run",
         ],
         cwd=REPO_ROOT, text=True, capture_output=True, check=False,

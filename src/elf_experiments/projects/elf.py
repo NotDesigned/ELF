@@ -7,14 +7,14 @@ import sys
 from pathlib import Path
 from typing import Any, Mapping
 
-from experiment_assets import cache_path, plan_assets
-from experiment_overrides import operational_overrides
-from summarize_experiments import summarize_run
+from ..assets import cache_path, plan_assets
+from ..overrides import operational_overrides
+from ..summary import summarize_run
 
 from experiment_control.project import AssetProbe, AssetRequirement, SourceBundle
 
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = Path(__file__).resolve().parents[3]
 SRC_ROOT = REPO_ROOT / "src"
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))

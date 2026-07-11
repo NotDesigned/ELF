@@ -4,7 +4,7 @@ set -euo pipefail
 
 usage() {
   cat <<'EOF'
-Usage: scripts/push_registry_image.sh [--dry-run] IMAGE:IMMUTABLE_TAG
+Usage: tools/push_registry_image.sh [--dry-run] IMAGE:IMMUTABLE_TAG
 
 Try a bounded Docker push first. Authentication failures stop immediately;
 transport failures may fall back to a native crane or skopeo using a temporary

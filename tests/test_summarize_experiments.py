@@ -6,7 +6,7 @@ import pytest
 import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
-from summarize_experiments import (
+from elf_experiments.summary import (
     collect_eval_metrics,
     discover_run_dirs,
     read_jsonl,

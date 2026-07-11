@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 import yaml
-from experiment_run_manifest import build_run_manifest, comparable_manifest
+from .run_manifest import build_run_manifest, comparable_manifest
 
 IDENTITY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 SECRET_KEY_RE = re.compile(
@@ -770,7 +770,7 @@ def prepare(args: argparse.Namespace) -> dict[str, Any]:
             research_contract = existing["research_contract"]
             research_role = existing.get("research_role")
 
-    from experiment_projects import build_project_registry
+    from .projects import build_project_registry
 
     project = build_project_registry().get(args.project)
     config = project.resolve_config(args.config, args.config_override)

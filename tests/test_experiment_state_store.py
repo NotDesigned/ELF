@@ -5,12 +5,11 @@ from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
-from experiment_manifest import ExperimentStateStore, RunState
+from elf_experiments.manifest import ExperimentStateStore, RunState
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-SCRIPT = REPO_ROOT / "scripts" / "experiment_manifest.py"
+SCRIPT = REPO_ROOT / "tools" / "experiment_manifest.py"
 CONFIG = REPO_ROOT / "src/configs/training_configs/ablations/owt_elfb/tier0_0_pure_elf_len256.yml"
 
 

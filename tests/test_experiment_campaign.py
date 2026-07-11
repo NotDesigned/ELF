@@ -7,13 +7,13 @@ import pytest
 import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
-from experiment_campaign import (
+from elf_experiments.campaign import (
     deep_merge,
     instantiate_campaign_template,
     load_and_resolve_campaign,
     resolve_campaign,
 )
-from experimentctl import materialize_run, validate_run
+from elf_experiments.controller import materialize_run, validate_run
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -162,7 +162,7 @@ def test_instantiate_campaign_cli_refuses_overwrite(tmp_path):
     output = tmp_path / "fresh.yml"
     command = [
         sys.executable,
-        str(REPO_ROOT / "scripts/instantiate_campaign.py"),
+        str(REPO_ROOT / "tools/instantiate_campaign.py"),
         str(REPO_ROOT / "experiments/templates/backend_smoke_slurm.yml"),
         "--instance", "fresh-a", "--output", str(output),
     ]
@@ -179,7 +179,7 @@ def test_instantiate_campaign_cli_can_isolate_controller_state(tmp_path):
     result = subprocess.run(
         [
             sys.executable,
-            str(REPO_ROOT / "scripts/instantiate_campaign.py"),
+            str(REPO_ROOT / "tools/instantiate_campaign.py"),
             str(REPO_ROOT / "experiments/templates/backend_smoke_slurm.yml"),
             "--instance", "isolated-a", "--output", str(output),
             "--local-root", str(local_root),

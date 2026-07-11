@@ -7,11 +7,11 @@ PPL model simultaneously). Reads the `{"id": ..., "generated": ...}` JSONL that
 `test_generation_uncond` writes to `<output_dir>/<run_name>/all_generated_*.jsonl`.
 
 Example:
-    python scripts/eval_ppl.py \
+    python tools/eval_ppl.py \
         --input outputs/elf_l-owt/sde-steps64-cfg1-sccfg3-ts_logit_normal-gamma1.0-uncond/all_generated_3_57051.jsonl
 
     # Custom PPL model / batch size
-    python scripts/eval_ppl.py --input <path>.jsonl --model gpt2-large --batch_size 16
+    python tools/eval_ppl.py --input <path>.jsonl --model gpt2-large --batch_size 16
 """
 
 import argparse

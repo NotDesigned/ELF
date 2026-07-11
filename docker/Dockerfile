@@ -25,8 +25,10 @@ RUN python -m pip install --break-system-packages --upgrade pip setuptools wheel
 
 COPY src/ src/
 COPY scripts/ scripts/
+COPY tools/ tools/
 COPY tests/ tests/
 COPY docs/ docs/
+COPY experiments/ experiments/
 COPY README.md ./
 
 ARG PROJECT_NAME=elf
@@ -52,7 +54,7 @@ ENV PROJECT_NAME=${PROJECT_NAME} \
     TRANSFORMERS_OFFLINE=1 \
     HF_DATASETS_OFFLINE=1
 
-RUN chmod +x scripts/launch.sh scripts/cloud_train.sh scripts/experiment_manifest.py scripts/source_identity.sh \
+RUN chmod +x scripts/launch.sh scripts/cloud_train.sh scripts/source_identity.sh tools/push_registry_image.sh \
     && mkdir -p /data/.cache/huggingface /data/${PROJECT_NAME}/wandb \
         /data/${PROJECT_NAME}/wandb_cache /data/${PROJECT_NAME}/outputs \
         /data/${PROJECT_NAME}/saved_models /data/${PROJECT_NAME}/checkpoints
