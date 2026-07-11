@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import pytest
+import torch
 import yaml
 
 from configs.config import (
@@ -11,6 +12,7 @@ from configs.config import (
     resolve_batch_sizes,
     validate_config,
 )
+from utils.sampling_utils import plan_time_from_token_time
 
 
 def write_yaml(path: Path, payload: dict):
@@ -45,6 +47,19 @@ def test_overrides_accept_null_and_reject_bad_bool():
 
     with pytest.raises(ValueError, match="Invalid boolean override"):
         apply_config_overrides(cfg, ["use_wandb=maybe"])
+
+
+def test_plan_time_scheduler_noise_power_leads_and_validates():
+    cfg = Config()
+    cfg.plan_time_schedule = "noise_power"
+    cfg.plan_time_warp_gamma = 2.0
+
+    t = torch.tensor([0.0, 0.5, 1.0])
+    assert torch.allclose(plan_time_from_token_time(t, cfg), torch.tensor([0.0, 0.75, 1.0]))
+
+    cfg.plan_time_warp_gamma = 0.5
+    with pytest.raises(ValueError, match="plan_time_warp_gamma"):
+        validate_config(cfg)
 
 
 def test_encoder_checkpoint_is_not_silently_ignored():

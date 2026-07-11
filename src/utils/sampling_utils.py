@@ -72,6 +72,26 @@ def get_sampling_steps(
     raise ValueError(f"Unknown time_schedule: {time_schedule}")
 
 
+def plan_time_from_token_time(token_t: torch.Tensor, config) -> torch.Tensor:
+    """Map token diffusion time to sentence-plan diffusion time.
+
+    `aligned` keeps the original behavior: plan_t == token_t.
+    `noise_power` makes the plan lead the token field by shrinking plan noise as
+    a power of token noise: plan_t = 1 - (1 - token_t) ** gamma.
+    """
+    schedule = str(getattr(config, "plan_time_schedule", "aligned")).lower()
+    if schedule in {"aligned", "identity"}:
+        return token_t
+
+    if schedule == "noise_power":
+        gamma = float(getattr(config, "plan_time_warp_gamma", 1.0))
+        token_t = token_t.clamp(0.0, 1.0)
+        plan_noise = (1.0 - token_t).clamp(0.0, 1.0).pow(gamma)
+        return 1.0 - plan_noise
+
+    raise ValueError(f"Unknown plan_time_schedule: {schedule}")
+
+
 # ============================================
 # CFG Scale Sampling (how to sample cfg scale)
 # ============================================
@@ -134,21 +154,22 @@ def plan_out_to_v_x(plan_pred, plan_z, t, t_eps=5e-2):
     return plan_v, plan_x
 
 
-def _split_model_out(model_out, z, t_batch, t_eps, plan_z=None):
+def _split_model_out(model_out, z, t_batch, t_eps, plan_z=None, plan_t=None):
     field_out = model_out[0] if isinstance(model_out, tuple) else model_out
     v, x = net_out_to_v_x(field_out, z, t_batch, t_eps)
     if plan_z is None:
         return v, x, None, None
     if not isinstance(model_out, tuple) or len(model_out) < 3 or model_out[2] is None:
         raise ValueError("model must return a plan prediction when plan_z is provided")
-    plan_v, plan_x = plan_out_to_v_x(model_out[2], plan_z, t_batch, t_eps)
+    plan_t_batch = t_batch if plan_t is None else plan_t
+    plan_v, plan_x = plan_out_to_v_x(model_out[2], plan_z, plan_t_batch, t_eps)
     return v, x, plan_v, plan_x
 
 
 def _forward_sample_self_cond(
     model, z, t_batch, x_pred_prev, config,
     self_cond_cfg_scale, cond_seq, cond_seq_mask,
-    plan_z=None,
+    plan_z=None, plan_t=None,
 ):
     """Forward pass with self-conditioning."""
     t_eps = config.t_eps
@@ -164,7 +185,11 @@ def _forward_sample_self_cond(
     def _model_forward(z_input, self_cond_scale=None):
         plan_kwargs = {}
         if plan_z is not None:
-            plan_kwargs = {"plan_z": plan_z, "plan_t": t_batch, "return_plan": True}
+            plan_kwargs = {
+                "plan_z": plan_z,
+                "plan_t": t_batch if plan_t is None else plan_t,
+                "return_plan": True,
+            }
         return model(
             z_input, t_batch, deterministic=True,
             self_cond_cfg_scale=self_cond_scale,
@@ -179,14 +204,16 @@ def _forward_sample_self_cond(
                                            dtype=z.dtype, device=z.device)
         net_out_cond = _model_forward(z_input_cond, self_cond_scale_batch)
         v_cond, x_cond, plan_v_cond, plan_x_cond = _split_model_out(
-            net_out_cond, z, t_batch, t_eps, plan_z=plan_z,
+            net_out_cond, z, t_batch, t_eps, plan_z=plan_z, plan_t=plan_t,
         )
         return _restore_with_plan(v_cond, x_cond, plan_v_cond, plan_x_cond)
 
     # No self-conditioning
     if self_cond_prob == 0:
         net_out = _model_forward(z)
-        v, x, plan_v, plan_x = _split_model_out(net_out, z, t_batch, t_eps, plan_z=plan_z)
+        v, x, plan_v, plan_x = _split_model_out(
+            net_out, z, t_batch, t_eps, plan_z=plan_z, plan_t=plan_t,
+        )
         return _restore_with_plan(v, x, plan_v, plan_x)
 
     # Combined unconditional and conditional forward pass
@@ -196,7 +223,7 @@ def _forward_sample_self_cond(
         z_input_uncond = torch.cat([z, z_uncond], dim=-1)
         net_out_uncond = _model_forward(z_input_uncond)
         v_uncond, x_uncond, plan_v_uncond, plan_x_uncond = _split_model_out(
-            net_out_uncond, z, t_batch, t_eps, plan_z=plan_z,
+            net_out_uncond, z, t_batch, t_eps, plan_z=plan_z, plan_t=plan_t,
         )
         v_uncond, x_uncond = _restore(v_uncond, x_uncond)
         if self_cond_cfg_scale == 0.0 or x_pred_prev is None:
@@ -205,7 +232,7 @@ def _forward_sample_self_cond(
     z_input_cond = torch.cat([z, x_pred_prev], dim=-1)
     net_out_cond = _model_forward(z_input_cond)
     v_cond, x_cond, plan_v_cond, plan_x_cond = _split_model_out(
-        net_out_cond, z, t_batch, t_eps, plan_z=plan_z,
+        net_out_cond, z, t_batch, t_eps, plan_z=plan_z, plan_t=plan_t,
     )
     v_cond, x_cond = _restore(v_cond, x_cond)
     if self_cond_cfg_scale == 1:
@@ -225,14 +252,14 @@ def _forward_sample_self_cond(
 def _forward_sample(
     model, z, t_batch, x_pred_prev, config,
     cfg_scale, self_cond_cfg_scale, cond_seq, cond_seq_mask,
-    plan_z=None,
+    plan_z=None, plan_t=None,
 ):
     """Forward pass with optional self-conditioning and CFG."""
     v_cond, x_cond, plan_v_cond, plan_x_cond = _forward_sample_self_cond(
         model, z, t_batch, x_pred_prev, config,
         self_cond_cfg_scale=self_cond_cfg_scale,
         cond_seq=cond_seq, cond_seq_mask=cond_seq_mask,
-        plan_z=plan_z,
+        plan_z=plan_z, plan_t=plan_t,
     )
     if cfg_scale == 1.0:
         return v_cond, x_cond, plan_v_cond, plan_x_cond
@@ -247,7 +274,7 @@ def _forward_sample(
         model, z_uncond, t_batch, x_pred_prev_uncond, config,
         self_cond_cfg_scale=self_cond_cfg_scale,
         cond_seq=torch.zeros_like(cond_seq), cond_seq_mask=cond_seq_mask,
-        plan_z=plan_z,
+        plan_z=plan_z, plan_t=plan_t,
     )
 
     v_out = v_uncond + cfg_scale * (v_cond - v_uncond)
@@ -264,7 +291,8 @@ def _forward_sample(
 def _ode_step(
     model, z, t, t_next, x_pred_prev,
     config, cfg_scale, self_cond_cfg_scale,
-    cond_seq, cond_seq_mask, plan_z=None,
+    cond_seq, cond_seq_mask, plan_z=None, plan_t=None, plan_t_next=None,
+    freeze_plan_z: bool = False,
 ):
     """Single ODE (Euler) step for sampling."""
     t_batch = torch.full((z.shape[0],), float(t), dtype=z.dtype, device=z.device)
@@ -272,12 +300,18 @@ def _ode_step(
         model=model, z=z, t_batch=t_batch, x_pred_prev=x_pred_prev,
         config=config, cfg_scale=cfg_scale, self_cond_cfg_scale=self_cond_cfg_scale,
         cond_seq=cond_seq, cond_seq_mask=cond_seq_mask,
-        plan_z=plan_z,
+        plan_z=plan_z, plan_t=plan_t,
     )
     z_next = z + (t_next - t) * v_pred
     if plan_z is None:
         return z_next, x_pred
-    plan_z_next = plan_z + (t_next - t) * plan_v_pred
+    if freeze_plan_z:
+        plan_z_next = plan_z
+    elif plan_t is not None and plan_t_next is not None:
+        plan_dt = (plan_t_next - plan_t).reshape(-1, 1)
+        plan_z_next = plan_z + plan_dt * plan_v_pred
+    else:
+        plan_z_next = plan_z + (t_next - t) * plan_v_pred
     return z_next, x_pred, plan_z_next, plan_x_pred
 
 
@@ -285,6 +319,7 @@ def _sde_step(
     model, z, t, t_next, x_pred_prev,
     config, cfg_scale, self_cond_cfg_scale,
     cond_seq, cond_seq_mask, gamma, generator, plan_z=None,
+    plan_t=None, plan_t_next=None, freeze_plan_z: bool = False,
 ):
     """Per-step SDE-style sampler with hybrid (t-and-step) noise scaling.
 
@@ -301,22 +336,40 @@ def _sde_step(
         eps = torch.randn(z.shape, generator=generator, dtype=z.dtype) * config.denoiser_noise_scale
     z_back = restore_cond(alpha * z + (1.0 - alpha) * eps, cond_seq, cond_seq_mask)
     plan_z_back = None
+    plan_t_back = None
     if plan_z is not None:
-        if z.is_cuda:
-            plan_eps = torch.randn(plan_z.shape, dtype=plan_z.dtype, device=plan_z.device)
+        if freeze_plan_z:
+            plan_z_back = plan_z
+            plan_t_back = plan_t
         else:
-            plan_eps = torch.randn(plan_z.shape, generator=generator, dtype=plan_z.dtype, device=plan_z.device)
-        plan_eps = plan_eps * float(getattr(config, "plan_noise_scale", 1.0))
-        plan_z_back = alpha * plan_z + (1.0 - alpha) * plan_eps
+            if z.is_cuda:
+                plan_eps = torch.randn(plan_z.shape, dtype=plan_z.dtype, device=plan_z.device)
+            else:
+                plan_eps = torch.randn(plan_z.shape, generator=generator, dtype=plan_z.dtype, device=plan_z.device)
+            plan_eps = plan_eps * float(getattr(config, "plan_noise_scale", 1.0))
+            t_back_batch = torch.full((z.shape[0],), t_back, dtype=z.dtype, device=z.device)
+            plan_t_back = plan_time_from_token_time(t_back_batch, config)
+            if plan_t is not None:
+                denom = torch.clamp(plan_t.reshape(-1, 1), min=1e-6)
+                plan_alpha = torch.clamp(plan_t_back.reshape(-1, 1) / denom, min=0.0, max=1.0)
+            else:
+                plan_alpha = alpha
+            plan_z_back = plan_alpha * plan_z + (1.0 - plan_alpha) * plan_eps
     t_batch = torch.full((z.shape[0],), t_back, dtype=z.dtype, device=z.device)
     v_pred, x_pred, plan_v_pred, plan_x_pred = _forward_sample(
         model=model, z=z_back, t_batch=t_batch, x_pred_prev=x_pred_prev,
         config=config, cfg_scale=cfg_scale, self_cond_cfg_scale=self_cond_cfg_scale,
         cond_seq=cond_seq, cond_seq_mask=cond_seq_mask,
-        plan_z=plan_z_back,
+        plan_z=plan_z_back, plan_t=plan_t_back if plan_t_back is not None else plan_t,
     )
     z_next = z_back + (t_next - t_back) * v_pred
     if plan_z is None:
         return z_next, x_pred
-    plan_z_next = plan_z_back + (t_next - t_back) * plan_v_pred
+    if freeze_plan_z:
+        plan_z_next = plan_z
+    elif plan_t_back is not None and plan_t_next is not None:
+        plan_dt = (plan_t_next - plan_t_back).reshape(-1, 1)
+        plan_z_next = plan_z_back + plan_dt * plan_v_pred
+    else:
+        plan_z_next = plan_z_back + (t_next - t_back) * plan_v_pred
     return z_next, x_pred, plan_z_next, plan_x_pred

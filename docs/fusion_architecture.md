@@ -199,19 +199,24 @@ Implemented gradient topology, sentence_encoder_grad:
 
 Sampling (joint reverse, ODE/SDE):
   z_x ~ N·denoiser_noise_scale, z_s ~ N·plan_noise_scale
-  step t → t_next:  x̂0, ŝ = ELF([prefix | mode | plan(z_s,t) | proj(z_x)])
+  plan scheduler: t_s = f(t)
+                  aligned     : f(t)=t
+                  noise_power : f(t)=1-(1-t)^gamma, gamma>=1
+  step t → t_next:  x̂0, ŝ = ELF([prefix | mode | plan(z_s,t_s) | proj(z_x)])
                     v̂_x = (x̂0 - z_x)/max(1-t,t_eps)
-                    v̂_s = (ŝ - z_s)/max(1-t,t_eps)
-                    z_x += (t_next - t)·v̂_x ; z_s += (t_next - t)·v̂_s
+                    v̂_s = (ŝ - z_s)/max(1-t_s,t_eps)
+                    z_x += (t_next - t)·v̂_x
+                    z_s += (f(t_next) - f(t))·v̂_s
                     restore clean cond on z_x
   tokens = argmax unembed( ELF(... decoder mode, final z_x, final z_s ...)_field )
 ```
 
 Notes:
 
-- Plan and field default to a **shared time `t`** (one joint denoising
-  trajectory). An independent `t_s` for the plan is a planned ablation, not
-  implemented in the current config/code.
+- Plan and field default to a **shared time `t`** (`plan_time_schedule=aligned`).
+  `plan_time_schedule=noise_power` makes the plan lead the token field while
+  preserving the same endpoints. With `plan_time_warp_gamma=2`, token `t=0.5`
+  maps to plan `t_s=0.75` (token noise `0.5`, plan noise `0.25`).
 - At inference the sentence latent is **sampled** (`z_s` denoised from noise
   jointly with the field). The encoder pass only provides the training target
   `s0`; it is not used at inference.

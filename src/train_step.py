@@ -19,7 +19,7 @@ from utils.train_utils import TrainState, ema_update
 from utils.encoder_utils import encode_text
 from utils.sampling_utils import (
     sample_cfg_scale, add_noise, sample_timesteps,
-    net_out_to_v_x, restore_cond,
+    net_out_to_v_x, restore_cond, plan_time_from_token_time,
 )
 
 
@@ -158,6 +158,8 @@ def train_step(
 
     plan_z_denoiser = None
     plan_z_mixed = None
+    plan_t_denoiser = None
+    plan_t_mixed = None
     plan_target = None
     plan_loss = x0.new_tensor(0.0)
     plan_aux_loss = x0.new_tensor(0.0)
@@ -212,16 +214,18 @@ def train_step(
         plan_emb_norm = s0_detached_for_metrics.norm(dim=-1).mean()
 
         plan_noise = torch.randn_like(s0) * float(getattr(config, "plan_noise_scale", 1.0))
-        plan_z_denoiser = t.reshape(-1, 1) * s0 + (1.0 - t.reshape(-1, 1)) * plan_noise
+        plan_t_denoiser = plan_time_from_token_time(t, config)
+        plan_t_expanded = plan_t_denoiser.reshape(-1, 1)
+        plan_z_denoiser = plan_t_expanded * s0 + (1.0 - plan_t_expanded) * plan_noise
         plan_z_mixed = decoder_mask_B1 * s0 + (1.0 - decoder_mask_B1) * plan_z_denoiser
 
-    def compute_shared_uncond(z, t_input, x_tokens, plan_z_input=None):
+    def compute_shared_uncond(z, t_input, x_tokens, plan_z_input=None, plan_t_input=None):
         """Unconditional forward shared by self-cond-init and sc-cfg-uncond."""
         z_uncond = restore_cond(torch.zeros_like(z), x_tokens, cond_seq_mask)
         z_input_uncond = torch.cat([z, z_uncond], dim=-1)
         plan_kwargs = {}
         if use_sentence_plan:
-            plan_kwargs = {"plan_z": plan_z_input, "plan_t": t_input}
+            plan_kwargs = {"plan_z": plan_z_input, "plan_t": t_input if plan_t_input is None else plan_t_input}
         with torch.no_grad(), torch.amp.autocast('cuda', dtype=torch.bfloat16, enabled=use_bf16):
             net_out_uncond = model(
                 z_input_uncond, t_input,
@@ -230,10 +234,13 @@ def train_step(
             )
         return net_out_uncond
 
-    def get_sc_cond_and_uncond(z, t_input, cond_mask, x_tokens, shared_net_out_uncond, plan_z_input=None):
+    def get_sc_cond_and_uncond(
+        z, t_input, cond_mask, x_tokens, shared_net_out_uncond,
+        plan_z_input=None, plan_t_input=None,
+    ):
         plan_kwargs = {}
         if use_sentence_plan:
-            plan_kwargs = {"plan_z": plan_z_input, "plan_t": t_input}
+            plan_kwargs = {"plan_z": plan_z_input, "plan_t": t_input if plan_t_input is None else plan_t_input}
         if config.self_cond_prob == 0:
             with torch.no_grad(), torch.amp.autocast('cuda', dtype=torch.bfloat16, enabled=use_bf16):
                 net_out_uncond = model(
@@ -257,25 +264,31 @@ def train_step(
         v_cond, _ = net_out_to_v_x(net_out_cond, z, t_input, t_eps)
         return v_cond, v_uncond
 
-    def get_sc_guided_v(z, t_input, base_v_target, x_tokens, shared_net_out_uncond, plan_z_input=None):
+    def get_sc_guided_v(
+        z, t_input, base_v_target, x_tokens, shared_net_out_uncond,
+        plan_z_input=None, plan_t_input=None,
+    ):
         """v target with self-conditioning guidance."""
         v_cond, v_uncond = get_sc_cond_and_uncond(
             z, t_input, cond_mask=cond_seq_mask, x_tokens=x_tokens,
             shared_net_out_uncond=shared_net_out_uncond,
-            plan_z_input=plan_z_input,
+            plan_z_input=plan_z_input, plan_t_input=plan_t_input,
         )
         sc_w = self_cond_cfg_scale.reshape(batch_size, 1, 1)
         sc_guidance = (1 - 1 / sc_w) * (v_cond - v_uncond)
         sc_guidance = torch.where(use_self_cond_mask.bool(), sc_guidance, torch.zeros_like(sc_guidance))
         return (base_v_target + sc_guidance).detach()
 
-    def get_v_target(z, t_input, base_v_target, x_tokens, shared_net_out_uncond, plan_z_input=None):
+    def get_v_target(
+        z, t_input, base_v_target, x_tokens, shared_net_out_uncond,
+        plan_z_input=None, plan_t_input=None,
+    ):
         """Compute final v target with self-conditioning guidance."""
         if config.num_self_cond_cfg_tokens > 0 and config.self_cond_prob > 0:
             return get_sc_guided_v(
                 z, t_input, base_v_target=base_v_target, x_tokens=x_tokens,
                 shared_net_out_uncond=shared_net_out_uncond,
-                plan_z_input=plan_z_input,
+                plan_z_input=plan_z_input, plan_t_input=plan_t_input,
             )
         return base_v_target
 
@@ -288,12 +301,15 @@ def train_step(
     decoder_t = torch.ones_like(t)
     t_mixed = decoder_step_active * decoder_t + (1.0 - decoder_step_active) * t  # (B,)
     z_mixed = decoder_mask_B11 * decoder_z + (1.0 - decoder_mask_B11) * denoiser_z
+    if use_sentence_plan:
+        plan_t_mixed = decoder_step_active * decoder_t + (1.0 - decoder_step_active) * plan_t_denoiser
 
     # Self-cond shared forward (run on denoiser_z / t — only relevant for
     # denoiser-mode rows; decoder-mode rows zero out the self-cond half below).
     if self_cond_prob > 0 or config.num_self_cond_cfg_tokens > 0:
         shared_net_out_uncond = compute_shared_uncond(
-            denoiser_z, denoiser_t, x0, plan_z_input=plan_z_denoiser,
+            denoiser_z, denoiser_t, x0,
+            plan_z_input=plan_z_denoiser, plan_t_input=plan_t_denoiser,
         )
     else:
         shared_net_out_uncond = None
@@ -314,7 +330,7 @@ def train_step(
     if use_sentence_plan:
         plan_kwargs = {
             "plan_z": plan_z_mixed,
-            "plan_t": t_mixed,
+            "plan_t": plan_t_mixed,
             "return_plan": True,
         }
     with torch.amp.autocast('cuda', dtype=torch.bfloat16, enabled=use_bf16):
@@ -353,9 +369,11 @@ def train_step(
         for _ in range(plan_aux_passes):
             if plan_aux_token_context == "denoiser_z":
                 t_aux = denoiser_t
+                plan_t_aux = plan_t_denoiser
                 token_z_aux = denoiser_z.detach()
             elif plan_aux_token_context == "mixed_z":
                 t_aux = t_mixed
+                plan_t_aux = plan_t_mixed
                 token_z_aux = z_mixed.detach()
             else:
                 t_aux = sample_timesteps(
@@ -364,6 +382,7 @@ def train_step(
                     time_schedule=config.time_schedule,
                     device=device, dtype=dtype,
                 )
+                plan_t_aux = plan_time_from_token_time(t_aux, config)
                 if plan_aux_token_context == "clean_x0":
                     token_z_aux = x0.detach()
                 else:
@@ -377,9 +396,10 @@ def train_step(
                         )
 
             plan_noise_aux = torch.randn_like(s0_detached) * float(getattr(config, "plan_noise_scale", 1.0))
+            plan_t_aux_expanded = plan_t_aux.reshape(-1, 1)
             plan_z_aux = (
-                t_aux.reshape(-1, 1) * s0_detached
-                + (1.0 - t_aux.reshape(-1, 1)) * plan_noise_aux
+                plan_t_aux_expanded * s0_detached
+                + (1.0 - plan_t_aux_expanded) * plan_noise_aux
             )
             with torch.amp.autocast('cuda', dtype=torch.bfloat16, enabled=use_bf16):
                 _, _, plan_pred_aux = model(
@@ -387,7 +407,7 @@ def train_step(
                     deterministic=False,
                     self_cond_cfg_scale=self_cond_cfg_scale,
                     plan_z=plan_z_aux,
-                    plan_t=t_aux,
+                    plan_t=plan_t_aux,
                     return_plan=True,
                 )
             plan_aux_loss = (
@@ -407,7 +427,7 @@ def train_step(
     v_final_target = get_v_target(
         denoiser_z, denoiser_t, base_v_target=v_target, x_tokens=x0,
         shared_net_out_uncond=shared_net_out_uncond,
-        plan_z_input=plan_z_denoiser,
+        plan_z_input=plan_z_denoiser, plan_t_input=plan_t_denoiser,
     )
     l2_per_token = ((v_pred - v_final_target) ** 2).mean(dim=-1)
 

@@ -141,6 +141,13 @@ def validate_config(config) -> Config:
             "plan_aux_token_context must be one of ['clean_x0', 'denoiser_z', 'mixed_z', 'resampled_z'], "
             f"got {config.plan_aux_token_context!r}"
         )
+    if config.plan_time_schedule not in {"aligned", "noise_power"}:
+        raise ValueError(
+            "plan_time_schedule must be 'aligned' or 'noise_power', "
+            f"got {config.plan_time_schedule!r}"
+        )
+    if float(config.plan_time_warp_gamma) < 1.0:
+        raise ValueError(f"plan_time_warp_gamma must be >= 1.0, got {config.plan_time_warp_gamma!r}")
 
     for field_name in ("decoder_prob", "label_drop_prob", "self_cond_prob"):
         _validate_probability(getattr(config, field_name), field_name)
@@ -279,6 +286,8 @@ class Config:
     plan_learned_encoder_norm: bool = True
     plan_loss_weight: float = 1.0
     plan_noise_scale: float = 1.0
+    plan_time_schedule: str = "aligned"  # "aligned" or "noise_power"; maps token t -> plan t.
+    plan_time_warp_gamma: float = 1.0  # For noise_power: plan_t = 1 - (1 - token_t) ** gamma.
     plan_aux_passes: int = 1  # Extra detached plan-denoiser passes for learned+none topology.
     plan_aux_token_context: str = "denoiser_z"  # "denoiser_z", "resampled_z", "mixed_z", or "clean_x0"
     sentence_encoder_grad: str = "none"  # "none", "detached_target", or "full" 

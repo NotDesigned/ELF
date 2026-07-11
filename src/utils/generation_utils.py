@@ -4,7 +4,7 @@ import torch
 import torch.nn as nn
 
 from configs.config import Config, SamplingConfig
-from utils.sampling_utils import restore_cond, _ode_step, _sde_step
+from utils.sampling_utils import restore_cond, _ode_step, _sde_step, plan_time_from_token_time
 
 
 # ============================================
@@ -64,6 +64,8 @@ def _generate_samples_single_batch(
     sampling_config: SamplingConfig,
     cfg_scale: float,
     self_cond_cfg_scale: float,
+    initial_plan_z: Optional[torch.Tensor] = None,
+    fixed_plan_z: bool = False,
 ) -> torch.Tensor:
     """Generate samples for a single batch (PyTorch Euler / SDE rollout)."""
     method = sampling_config.sampling_method
@@ -83,30 +85,54 @@ def _generate_samples_single_batch(
     plan_z = None
     if bool(getattr(config, "use_sentence_plan", False)):
         plan_shape = (batch_size, int(getattr(config, "sentence_emb_dim", 768)))
-        if z.is_cuda:
-            plan_z = torch.randn(plan_shape, dtype=z.dtype, device=z.device)
+        if initial_plan_z is not None:
+            if tuple(initial_plan_z.shape) != plan_shape:
+                raise ValueError(f"initial_plan_z shape {tuple(initial_plan_z.shape)} does not match {plan_shape}")
+            plan_z = initial_plan_z.to(device=z.device, dtype=z.dtype)
         else:
-            plan_z = torch.randn(plan_shape, generator=generator, dtype=z.dtype, device=z.device)
-        plan_z = plan_z * float(getattr(config, "plan_noise_scale", 1.0))
+            if z.is_cuda:
+                plan_z = torch.randn(plan_shape, dtype=z.dtype, device=z.device)
+            else:
+                plan_z = torch.randn(plan_shape, generator=generator, dtype=z.dtype, device=z.device)
+            plan_z = plan_z * float(getattr(config, "plan_noise_scale", 1.0))
+    elif initial_plan_z is not None:
+        raise ValueError("initial_plan_z was provided but use_sentence_plan=False")
 
     n = t_steps.shape[0]
     sde_gamma = getattr(sampling_config, "sde_gamma", 0.0)
+    fixed_plan_t = (
+        torch.ones((batch_size,), dtype=z.dtype, device=z.device)
+        if fixed_plan_z and plan_z is not None else None
+    )
+
+    def _plan_time(value: float) -> Optional[torch.Tensor]:
+        if plan_z is None:
+            return None
+        if fixed_plan_t is not None:
+            return fixed_plan_t
+        token_t = torch.full((batch_size,), float(value), dtype=z.dtype, device=z.device)
+        return plan_time_from_token_time(token_t, config)
 
     use_bf16 = bool(getattr(config, "use_bf16", True)) and z.is_cuda
     with torch.amp.autocast('cuda', dtype=torch.bfloat16, enabled=use_bf16):
         for i in range(n - 2):
             t = t_steps[i].item()
             t_next = t_steps[i + 1].item()
+            plan_t = _plan_time(t)
+            plan_t_next = _plan_time(t_next)
             if method == "sde":
                 step_out = _sde_step(
                     z=z, t=t, t_next=t_next, x_pred_prev=x_pred,
                     gamma=sde_gamma, generator=generator, **step_kwargs,
-                    plan_z=plan_z,
+                    plan_z=plan_z, plan_t=plan_t, plan_t_next=plan_t_next,
+                    freeze_plan_z=fixed_plan_z,
                 )
             elif method == "ode":
                 step_out = _ode_step(
                     z=z, t=t, t_next=t_next, x_pred_prev=x_pred,
-                    plan_z=plan_z, **step_kwargs,
+                    plan_z=plan_z, plan_t=plan_t, plan_t_next=plan_t_next,
+                    freeze_plan_z=fixed_plan_z,
+                    **step_kwargs,
                 )
             else:
                 raise ValueError(f"Invalid sampling method: {method}")
@@ -118,9 +144,13 @@ def _generate_samples_single_batch(
         # Last step always with ODE.
         t = t_steps[-2].item()
         t_next = t_steps[-1].item()
+        plan_t = _plan_time(t)
+        plan_t_next = _plan_time(t_next)
         step_out = _ode_step(
             z=z, t=t, t_next=t_next, x_pred_prev=x_pred,
-            plan_z=plan_z, **step_kwargs,
+            plan_z=plan_z, plan_t=plan_t, plan_t_next=plan_t_next,
+            freeze_plan_z=fixed_plan_z,
+            **step_kwargs,
         )
         if plan_z is None:
             z, x_pred = step_out
