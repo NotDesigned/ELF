@@ -226,28 +226,44 @@ def validate_config(config) -> Config:
     return config
 
 
-def resolve_batch_sizes(config: Config, world_size: int, *, context: str = "training"):
-    """Resolve local/global batch sizes with strict ambiguity checks."""
+def resolve_batch_sizes(
+    config: Config,
+    world_size: int,
+    *,
+    context: str = "training",
+    grad_accum_steps: int = 1,
+):
+    """Resolve effective-global and per-rank microbatch sizes.
+
+    ``global_batch_size`` is the effective batch for one optimizer update and
+    therefore includes all ranks and gradient accumulation. ``batch_size`` is
+    the per-rank microbatch size.
+    """
     if world_size <= 0:
         raise ValueError(f"world_size must be positive, got {world_size}")
+    if grad_accum_steps <= 0:
+        raise ValueError(f"grad_accum_steps must be positive, got {grad_accum_steps}")
     has_global = config.global_batch_size is not None
     has_local = config.batch_size is not None
     if has_global and has_local:
         raise ValueError(
             "Specify only one of global_batch_size or batch_size. "
-            "global_batch_size is total across ranks; batch_size is per-rank."
+            "global_batch_size is effective across ranks and accumulation; "
+            "batch_size is the per-rank microbatch."
         )
     if has_global:
         total_batch_size = int(config.global_batch_size)
-        if total_batch_size % world_size != 0:
+        batch_divisor = world_size * grad_accum_steps
+        if total_batch_size % batch_divisor != 0:
             raise ValueError(
-                f"global_batch_size={total_batch_size} must be divisible by world_size={world_size}"
+                f"global_batch_size={total_batch_size} must be divisible by "
+                f"world_size*grad_accum_steps={batch_divisor}"
             )
-        local_batch_size = total_batch_size // world_size
+        local_batch_size = total_batch_size // batch_divisor
         config.batch_size = local_batch_size
     elif has_local:
         local_batch_size = int(config.batch_size)
-        total_batch_size = local_batch_size * world_size
+        total_batch_size = local_batch_size * world_size * grad_accum_steps
         config.global_batch_size = total_batch_size
     else:
         raise ValueError(f"Either global_batch_size or batch_size must be specified for {context}")
@@ -325,8 +341,8 @@ class Config:
     epochs: int = 200
     warmup_epochs: float = None
     warmup_steps: int = 5000
-    batch_size: int = None
-    global_batch_size: int = 512
+    batch_size: int = None  # Per-rank microbatch; effective batch also multiplies world size and grad_accum_steps.
+    global_batch_size: int = 512  # Effective batch per optimizer update, including ranks and accumulation.
     lr: float = None
     blr: float = 5e-5
     min_lr: float = 0.0
@@ -335,7 +351,7 @@ class Config:
     optimizer: str = "muon"  # "adamw" or "muon"
     adam_b1: float = 0.9
     adam_b2: float = 0.95
-    grad_accum_steps: int = 1  # Gradient accumulation steps (optimizer updates every K mini-batches)
+    grad_accum_steps: int = 1  # Microsteps per optimizer update; global_batch_size semantics stay fixed.
     use_bf16: bool = True  # Use CUDA BF16 autocast for training/eval forward passes.
     use_compile: bool = False  # Wrap the eval/sampling model in torch.compile.
     gradient_checkpointing: bool = False  # Save activation memory by recomputing ELF blocks during backward.

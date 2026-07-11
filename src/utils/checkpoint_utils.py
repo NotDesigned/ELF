@@ -1,9 +1,15 @@
+import json
 import logging
 import os
+import random
 import re
+import tempfile
+import time
 from typing import Any, Dict, Optional, Tuple
 
+import numpy as np
 import torch
+import torch.distributed as dist
 
 from utils.logging_utils import log_for_0, _process_index
 from utils.train_utils import unwrap_model
@@ -46,34 +52,103 @@ def _split_hf_path(path: str, min_parts: int) -> Optional[Tuple[str, str]]:
     return "/".join(parts[:2]), "/".join(parts[2:])
 
 
+def _capture_rng_state(state) -> Dict[str, Any]:
+    numpy_state = np.random.get_state()
+    return {
+        "python": random.getstate(),
+        "numpy": {
+            "bit_generator": numpy_state[0],
+            "keys": numpy_state[1].tolist(),
+            "position": numpy_state[2],
+            "has_gauss": numpy_state[3],
+            "cached_gaussian": numpy_state[4],
+        },
+        "torch_cpu": torch.get_rng_state(),
+        "torch_cuda": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
+        "dropout": (
+            state.dropout_generator.get_state()
+            if state.dropout_generator is not None else None
+        ),
+    }
+
+
+def _gather_rng_states(state):
+    local_state = _capture_rng_state(state)
+    if not (dist.is_available() and dist.is_initialized()):
+        return [local_state]
+    states = [None] * dist.get_world_size()
+    dist.all_gather_object(states, local_state)
+    return states
+
+
+def _fsync_dir(path: str) -> None:
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _atomic_torch_save(payload: Dict[str, Any], path: str) -> int:
+    fd, temp_path = tempfile.mkstemp(prefix=f".{os.path.basename(path)}.", suffix=".tmp", dir=os.path.dirname(path))
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            torch.save(payload, handle)
+            handle.flush()
+            os.fsync(handle.fileno())
+        size = os.path.getsize(temp_path)
+        os.replace(temp_path, path)
+        _fsync_dir(os.path.dirname(path))
+        return size
+    finally:
+        if os.path.exists(temp_path):
+            os.unlink(temp_path)
+
+
+def _write_completion_marker(path: str, *, size: int, step: int) -> None:
+    marker = f"{path}.complete"
+    fd, temp_path = tempfile.mkstemp(prefix=f".{os.path.basename(marker)}.", suffix=".tmp", dir=os.path.dirname(path))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump({"bytes": size, "step": int(step), "completed_at": time.time()}, handle, sort_keys=True)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_path, marker)
+        _fsync_dir(os.path.dirname(path))
+    finally:
+        if os.path.exists(temp_path):
+            os.unlink(temp_path)
+
+
 def save_checkpoint(state, output_dir: str, step: int, hf_repo_id: str = None):
-    """Save model checkpoint locally as a single `checkpoint_<step>` file."""
+    """Atomically save an optimizer-boundary checkpoint and completion marker."""
+    if int(getattr(state, "accum_step", 0)) != 0:
+        raise RuntimeError("refusing to checkpoint inside a gradient accumulation window")
+
+    rng_states = _gather_rng_states(state)
     if _process_index() != 0:
         return
     ckpt_dir = _local_path(output_dir)
     os.makedirs(ckpt_dir, exist_ok=True)
     inner_model = unwrap_model(state.model)
-    grad_accum_buffers = {}
-    if getattr(state, "grad_accum_buffers", None):
-        for name, param in inner_model.named_parameters():
-            buf = state.grad_accum_buffers.get(id(param))
-            if buf is not None:
-                grad_accum_buffers[name] = buf.detach().cpu()
     payload = {
         "params": inner_model.state_dict(),
         "ema_params1": state.ema_params1,
         "opt_state": state.optimizer.state_dict(),
         "lr_scheduler": state.lr_scheduler.state_dict() if state.lr_scheduler is not None else None,
         "step": int(state.step),
-        "epoch": int(state.epoch),
-        "dropout_rng": (state.dropout_generator.get_state()
-                        if state.dropout_generator is not None else None),
-        "grad_accum_buffers": grad_accum_buffers,
+        "micro_step": int(getattr(state, "micro_step", state.step)),
+        "optimizer_step": int(getattr(state, "optimizer_step", 0)),
+        "accum_step": 0,
+        "epoch": float(state.epoch),
+        "rng_states": rng_states,
     }
     out_path = os.path.join(ckpt_dir, f"checkpoint_{step}")
     log_for_0(f"Saving checkpoint to {out_path}")
-    torch.save(payload, out_path)
-    log_for_0(f"Checkpoint written to {out_path}")
+    size = _atomic_torch_save(payload, out_path)
+    _write_completion_marker(out_path, size=size, step=step)
+    log_for_0(f"Checkpoint committed to {out_path} ({size} bytes)")
     upload_output_dir_to_hf(output_dir, hf_repo_id, reason="checkpoint")
 
 
@@ -84,12 +159,16 @@ def _checkpoint_step(checkpoint_name: str) -> int:
 
 
 def find_all_checkpoints(ckpt_dir: str, prefix: str = "checkpoint_"):
-    """Find local checkpoint paths in a directory, sorted by step ascending."""
+    """Find completed local checkpoints, sorted by microstep ascending."""
     ckpt_dir = _local_path(ckpt_dir)
     if not os.path.isdir(ckpt_dir):
         return []
+    pattern = re.compile(rf"^{re.escape(prefix)}\d+$")
     names = sorted(
-        [f for f in os.listdir(ckpt_dir) if f.startswith(prefix)],
+        [
+            name for name in os.listdir(ckpt_dir)
+            if pattern.fullmatch(name) and os.path.isfile(os.path.join(ckpt_dir, f"{name}.complete"))
+        ],
         key=_checkpoint_step,
     )
     return [os.path.join(ckpt_dir, name) for name in names]
@@ -115,16 +194,48 @@ def _download_hf_checkpoint(checkpoint_path: str) -> Optional[str]:
     return os.path.join(local_dir, sub_path) if sub_path else local_dir
 
 
-def _restore_checkpoint(checkpoint_path: str) -> Any:
+def _validate_completion_marker(path: str) -> None:
+    marker_path = f"{path}.complete"
+    if not os.path.isfile(marker_path):
+        raise ValueError(f"checkpoint has no completion marker: {marker_path}")
+    with open(marker_path, "r", encoding="utf-8") as handle:
+        marker = json.load(handle)
+    expected_size = int(marker["bytes"])
+    actual_size = os.path.getsize(path)
+    if actual_size != expected_size:
+        raise ValueError(
+            f"checkpoint size does not match completion marker: expected {expected_size}, got {actual_size}"
+        )
+
+
+def _restore_checkpoint(checkpoint_path: str, *, require_complete: bool = False) -> Any:
     """Restore a checkpoint from a file or directory (latest inside dir)."""
     local = _local_path(checkpoint_path)
-    resolved = local
     if os.path.isdir(local):
-        latest = find_latest_checkpoint(local)
-        if latest is not None and os.path.isfile(latest):
-            resolved = latest
-    if os.path.isfile(resolved):
-        return torch.load(resolved, map_location="cpu")
+        if require_complete:
+            errors = []
+            for candidate in reversed(find_all_checkpoints(local)):
+                try:
+                    _validate_completion_marker(candidate)
+                    return torch.load(candidate, map_location="cpu")
+                except Exception as exc:
+                    errors.append(f"{os.path.basename(candidate)}: {exc}")
+            detail = "; ".join(errors) if errors else "no completed checkpoints"
+            raise ValueError(f"no valid completed checkpoint in {local}: {detail}")
+        else:
+            legacy = [
+                os.path.join(local, name)
+                for name in os.listdir(local)
+                if re.fullmatch(r"checkpoint_\d+", name)
+            ]
+            resolved = max(legacy, key=lambda path: _checkpoint_step(os.path.basename(path)), default=None)
+            if resolved is not None:
+                return torch.load(resolved, map_location="cpu")
+            return None
+    if os.path.isfile(local):
+        if require_complete:
+            _validate_completion_marker(local)
+        return torch.load(local, map_location="cpu")
     return None
 
 
@@ -148,7 +259,7 @@ def _load_checkpoint_payload(checkpoint_path: str, require_optimizer: bool) -> T
     if os.path.exists(local_path):
         try:
             log_for_0(f"Loading local checkpoint from {local_path}...")
-            ckpt = _restore_checkpoint(local_path)
+            ckpt = _restore_checkpoint(local_path, require_complete=require_optimizer)
             _validate_checkpoint(ckpt, require_optimizer=require_optimizer)
             loaded_from = "local"
         except Exception as e:
@@ -159,7 +270,7 @@ def _load_checkpoint_payload(checkpoint_path: str, require_optimizer: bool) -> T
             hf_path = _download_hf_checkpoint(checkpoint_path)
             if hf_path:
                 log_for_0(f"Loading HF checkpoint from {hf_path}...")
-                ckpt = _restore_checkpoint(hf_path)
+                ckpt = _restore_checkpoint(hf_path, require_complete=False)
                 _validate_checkpoint(ckpt, require_optimizer=require_optimizer)
                 loaded_from = "HF"
         except Exception as e:
@@ -200,26 +311,33 @@ def load_checkpoint(checkpoint_path: str, state, load_optimizer: bool = True) ->
     if load_optimizer and state.lr_scheduler is not None and ckpt.get("lr_scheduler") is not None:
         state.lr_scheduler.load_state_dict(ckpt["lr_scheduler"])
     state.step = int(ckpt["step"])
-    state.epoch = int(ckpt["epoch"])
-    if ckpt.get("dropout_rng") is not None and state.dropout_generator is not None:
-        try:
-            state.dropout_generator.set_state(ckpt["dropout_rng"])
-        except Exception:
-            pass
-    if ckpt.get("grad_accum_buffers"):
-        buffers = ckpt["grad_accum_buffers"]
-        state.grad_accum_buffers = {}
-        param_ids = []
-        for name, param in inner_model.named_parameters():
-            if not param.requires_grad:
-                continue
-            param_ids.append(id(param))
-            saved = buffers.get(name)
-            state.grad_accum_buffers[id(param)] = (
-                saved.to(device=param.device, dtype=param.dtype)
-                if saved is not None else torch.zeros_like(param)
-            )
-        state.grad_accum_param_ids = tuple(param_ids)
+    state.micro_step = int(ckpt.get("micro_step", ckpt["step"]))
+    state.optimizer_step = int(ckpt.get("optimizer_step", state.micro_step))
+    state.accum_step = int(ckpt.get("accum_step", 0))
+    if state.accum_step != 0:
+        raise ValueError("resume checkpoint was not saved at an optimizer boundary")
+    state.epoch = float(ckpt["epoch"])
+    rng_states = ckpt.get("rng_states")
+    if rng_states:
+        rank = dist.get_rank() if dist.is_available() and dist.is_initialized() else 0
+        rng = rng_states[rank] if rank < len(rng_states) else rng_states[0]
+        random.setstate(rng["python"])
+        numpy_rng = rng["numpy"]
+        np.random.set_state((
+            numpy_rng["bit_generator"],
+            np.asarray(numpy_rng["keys"], dtype=np.uint32),
+            numpy_rng["position"],
+            numpy_rng["has_gauss"],
+            numpy_rng["cached_gaussian"],
+        ))
+        torch.set_rng_state(rng["torch_cpu"])
+        if rng.get("torch_cuda") is not None and torch.cuda.is_available():
+            torch.cuda.set_rng_state_all(rng["torch_cuda"])
+        if rng.get("dropout") is not None and state.dropout_generator is not None:
+            state.dropout_generator.set_state(rng["dropout"])
+    elif ckpt.get("dropout_rng") is not None and state.dropout_generator is not None:
+        # Legacy warm-start/resume compatibility for explicitly migrated files.
+        state.dropout_generator.set_state(ckpt["dropout_rng"])
 
     step = int(ckpt["step"])
     log_for_0(f"Loaded {loaded_from} checkpoint from step {step} (epoch {state.epoch})")

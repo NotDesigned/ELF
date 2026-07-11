@@ -1,3 +1,4 @@
+import copy
 from types import SimpleNamespace
 
 import pytest
@@ -36,6 +37,20 @@ class ToySentenceEncoder:
             base = float(sum(ord(ch) for ch in text) % 17)
             rows.append(torch.arange(8, device=device, dtype=dtype) + base)
         return torch.stack(rows, dim=0)
+
+
+class SyncTrackingWrapper(nn.Module):
+    """Minimal DDP-like wrapper that records the sync flag seen by forward."""
+
+    def __init__(self, module):
+        super().__init__()
+        self.module = module
+        self.require_backward_grad_sync = True
+        self.forward_sync_flags = []
+
+    def forward(self, *args, **kwargs):
+        self.forward_sync_flags.append(self.require_backward_grad_sync)
+        return self.module(*args, **kwargs)
 
 
 def tiny_batch():
@@ -261,6 +276,97 @@ def test_grad_none_aux0_keeps_plan_head_in_backward_with_zero_grad():
     for param in model.plan_out.parameters():
         assert param.grad is not None
         assert torch.count_nonzero(param.grad).item() == 0
+
+
+def test_gradient_accumulation_updates_only_at_window_boundary():
+    torch.manual_seed(123)
+    model = tiny_model()
+    state = train_state(model)
+    cfg = tiny_config(grad_accum_steps=2)
+    encoder = TinyEncoder()
+    initial = {name: param.detach().clone() for name, param in model.named_parameters()}
+
+    state, first_metrics = train_step(state, encoder, tiny_batch(), cfg)
+    assert state.accum_step == 1
+    assert state.optimizer_step == 0
+    assert not bool(first_metrics["did_optimizer_step"])
+    assert all(torch.equal(param, initial[name]) for name, param in model.named_parameters())
+
+    state, second_metrics = train_step(state, encoder, tiny_batch(), cfg)
+    assert state.accum_step == 0
+    assert state.micro_step == 2
+    assert state.optimizer_step == 1
+    assert bool(second_metrics["did_optimizer_step"])
+    assert any(not torch.equal(param, initial[name]) for name, param in model.named_parameters())
+
+
+def test_final_partial_accumulation_window_is_flushed():
+    torch.manual_seed(123)
+    model = tiny_model()
+    state = train_state(model)
+    initial = {name: param.detach().clone() for name, param in model.named_parameters()}
+
+    state, metrics = train_step(
+        state,
+        TinyEncoder(),
+        tiny_batch(),
+        tiny_config(grad_accum_steps=4),
+        force_optimizer_step=True,
+    )
+
+    assert state.accum_step == 0
+    assert state.optimizer_step == 1
+    assert bool(metrics["did_optimizer_step"])
+    assert any(not torch.equal(param, initial[name]) for name, param in model.named_parameters())
+
+
+def test_partial_window_matches_equivalent_complete_window_normalization():
+    torch.manual_seed(321)
+    base_model = tiny_model()
+    base_encoder = TinyEncoder()
+    complete_model = copy.deepcopy(base_model)
+    partial_model = copy.deepcopy(base_model)
+    complete_encoder = copy.deepcopy(base_encoder)
+    partial_encoder = copy.deepcopy(base_encoder)
+
+    torch.manual_seed(777)
+    complete_state = train_state(complete_model)
+    complete_cfg = tiny_config(grad_accum_steps=2)
+    complete_state, _ = train_step(complete_state, complete_encoder, tiny_batch(), complete_cfg)
+    complete_state, _ = train_step(complete_state, complete_encoder, tiny_batch(), complete_cfg)
+
+    torch.manual_seed(777)
+    partial_state = train_state(partial_model)
+    partial_cfg = tiny_config(grad_accum_steps=4)
+    partial_state, _ = train_step(partial_state, partial_encoder, tiny_batch(), partial_cfg)
+    partial_state, _ = train_step(
+        partial_state,
+        partial_encoder,
+        tiny_batch(),
+        partial_cfg,
+        force_optimizer_step=True,
+    )
+
+    for complete_param, partial_param in zip(complete_model.parameters(), partial_model.parameters()):
+        assert torch.allclose(complete_param, partial_param, atol=1e-7, rtol=1e-6)
+
+
+def test_ddp_sync_decision_is_visible_during_forward():
+    torch.manual_seed(123)
+    wrapped = SyncTrackingWrapper(tiny_model())
+    state = train_state(wrapped)
+    cfg = tiny_config(grad_accum_steps=2)
+    encoder = TinyEncoder()
+
+    state, _ = train_step(state, encoder, tiny_batch(), cfg)
+    assert wrapped.forward_sync_flags
+    assert set(wrapped.forward_sync_flags) == {False}
+    assert wrapped.require_backward_grad_sync is True
+
+    wrapped.forward_sync_flags.clear()
+    state, _ = train_step(state, encoder, tiny_batch(), cfg)
+    assert wrapped.forward_sync_flags
+    assert set(wrapped.forward_sync_flags) == {True}
 
 
 @pytest.mark.parametrize("context", ["denoiser_z", "resampled_z", "mixed_z", "clean_x0"])

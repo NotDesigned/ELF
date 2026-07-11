@@ -128,6 +128,14 @@ def test_resolve_batch_sizes_rejects_ambiguous_or_indivisible():
     assert local == 64
     assert cfg.batch_size == 64
 
+    cfg = Config()
+    cfg.global_batch_size = 512
+    cfg.batch_size = None
+    total, local = resolve_batch_sizes(cfg, world_size=8, grad_accum_steps=4)
+    assert total == 512
+    assert local == 16
+    assert cfg.batch_size == 16
+
 
 def test_owt_elfb_ablation_configs_are_unique_and_expected():
     root = Path("src/configs/training_configs/ablations/owt_elfb")

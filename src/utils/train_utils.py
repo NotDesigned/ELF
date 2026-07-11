@@ -52,12 +52,16 @@ class TrainState:
     lr_scheduler: Any = None
     ema_params1: Dict[str, torch.Tensor] = field(default_factory=dict)
     step: int = 0
-    epoch: int = 0
+    micro_step: int = 0
+    optimizer_step: int = 0
+    accum_step: int = 0
+    epoch: float = 0.0
     dropout_generator: Optional[torch.Generator] = None
     def replace(self, **kwargs) -> "TrainState":
         new = TrainState(
             model=self.model, optimizer=self.optimizer, lr_scheduler=self.lr_scheduler,
-            ema_params1=self.ema_params1, step=self.step, epoch=self.epoch,
+            ema_params1=self.ema_params1, step=self.step, micro_step=self.micro_step,
+            optimizer_step=self.optimizer_step, accum_step=self.accum_step, epoch=self.epoch,
             dropout_generator=self.dropout_generator,
         )
         for k, v in kwargs.items():

@@ -3,6 +3,7 @@
 
 import argparse
 import logging
+import math
 import os
 import sys
 import time
@@ -367,13 +368,20 @@ def run_training(config, *, force_cpu: bool = False):
         log_for_0(f"Using global batch size: {config.global_batch_size}")
     elif config.batch_size is not None:
         log_for_0(f"Using batch size per device: {config.batch_size}")
-    total_batch_size, local_batch_size = resolve_batch_sizes(config, world, context="training")
+    grad_accum_steps = int(config.grad_accum_steps)
+    effective_batch_size, local_batch_size = resolve_batch_sizes(
+        config,
+        world,
+        context="training",
+        grad_accum_steps=grad_accum_steps,
+    )
+    micro_global_batch_size = local_batch_size * world
 
-    steps_per_epoch = len(train_dataset) // total_batch_size
+    steps_per_epoch = len(train_dataset) // micro_global_batch_size
     if steps_per_epoch <= 0:
         raise ValueError(
             f"Training dataset has {len(train_dataset)} examples, smaller than "
-            f"global_batch_size={total_batch_size}; steps_per_epoch would be 0."
+            f"micro_global_batch_size={micro_global_batch_size}; steps_per_epoch would be 0."
         )
     num_train_steps = steps_per_epoch * config.epochs
     if config.warmup_steps >= 0:
@@ -384,24 +392,24 @@ def run_training(config, *, force_cpu: bool = False):
         num_warmup_steps = 0
 
     # Gradient accumulation: LR schedule is parameterized in optimizer steps
-    grad_accum_steps = config.grad_accum_steps
-    num_optimizer_steps = num_train_steps // grad_accum_steps
-    num_warmup_optimizer_steps = num_warmup_steps // grad_accum_steps
+    num_optimizer_steps = math.ceil(steps_per_epoch / grad_accum_steps) * config.epochs
+    num_warmup_optimizer_steps = math.ceil(num_warmup_steps / grad_accum_steps)
 
     # Effective learning rate (scaled with effective batch size, including grad accum)
     if config.lr is None or config.lr <= 0:
         if config.lr is not None:
             log_for_0(f"Configured lr={config.lr} is non-positive; recomputing from blr={config.blr}")
-        config.lr = config.blr * (total_batch_size * grad_accum_steps) / 256
+        config.lr = config.blr * effective_batch_size / 256
 
     log_for_0(
-        f"World={world} | batch local={local_batch_size}, total={total_batch_size} | "
+        f"World={world} | microbatch local={local_batch_size}, global={micro_global_batch_size} | "
+        f"effective batch={effective_batch_size} | "
         f"steps/epoch={steps_per_epoch}, total_train={num_train_steps}, "
         f"warmup={num_warmup_steps}, lr={config.lr:.2e}"
     )
     if grad_accum_steps > 1:
         log_for_0(
-            f"Grad accum={grad_accum_steps}, effective batch={total_batch_size * grad_accum_steps}, "
+            f"Grad accum={grad_accum_steps}, effective batch={effective_batch_size}, "
             f"optimizer steps={num_optimizer_steps}"
         )
 
@@ -415,7 +423,8 @@ def run_training(config, *, force_cpu: bool = False):
     state = TrainState(
         model=model, optimizer=optimizer, lr_scheduler=lr_scheduler,
         ema_params1=TrainState.init_ema(model),
-        step=0, epoch=0, dropout_generator=g,
+        step=0, micro_step=0, optimizer_step=0, accum_step=0,
+        epoch=0, dropout_generator=g,
     )
 
     # Auto-resume: if no explicit resume path, check output_dir for existing checkpoints
@@ -430,8 +439,6 @@ def run_training(config, *, force_cpu: bool = False):
     if config.resume:
         try:
             ckpt_path = config.resume
-            if "checkpoint_" not in ckpt_path:
-                ckpt_path = find_latest_checkpoint(ckpt_path) or ckpt_path
             state, resume_step = load_checkpoint(ckpt_path, state)
             resume_epoch_fractional = float(state.epoch)
             start_epoch = int(state.epoch)
@@ -534,6 +541,7 @@ def run_training(config, *, force_cpu: bool = False):
         global_step = start_epoch * steps_per_epoch
         steps_to_skip_in_epoch = 0
     state.step = global_step
+    state.micro_step = global_step
 
     last_log_step = global_step
     train_metrics = []
@@ -577,6 +585,7 @@ def run_training(config, *, force_cpu: bool = False):
             state, metrics = train_step(
                 state, encoder=encoder, batch=batch, config=config,
                 tokenizer=tokenizer, sentence_encoder=sentence_encoder,
+                force_optimizer_step=(step_in_epoch + 1 == steps_per_epoch),
             )
 
             # Sync only on first step to measure torch.compile time;
@@ -633,6 +642,7 @@ def run_training(config, *, force_cpu: bool = False):
                         "timestamp": now,
                         "epoch": current_epoch_progress,
                         "step": global_step,
+                        "optimizer_step": state.optimizer_step,
                         "train_loss": avg_loss,
                         "train_l2_loss": avg_l2,
                         "train_ce_loss": avg_ce,
@@ -668,9 +678,10 @@ def run_training(config, *, force_cpu: bool = False):
                 last_log_time = now
 
             # Intra-epoch checkpoint saving (fractional save_freq, e.g., 0.1 epoch)
+            progress = epoch + (global_step - epoch * steps_per_epoch) / steps_per_epoch
+            state.epoch = progress
             if 0 < config.save_freq < 1:
-                progress = epoch + (global_step - epoch * steps_per_epoch) / steps_per_epoch
-                if progress - last_save_epoch >= config.save_freq:
+                if progress - last_save_epoch >= config.save_freq and state.accum_step == 0:
                     save_checkpoint(state, config.output_dir, global_step, hf_repo_id=config.hf_repo_id)
                     log_for_0(f"Saved checkpoint at epoch {progress:.2f} (step {global_step})")
                     last_save_epoch = progress

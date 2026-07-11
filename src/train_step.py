@@ -8,7 +8,6 @@ and combined with a single denominator. Self-conditioning + CFG guidance is
 applied on the denoiser branch only.
 """
 
-import contextlib
 from typing import Dict, Tuple
 
 import torch
@@ -47,8 +46,30 @@ def train_step(
     config,
     tokenizer=None,
     sentence_encoder=None,
+    force_optimizer_step: bool = False,
 ) -> Tuple[TrainState, Dict[str, float]]:
-    """Perform a single training step."""
+    """Perform one microstep and, when due, one optimizer update."""
+    model = state.model
+    accum_steps = max(int(config.grad_accum_steps), 1)
+    accumulated = int(getattr(state, "accum_step", 0))
+    is_optimizer_step = accumulated + 1 >= accum_steps or force_optimizer_step
+    accumulation_divisor = accumulated + 1 if force_optimizer_step and accumulated + 1 < accum_steps else accum_steps
+
+    # Earlier microsteps were normalized by the full accumulation window. If
+    # an epoch ends early, renormalize their resident gradients to the shorter
+    # final window before adding its last microbatch.
+    if is_optimizer_step and accumulation_divisor < accum_steps and accumulated > 0:
+        correction = accum_steps / accumulation_divisor
+        for param in _trainable_params(model):
+            if param.grad is not None:
+                param.grad.mul_(correction)
+
+    # DDP decides whether to install reduction hooks during forward, so this
+    # flag must be set before every model forward, not only around backward.
+    previous_sync_setting = getattr(model, "require_backward_grad_sync", None)
+    if previous_sync_setting is not None:
+        model.require_backward_grad_sync = is_optimizer_step
+
     device = next(state.model.parameters()).device
     dtype = next(state.model.parameters()).dtype
     use_bf16 = bool(getattr(config, "use_bf16", True)) and device.type == "cuda"
@@ -153,8 +174,6 @@ def train_step(
         )
     else:
         self_cond_cfg_scale = None
-
-    model = state.model
 
     plan_z_denoiser = None
     plan_z_mixed = None
@@ -448,13 +467,9 @@ def train_step(
     l2_loss_val = ((l2_per_token * l2_mask).sum()
                    / torch.clamp(l2_mask.sum(), min=1.0)).detach()
 
-    accum_steps = max(config.grad_accum_steps, 1)
-    state.step += 1
-    is_optimizer_step = (state.step % accum_steps) == 0
-
-    sync_ctx = model.no_sync() if (not is_optimizer_step and hasattr(model, 'no_sync')) else contextlib.nullcontext()
-    with sync_ctx:
-        (loss / accum_steps).backward()
+    (loss / accumulation_divisor).backward()
+    state.micro_step = int(getattr(state, "micro_step", state.step)) + 1
+    state.step = state.micro_step
 
     if is_optimizer_step:
         torch.nn.utils.clip_grad_norm_(_trainable_params(model), max_norm=1.0)
@@ -463,6 +478,13 @@ def train_step(
             state.lr_scheduler.step()
         ema_update(state.ema_params1, state.model, config.ema_decay1)
         state.optimizer.zero_grad(set_to_none=True)
+        state.optimizer_step = int(getattr(state, "optimizer_step", 0)) + 1
+        state.accum_step = 0
+    else:
+        state.accum_step = accumulated + 1
+
+    if previous_sync_setting is not None:
+        model.require_backward_grad_sync = previous_sync_setting
 
     metrics = {
         "loss": loss.detach(),
@@ -474,5 +496,7 @@ def train_step(
         "plan_emb_norm": plan_emb_norm.detach(),
         "plan_pred_batch_var": plan_pred_batch_var.detach(),
         "plan_pred_norm": plan_pred_norm.detach(),
+        "optimizer_step": torch.tensor(state.optimizer_step, device=loss.device),
+        "did_optimizer_step": torch.tensor(is_optimizer_step, device=loss.device),
     }
     return state, metrics
