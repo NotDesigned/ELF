@@ -10,6 +10,12 @@ def build_run_manifest(
     resolved_config: dict[str, Any], source_id: str, runtime_tree_id: str,
     git_commit: str | None, campaign_id: str | None, campaign: str | None,
     image_id: str, run_dir: str, max_infra_retries: int,
+    backend: dict[str, Any], resources: dict[str, Any],
+    storage: dict[str, Any], command: list[str], execution: dict[str, Any],
+    config_overrides: list[str] | None = None,
+    assets: list[dict[str, Any]] | None = None,
+    checkpoint: dict[str, Any] | None = None,
+    evaluation: dict[str, Any] | None = None,
     research_contract: dict[str, Any] | None = None,
     research_role: str | None = None,
 ) -> dict[str, Any]:
@@ -23,6 +29,7 @@ def build_run_manifest(
     }
     manifest = {
         "schema_version": 1,
+        "identity_version": 2,
         "project": project,
         "run_id": run_id,
         "created_at": created_at,
@@ -35,7 +42,15 @@ def build_run_manifest(
         "campaign": campaign,
         "image_id": image_id,
         "seed": scientific_config.get("seed"),
-        "storage": {"run_dir": run_dir, "checkpoint_dir": run_dir},
+        "backend": backend,
+        "resources": resources,
+        "storage": storage,
+        "command": command,
+        "execution": execution,
+        "config_overrides": list(config_overrides or []),
+        "assets": list(assets or []),
+        "checkpoint": dict(checkpoint or {}),
+        "evaluation": dict(evaluation or {}),
         "resume_policy": {
             "enabled": True,
             "max_infra_retries": max_infra_retries,

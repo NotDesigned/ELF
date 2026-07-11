@@ -7,4 +7,9 @@ controller:
   python: /home/proton/miniconda3/envs/elf/bin/python
   experimentctl: tools/experimentctl.py
   workdir: .
+  capabilities:
+    submit_outbox: true
+    run_identity_v2: true
+    cancel_outbox: true
+    evaluate: false
 hypotheses_dir: experiments/hypotheses

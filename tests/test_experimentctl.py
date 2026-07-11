@@ -287,6 +287,44 @@ def test_new_attempt_keeps_run_manifest_and_gets_its_own_command(tmp_path, monke
     assert (tmp_path / "local/controller-test/smoke-h100/attempts/attempt-002/attempt.yaml").is_file()
 
 
+@pytest.mark.parametrize("mutation", ["resources", "backend", "command_env"])
+def test_new_attempt_cannot_change_run_identity(tmp_path, monkeypatch, mutation):
+    monkeypatch.chdir(REPO_ROOT)
+    campaign = slurm_campaign(tmp_path)
+    run = materialize_run(campaign, campaign["runs"][0], "source-fixed")
+    prepare_run(campaign, run, "source-fixed", attempt_id="attempt-001")
+    changed = dict(run)
+    if mutation == "resources":
+        changed["resources"] = {**run["resources"], "gpus": run["resources"]["gpus"] + 1}
+    elif mutation == "backend":
+        changed["backend"] = {**run["backend"], "time": "48:00:00"}
+    else:
+        changed["env"] = {**run["env"], "NUM_WORKERS": "99"}
+
+    with pytest.raises(ValueError, match="existing run manifest conflicts"):
+        prepare_run(campaign, changed, "source-fixed", attempt_id="attempt-002")
+
+
+def test_run_manifest_freezes_execution_identity(tmp_path, monkeypatch):
+    monkeypatch.chdir(REPO_ROOT)
+    campaign = slurm_campaign(tmp_path)
+    run = materialize_run(campaign, campaign["runs"][0], "source-fixed")
+    prepare_run(campaign, run, "source-fixed", attempt_id="attempt-001")
+    manifest = yaml.safe_load(
+        (tmp_path / "local/controller-test/smoke-h100/manifest.yaml").read_text()
+    )
+
+    assert manifest["identity_version"] == 2
+    assert manifest["backend"] == run["backend"]
+    assert manifest["resources"]["gpus"] == run["resources"]["gpus"]
+    assert manifest["resources"]["nodes"] == 1
+    assert manifest["storage"] == run["storage"]
+    assert "ATTEMPT_ID={attempt_id}" in manifest["command"]
+    assert manifest["execution"]["source_mount"]
+    assert {item["kind"] for item in manifest["assets"]} >= {"model", "dataset"}
+    assert manifest["checkpoint"]["save_freq"] == 0.1
+
+
 def test_retry_resume_is_attempt_operational_state_not_run_identity(tmp_path, monkeypatch):
     monkeypatch.chdir(REPO_ROOT)
     campaign = slurm_campaign(tmp_path)
@@ -432,6 +470,13 @@ def test_cli_read_and_cancel_operations_target_explicit_historical_attempt(
         rendered = json.dumps(output)
         assert "111" in rendered
         assert "222" not in rendered
+
+    assert experimentctl.main([
+        str(campaign_path), "cancel", "--run", "smoke-h100",
+        "--attempt-id", "attempt-001",
+    ]) == 0
+    capsys.readouterr()
+    assert [operation for operation, _, _ in fake.seen].count("cancel") == 1
 
     assert fake.seen
     assert {job_id for _, job_id, _ in fake.seen} == {"111"}

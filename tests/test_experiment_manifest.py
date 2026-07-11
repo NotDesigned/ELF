@@ -64,6 +64,12 @@ def test_prepare_writes_durable_run_and_attempt_records(tmp_path):
     assert manifest["run_id"] == "test-run-s0"
     assert manifest["resolved_config"]["output_dir"] == str(run_dir)
     assert manifest["seed"] == 42
+    assert manifest["identity_version"] == 2
+    assert manifest["backend"]["kind"] == "sensecore"
+    assert manifest["resources"]["gpus"] == 4
+    assert manifest["command"][-1] == str(CONFIG)
+    assert manifest["assets"]
+    assert "save_freq" in manifest["checkpoint"]
     assert attempt["attempt_id"] == "attempt-001"
     assert attempt["resources"]["quota"] == "spot"
     assert status["state"] == "CREATED"

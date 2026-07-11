@@ -780,6 +780,9 @@ def prepare(args: argparse.Namespace) -> dict[str, Any]:
     if not command:
         raise ValueError("resolved training command must not be empty")
     command = sanitize_command(command)
+    asset_requirements = [
+        asdict(item) for item in project.plan_assets(args.config, args.config_override)
+    ]
 
     manifest = build_run_manifest(
         project=args.project, run_id=args.run_id, created_at=utc_now(),
@@ -788,10 +791,44 @@ def prepare(args: argparse.Namespace) -> dict[str, Any]:
         git_commit=args.git_commit or None, campaign_id=args.campaign_id or None,
         campaign=args.campaign or None, image_id=args.image_id,
         run_dir=str(run_dir), max_infra_retries=args.max_infra_retries,
+        backend={"kind": args.backend},
+        resources={
+            "gpus": args.gpus, "nodes": args.nodes, "quota": args.quota,
+            "resource_spec": args.resource_spec or None,
+        },
+        storage={"run_dir": str(run_dir), "checkpoint_dir": str(run_dir)},
+        command=command, execution={"source_mount": None, "workdir": None},
+        config_overrides=list(args.config_override),
+        assets=asset_requirements, checkpoint={"save_freq": config.get("save_freq")},
+        evaluation={},
         research_contract=research_contract, research_role=research_role,
     )
 
-    manifest = store.ensure_manifest(manifest)
+    if manifest_path.is_file():
+        existing = store.load_manifest()
+        # A controller-prepared v2 Run manifest is authoritative.  Runtime
+        # arguments can reconstruct the scientific core and scheduler class,
+        # but not the controller's full rendered command/mount description.
+        # Validate every identity the runtime does know and preserve the
+        # existing manifest byte-for-byte rather than weakening it.
+        for key in (
+            "project", "run_id", "source_id", "runtime_tree_id", "git_commit",
+            "campaign_id", "campaign", "image_id", "config_path",
+        ):
+            if existing.get(key) != manifest.get(key):
+                raise ValueError(f"existing run manifest conflicts at {key}")
+        if comparable_manifest(existing).get("resolved_config") != comparable_manifest(manifest).get("resolved_config"):
+            raise ValueError("existing run manifest conflicts at resolved_config")
+        existing_backend = existing.get("backend") or {}
+        if existing_backend.get("kind") != args.backend:
+            raise ValueError("existing run manifest conflicts at backend.kind")
+        existing_resources = existing.get("resources") or {}
+        for key, requested in (("gpus", args.gpus), ("nodes", args.nodes)):
+            if existing_resources.get(key) != requested:
+                raise ValueError(f"existing run manifest conflicts at resources.{key}")
+        manifest = existing
+    else:
+        manifest = store.ensure_manifest(manifest)
 
     attempt = {
         "schema_version": 1,

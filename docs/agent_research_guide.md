@@ -34,7 +34,9 @@ quota, partition, credentials, or run IDs are usable now.
   Agent thresholds. Missing contract evidence is inconclusive.
 - A `run_id` is scientific identity. Infrastructure retries use a new
   `attempt_id`; changed scientific config requires a new run.
-- Freeze Git, runtime-tree, campaign, and image/SIF identities.
+- Freeze Git, runtime-tree, campaign, image/SIF, backend, resources, storage,
+  redacted command, asset, and checkpoint-policy identities in a v2 Run
+  manifest. Legacy v1 manifests are observation-only for automated recovery.
 - Keep credentials in SCO, Docker, or SSH native stores, never campaign data.
 - Treat scheduler, process, checkpoint, training metric, and evaluation states
   as separate evidence layers. W&B is an optional mirror, not canonical state.
@@ -85,6 +87,9 @@ paths and confirms `scheduler_mutated: false`.
 For a retry or historical inspection, pass the same explicit
 `--attempt-id attempt-NNN` to `status`, `logs`, `collect`, `observe`, `cancel`,
 and `decide`. A retry uses a new attempt ID and a new scheduler resource name.
+The Run manifest must remain byte-equivalent in all identity fields. Cancel is
+also outbox-protected: an unresolved cancel intent is reconciled by exact job
+ID and is never blindly reissued.
 
 For WYD, `stage` also verifies the project-declared required files in the
 staged source tree. The ELF launcher performs the actual import check as its

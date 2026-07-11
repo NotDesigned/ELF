@@ -12,7 +12,7 @@ these contracts into a guarded research loop and report format.
 Every scientific run has a unique `run_id` and persistent directory:
 
 ```text
-manifest.yaml                 resolved scientific identity
+manifest.yaml                 immutable Run identity v2
 backend.json                  current scheduler backend/job identity
 status.json                   normalized current state
 events.jsonl                  append-only lifecycle events
@@ -38,6 +38,15 @@ ELF config resolution and scientific-field selection belong to
 `src/elf_experiments/projects/elf.py`, not this backend-neutral state helper.
 Controller and runtime construct the shared manifest schema through
 `elf_experiments.run_manifest.build_run_manifest`.
+
+New Run manifests set `identity_version: 2` and freeze resolved scientific
+config, source/runtime/campaign/image identities, backend, resources, full
+storage mapping, redacted command template, execution mount/workdir, declared
+assets, checkpoint policy, and any evaluation-as-run identity. A new Attempt
+may change only attempt/job timestamps and a same-Run completed resume
+checkpoint. Changing GPU count/type, backend, walltime, command, storage, or
+assets requires a new `run_id`; older v1 manifests are not eligible for
+automatic retry.
 
 Argument, return, and failure semantics live beside each Python function as
 tested docstrings; this document records only cross-module contracts.
@@ -182,6 +191,12 @@ crashed after `sbatch` acceptance to recover the job from the queue. If an
 intent remains unresolved, the controller refuses to create a second job.
 Existing legacy events are also audited: two recorded job IDs for one attempt
 are an ambiguity error, never a “latest job wins” choice.
+
+Cancellation uses a separate create-once `cancel_intent.json` bound to the
+exact attempt and backend job ID. A repeated cancel returns an already verified
+receipt, or performs status-only reconciliation. If the target is still
+nonterminal after an unresolved request, the controller refuses a second
+cancel mutation.
 
 SenseCore resource names are attempt-qualified and actual creates use the
 manifest's immutable `repository@sha256:...` reference while retaining the

@@ -26,6 +26,7 @@ from .manifest import (  # noqa: E402
     ExperimentStateStore,
     RunState,
     append_event,
+    atomic_create,
     atomic_write,
     sanitize_command,
     utc_now,
@@ -371,7 +372,26 @@ def prepare_run(
     resolved = project.resolve_config(str(run["config"]), overrides)
     command = launcher_command(campaign, run, source_id, attempt_id)
     bundle = project.source_bundle(REPO_ROOT)
+    identity_run = dict(run)
+    identity_run["env"] = {
+        str(key): value for key, value in run.get("env", {}).items()
+        if str(key).upper() not in {"RESUME", "RESUME_FROM", "CHECKPOINT_PATH"}
+    }
+    command_template = sanitize_command(
+        launcher_command(campaign, identity_run, source_id, "{attempt_id}")
+    )
     retry = run.get("retry", {"max_infra_retries": 0})
+    execution_identity = {
+        "source_mount": bundle.container_path,
+        "workdir": bundle.container_path,
+    }
+    run_resources = dict(run.get("resources", {}))
+    run_resources.setdefault("nodes", 1)
+    asset_requirements = [
+        asdict(item) for item in project.plan_assets(str(run["config"]), overrides)
+    ]
+    checkpoint_identity = dict(run.get("checkpoint", {}))
+    checkpoint_identity.setdefault("save_freq", resolved.get("save_freq"))
     manifest = build_run_manifest(
         project=str(campaign["project"]), run_id=str(run["run_id"]),
         created_at=utc_now(), config_path=str(run["config"]), resolved_config=resolved,
@@ -380,6 +400,12 @@ def prepare_run(
         campaign=str(campaign["campaign"]), image_id=str(run["image_id"]),
         run_dir=remote_run_dir,
         max_infra_retries=int(retry.get("max_infra_retries", 0)),
+        backend=dict(run["backend"]), resources=run_resources,
+        storage=dict(run["storage"]), command=command_template,
+        execution=execution_identity,
+        config_overrides=list(map(str, run.get("config_overrides", []))),
+        assets=asset_requirements, checkpoint=checkpoint_identity,
+        evaluation=dict(run.get("evaluation", {})),
         research_contract=campaign.get("research_contract"),
         research_role=run.get("research_role"),
     )
@@ -387,12 +413,12 @@ def prepare_run(
     effective = dict(base_manifest)
     effective["attempt_id"] = attempt_id
     effective["backend"] = run["backend"]
-    effective["resources"] = run.get("resources", {})
+    effective["resources"] = run_resources
     effective["storage"] = run["storage"]
     effective["config_overrides"] = list(run.get("config_overrides", []))
     effective["retry"] = retry
     effective["command"] = sanitize_command(command)
-    effective["execution"] = {"source_mount": bundle.container_path, "workdir": bundle.container_path}
+    effective["execution"] = execution_identity
     effective["resume_from"] = resolved.get("resume")
     attempt_path = store.attempt_path(attempt_id)
     if attempt_path.exists():
@@ -470,6 +496,64 @@ def reconcile_submission(
         record_submission(campaign, run, attempt_id, str(job_id))
         return str(job_id)
     return None
+
+
+def cancel_intent_path(campaign: dict[str, Any], run: dict[str, Any]) -> Path:
+    attempt_id = selected_attempt_id(run)
+    if not attempt_id:
+        raise ValueError("cancel requires an explicit attempt selector")
+    return run_root_dir(campaign, run) / "attempts" / attempt_id / "cancel_intent.json"
+
+
+def cancel_with_intent(campaign: dict[str, Any], run: dict[str, Any], backend_adapter) -> dict[str, Any]:
+    """Cancel one exact scheduler identity through a durable create-once outbox."""
+    record = backend_record(campaign, run)
+    attempt_id = str(record["attempt_id"])
+    job_id = str(record["backend_job_id"])
+    path = cancel_intent_path(campaign, run)
+    if path.is_file():
+        intent = json.loads(path.read_text(encoding="utf-8"))
+        if intent.get("backend_job_id") != job_id or intent.get("attempt_id") != attempt_id:
+            raise ValueError("cancel intent conflicts with selected scheduler identity")
+        if intent.get("state") == "VERIFIED":
+            return dict(intent["result"])
+        status = backend_adapter.status(campaign, run)
+        if str(status.get("backend_job_id")) != job_id:
+            raise RuntimeError("cancel reconciliation returned a different backend job identity")
+        if str(status.get("state", "")).upper() in {
+            "SUCCEEDED", "FAILED", "CANCELLED", "PREEMPTED",
+        }:
+            intent.update({"state": "VERIFIED", "verified_at": utc_now(), "result": status})
+            atomic_write(path, intent)
+            return status
+        raise RuntimeError(
+            "cancel intent is unresolved and target is still nonterminal; "
+            "do not issue a second cancel mutation"
+        )
+    intent = {
+        "schema_version": 1, "state": "REQUESTED", "requested_at": utc_now(),
+        "project": campaign["project"], "run_id": run["run_id"],
+        "attempt_id": attempt_id, "backend": record.get("backend"),
+        "backend_job_id": job_id,
+    }
+    atomic_create(path, intent)
+    append_event(run_root_dir(campaign, run) / "events.jsonl", {
+        "timestamp": intent["requested_at"], "run_id": run["run_id"],
+        "attempt_id": attempt_id, "backend": record.get("backend"),
+        "backend_job_id": job_id, "event": "cancel_requested", "payload": {},
+    })
+    status = backend_adapter.cancel(campaign, run)
+    if str(status.get("backend_job_id")) != job_id:
+        raise RuntimeError("cancel returned a different backend job identity")
+    intent.update({"state": "VERIFIED", "verified_at": utc_now(), "result": status})
+    atomic_write(path, intent)
+    append_event(run_root_dir(campaign, run) / "events.jsonl", {
+        "timestamp": intent["verified_at"], "run_id": run["run_id"],
+        "attempt_id": attempt_id, "backend": record.get("backend"),
+        "backend_job_id": job_id, "event": "cancel_verified",
+        "payload": {"state": status.get("state")},
+    })
+    return status
 
 
 def recorded_scheduler_job_ids(local_dir: Path, attempt_id: str) -> list[str]:
@@ -871,7 +955,7 @@ def main(argv: list[str] | None = None) -> int:
                 raise ValueError("--tail must be between 1 and 10000")
             outputs.append(backend_adapter.logs(campaign, run, tail=args.tail))
         elif args.command == "cancel":
-            status = backend_adapter.cancel(campaign, run)
+            status = cancel_with_intent(campaign, run, backend_adapter)
             update_observed_status(campaign, run, status)
             outputs.append(status)
         elif args.command == "observe":
