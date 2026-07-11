@@ -1,0 +1,80 @@
+schema_version: 1
+campaign: fusion-len256-gate-h100-20260711
+project: elf
+source_id: auto
+local_root: outputs/experiment_campaigns
+
+# H100 block keeps the original global batch 512 with no accumulation.
+runs:
+  - run_id: elf-a0-pure-l256-s42-h100-v1
+    config: src/configs/training_configs/ablations/owt_elfb/tier0_0_pure_elf_len256.yml
+    config_overrides: &gate_overrides
+      - epochs=1
+      - grad_accum_steps=1
+      - save_freq=0.1
+      - eval_freq=1
+      - num_samples=256
+      - reconstruction_num_samples=256
+      - train_sampling_eval_freq=2000
+      - train_sampling_eval_num_samples=64
+      - train_sampling_eval_batch_size=16
+    image_id: &sif_id sha256:1e25f456cd26219ff89015a41b8653efb0db4444f911522802f850a791710de4
+    resources: &resources {gpus: 4, cpus: 32}
+    env: &env
+      LOG_FREQ: "100"
+      NUM_WORKERS: "8"
+      REQUIRE_OFFLINE_CACHE: "1"
+      USE_WANDB: "false"
+    storage:
+      run_dir: /datapool/liangluocheng/elf/runs/elf-a0-pure-l256-s42-h100-v1
+    retry: {max_infra_retries: 0}
+    backend: &slurm_backend
+      kind: slurm
+      ssh_alias: wyd-l40s
+      partition: h100
+      account: lab
+      qos: normal
+      gres: gpu:h100:4
+      time: "24:00:00"
+      mount_root: /datapool
+      apptainer_cache_dir: /datapool/liangluocheng/elf/apptainer/cache
+      apptainer_tmp_dir: /datapool/liangluocheng/elf/apptainer/tmp
+      source_dir: /datapool/liangluocheng/elf/sources/{source_id}
+      sif_path: /datapool/liangluocheng/elf/images/1e25f456cd26219ff89015a41b8653efb0db4444f911522802f850a791710de4.sif
+      data_root: /datapool/liangluocheng
+      project_data_root: /datapool/liangluocheng/elf
+      hf_home: /datapool/liangluocheng/.cache/huggingface
+      hf_datasets_cache: /datapool/liangluocheng/.cache/huggingface/datasets
+
+  - run_id: elf-a1-frozen-t5-l256-s42-h100-v1
+    config: src/configs/training_configs/ablations/owt_elfb/tier0_1_sentence_t5_len256.yml
+    config_overrides: *gate_overrides
+    image_id: *sif_id
+    resources: *resources
+    env: *env
+    storage:
+      run_dir: /datapool/liangluocheng/elf/runs/elf-a1-frozen-t5-l256-s42-h100-v1
+    retry: {max_infra_retries: 0}
+    backend: *slurm_backend
+
+  - run_id: elf-a2-learned-l256-s42-h100-v1
+    config: src/configs/training_configs/ablations/owt_elfb/tier0_2_learned_main_len256.yml
+    config_overrides: *gate_overrides
+    image_id: *sif_id
+    resources: *resources
+    env: *env
+    storage:
+      run_dir: /datapool/liangluocheng/elf/runs/elf-a2-learned-l256-s42-h100-v1
+    retry: {max_infra_retries: 0}
+    backend: *slurm_backend
+
+  - run_id: elf-a3-aux0-l256-s42-h100-v1
+    config: src/configs/training_configs/ablations/owt_elfb/tier3_aux0_len256.yml
+    config_overrides: *gate_overrides
+    image_id: *sif_id
+    resources: *resources
+    env: *env
+    storage:
+      run_dir: /datapool/liangluocheng/elf/runs/elf-a3-aux0-l256-s42-h100-v1
+    retry: {max_infra_retries: 0}
+    backend: *slurm_backend

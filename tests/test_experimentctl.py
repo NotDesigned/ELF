@@ -81,6 +81,43 @@ def test_prepare_and_render_preserve_explicit_partition(tmp_path, monkeypatch):
     assert manifest["resolved_config"]["log_freq"] == 10
 
 
+def test_render_supports_datapool_storage_mount(tmp_path, monkeypatch):
+    """H100 jobs bind and cache on their declared /datapool filesystem."""
+    monkeypatch.chdir(REPO_ROOT)
+    campaign = slurm_campaign(tmp_path)
+    backend = campaign["runs"][0]["backend"]
+    backend.update(
+        {
+            "mount_root": "/datapool",
+            "apptainer_cache_dir": "/datapool/liangluocheng/elf/apptainer/cache",
+            "apptainer_tmp_dir": "/datapool/liangluocheng/elf/apptainer/tmp",
+            "source_dir": "/datapool/liangluocheng/elf/sources/{source_id}",
+            "sif_path": "/datapool/liangluocheng/elf/images/test.sif",
+            "data_root": "/datapool/liangluocheng",
+            "project_data_root": "/datapool/liangluocheng/elf",
+            "hf_home": "/datapool/liangluocheng/.cache/huggingface",
+            "hf_datasets_cache": "/datapool/liangluocheng/.cache/huggingface/datasets",
+        }
+    )
+    campaign["runs"][0]["storage"]["run_dir"] = "/datapool/liangluocheng/elf/runs/smoke-h100"
+    run = materialize_run(campaign, campaign["runs"][0], "source-fixed")
+    manifest = prepare_run(campaign, run, "source-fixed", attempt_id="attempt-001")
+    script = render_slurm_script(manifest)
+
+    assert "--bind /datapool:/datapool" in script
+    assert "export APPTAINER_CACHEDIR=/datapool/liangluocheng/elf/apptainer/cache" in script
+    assert "export APPTAINER_TMPDIR=/datapool/liangluocheng/elf/apptainer/tmp" in script
+
+
+def test_rejects_relative_slurm_mount_root(tmp_path):
+    campaign = slurm_campaign(tmp_path)
+    campaign["runs"][0]["backend"]["mount_root"] = "datapool"
+    path = tmp_path / "campaign.yml"
+    path.write_text(yaml.safe_dump(campaign), encoding="utf-8")
+    with pytest.raises(ValueError, match="mount_root must be an absolute path"):
+        load_campaign(path)
+
+
 def test_load_campaign_rejects_unreviewed_or_secret_env(tmp_path):
     campaign = slurm_campaign(tmp_path)
     campaign["runs"][0]["env"]["WANDB_API_KEY"] = "secret"

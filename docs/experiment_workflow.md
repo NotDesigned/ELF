@@ -161,6 +161,11 @@ runs:
       hf_datasets_cache: /data/liangluocheng/elf/cache/huggingface/datasets
 ```
 
+For nodes whose persistent filesystem is mounted elsewhere, declare
+`mount_root`, `apptainer_cache_dir`, and `apptainer_tmp_dir` explicitly. For
+example, WYD H100 uses `/datapool`; the renderer binds that same absolute path
+into the container instead of assuming `/data`.
+
 Valid current partition/GRES pairs must still be rediscovered before submit:
 `l40s/gpu:l40s:N`, `h100/gpu:h100:N`, `h200/gpu:h200:N`, and
 `rtx5880/gpu:rtx5880:N`. The controller never derives partition from

@@ -162,6 +162,11 @@ def validate_run(run: Any) -> None:
         raise ValueError(f"run {run['run_id']} backend is missing: {missing}")
     if backend["kind"] == "slurm" and not re.fullmatch(r"gpu:[A-Za-z0-9_-]+:[1-9][0-9]*", backend["gres"]):
         raise ValueError(f"run {run['run_id']} has invalid Slurm gres: {backend['gres']!r}")
+    if backend["kind"] == "slurm":
+        for field in ("mount_root", "apptainer_cache_dir", "apptainer_tmp_dir"):
+            value = backend.get(field)
+            if value is not None and not Path(str(value)).is_absolute():
+                raise ValueError(f"run {run['run_id']} backend.{field} must be an absolute path")
     for field in ("partition", "account", "qos"):
         if backend["kind"] == "slurm" and not re.fullmatch(r"[A-Za-z0-9_.-]+", str(backend[field])):
             raise ValueError(f"run {run['run_id']} has invalid Slurm {field}: {backend[field]!r}")
@@ -395,6 +400,13 @@ def render_slurm_script(manifest: dict[str, Any]) -> str:
     run_dir = manifest["storage"]["run_dir"]
     source_dir = backend["source_dir"]
     sif_path = backend["sif_path"]
+    mount_root = str(backend.get("mount_root", "/data"))
+    apptainer_cache_dir = str(
+        backend.get("apptainer_cache_dir", f"{mount_root.rstrip('/')}/apptainer/cache/liangluocheng")
+    )
+    apptainer_tmp_dir = str(
+        backend.get("apptainer_tmp_dir", f"{mount_root.rstrip('/')}/apptainer/tmp/liangluocheng")
+    )
     command = shell_join(manifest["command"])
     cpus = int(resources.get("cpus", 8))
     return f"""#!/usr/bin/env bash
@@ -411,8 +423,8 @@ def render_slurm_script(manifest: dict[str, Any]) -> str:
 #SBATCH --error=/dev/null
 
 set -euo pipefail
-export APPTAINER_CACHEDIR=/data/apptainer/cache/liangluocheng
-export APPTAINER_TMPDIR=/data/apptainer/tmp/liangluocheng
+export APPTAINER_CACHEDIR={shlex.quote(apptainer_cache_dir)}
+export APPTAINER_TMPDIR={shlex.quote(apptainer_tmp_dir)}
 export BACKEND_JOB_ID="$SLURM_JOB_ID"
 mkdir -p {shlex.quote(run_dir)}
 attempt_log_dir={shlex.quote(f"{run_dir}/attempts/{manifest['attempt_id']}")}
@@ -422,7 +434,7 @@ exec > >(tee -a "$attempt_log_dir/slurm-$SLURM_JOB_ID.out") \
 test -d {shlex.quote(source_dir)}
 test -s {shlex.quote(sif_path)}
 srun apptainer exec --nv \
-  --bind /data:/data \
+  --bind {shlex.quote(mount_root)}:{shlex.quote(mount_root)} \
   --bind {shlex.quote(source_dir)}:/app \
   --pwd /app \
   {shlex.quote(sif_path)} \
