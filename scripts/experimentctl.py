@@ -356,6 +356,11 @@ def reconcile_submission(
 ) -> str | None:
     """Recover a scheduler identity after acceptance/local-record crash."""
     local_dir = local_run_dir(campaign, run)
+    recorded = recorded_scheduler_job_ids(local_dir, attempt_id)
+    if len(recorded) > 1:
+        raise RuntimeError(
+            f"ambiguous scheduler identity: attempt {attempt_id} records jobs {recorded}"
+        )
     root_record = local_dir / "backend.json"
     if root_record.is_file():
         payload = json.loads(root_record.read_text(encoding="utf-8"))
@@ -371,6 +376,75 @@ def reconcile_submission(
         record_submission(campaign, run, attempt_id, str(job_id))
         return str(job_id)
     return None
+
+
+def recorded_scheduler_job_ids(local_dir: Path, attempt_id: str) -> list[str]:
+    """Return every distinct scheduler job recorded for one local attempt."""
+    found: set[str] = set()
+    events_path = local_dir / "events.jsonl"
+    if events_path.is_file():
+        for line_number, line in enumerate(
+            events_path.read_text(encoding="utf-8").splitlines(), start=1
+        ):
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError as error:
+                raise ValueError(
+                    f"invalid lifecycle event: {events_path}:{line_number}"
+                ) from error
+            if not isinstance(event, dict):
+                raise ValueError(
+                    f"lifecycle event is not an object: {events_path}:{line_number}"
+                )
+            if event.get("attempt_id") == attempt_id and event.get("backend_job_id"):
+                found.add(str(event["backend_job_id"]))
+    for path in (
+        local_dir / "backend.json",
+        local_dir / "attempts" / attempt_id / "submission.json",
+    ):
+        if path.is_file():
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            if payload.get("attempt_id") == attempt_id and payload.get("backend_job_id"):
+                found.add(str(payload["backend_job_id"]))
+    return sorted(found, key=lambda value: (len(value), value))
+
+
+def identity_report(
+    campaign: dict[str, Any], run: dict[str, Any], attempt_id: str
+) -> dict[str, Any]:
+    """Combine local durable history with the backend's read-only identity probe."""
+    local_dir = local_run_dir(campaign, run)
+    local_jobs = recorded_scheduler_job_ids(local_dir, attempt_id)
+    remote = BACKENDS.get(str(run["backend"]["kind"])).identity(
+        campaign, run, attempt_id
+    ).to_dict()
+    all_jobs = sorted(
+        {*local_jobs, *map(str, remote.get("scheduler_job_ids", []))},
+        key=lambda value: (len(value), value),
+    )
+    ambiguous = bool(remote.get("ambiguous")) or len(all_jobs) > 1
+    available = bool(remote.get("available")) and not local_jobs and not ambiguous
+    return {
+        "run_id": run["run_id"],
+        "attempt_id": attempt_id,
+        "available": available,
+        "ambiguous": ambiguous,
+        "scheduler_job_ids": all_jobs,
+        "local_manifest_exists": (local_dir / "manifest.yaml").is_file(),
+        "remote_manifest_exists": remote.get("remote_manifest_exists"),
+    }
+
+
+def require_identity_available(
+    campaign: dict[str, Any], run: dict[str, Any], attempt_id: str
+) -> dict[str, Any]:
+    """Fail closed unless one run/attempt identity is unused and unambiguous."""
+    report = identity_report(campaign, run, attempt_id)
+    if not report["available"]:
+        raise FileExistsError(
+            f"run/attempt identity is already consumed or ambiguous: {report}"
+        )
+    return report
 
 
 def ensure_attempt_not_submitted(
@@ -454,10 +528,21 @@ def write_local_collection(campaign: dict[str, Any], run: dict[str, Any], summar
 def annotate_collection(
     summary: dict[str, Any], scheduler_status: dict[str, Any]
 ) -> dict[str, Any]:
-    """Keep scheduler truth separate from possibly stale runtime state."""
+    """Keep scheduler, worker, process, and model evidence explicitly separate."""
     annotated = dict(summary)
     annotated["runtime_state"] = summary.get("state")
     annotated["scheduler_state"] = scheduler_status.get("state")
+    annotated["worker_state"] = summary.get("worker_state", "UNKNOWN")
+    model_evidence = (
+        summary.get("model_observed"),
+        summary.get("step"),
+        summary.get("latest_metric"),
+        summary.get("latest_completed_checkpoint"),
+    )
+    annotated["model_state"] = (
+        "OBSERVED" if any(value is not None and value is not False for value in model_evidence)
+        else "NOT_OBSERVED"
+    )
     return annotated
 
 
@@ -484,7 +569,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "command", choices=(
             "prepare", "preflight", "stage", "submit", "status", "collect", "cancel",
-            "observe", "logs", "decide", "assets-plan", "assets-verify",
+            "observe", "logs", "decide", "assets-plan", "assets-verify", "check-identity",
         )
     )
     parser.add_argument("--run", action="append", default=[], help="limit to this run ID; repeatable")
@@ -516,28 +601,37 @@ def main(argv: list[str] | None = None) -> int:
         backend_kind = run["backend"]["kind"]
         backend_adapter = BACKENDS.get(backend_kind)
         manifest = None
-        if args.command in {"prepare", "stage", "submit"}:
+        if args.command == "prepare" or (args.command == "submit" and args.dry_run):
             manifest = prepare_run(campaign, run, identity, attempt_id=args.attempt_id)
         if args.command == "prepare":
             outputs.append({"run_id": run["run_id"], "state": "CREATED"})
         elif args.command == "preflight":
             report = backend_adapter.preflight(run, scope=args.scope)
             outputs.append({"run_id": run["run_id"], **report.to_dict()})
+        elif args.command == "check-identity":
+            backend_adapter.preflight(run, scope="observe").require_ready()
+            outputs.append(identity_report(campaign, run, args.attempt_id))
         elif args.command == "stage":
             backend_adapter.preflight(run, scope="stage").require_ready()
+            require_identity_available(campaign, run, args.attempt_id)
+            prepare_run(campaign, run, identity, attempt_id=args.attempt_id)
             bundle = PROJECTS.get(str(campaign["project"])).source_bundle(REPO_ROOT)
             staged = backend_adapter.stage(campaign, run, identity, bundle)
             outputs.append({"run_id": run["run_id"], "staged": staged})
         elif args.command == "submit":
-            assert manifest is not None
             if not args.dry_run:
                 backend_adapter.preflight(run, scope="submit").require_ready()
                 recovered = reconcile_submission(campaign, run, args.attempt_id)
                 if recovered:
                     outputs.append({"run_id": run["run_id"], "backend_job_id": recovered, "reconciled": True})
                     continue
+                require_identity_available(campaign, run, args.attempt_id)
+                manifest = prepare_run(
+                    campaign, run, identity, attempt_id=args.attempt_id
+                )
                 ensure_attempt_not_submitted(campaign, run, args.attempt_id)
                 record_submission_intent(campaign, run, args.attempt_id)
+            assert manifest is not None
             job_id = backend_adapter.submit(campaign, run, manifest, dry_run=args.dry_run)
             if not args.dry_run:
                 record_submission(campaign, run, args.attempt_id, job_id)
@@ -581,7 +675,19 @@ def main(argv: list[str] | None = None) -> int:
                 write_local_collection(campaign, run, collection)
             else:
                 status, collection = unsubmitted_status(campaign, run), None
-            outputs.append({"run_id": run["run_id"], "scheduler": status, "model": collection})
+            outputs.append({
+                "run_id": run["run_id"],
+                "scheduler": status,
+                "worker": {
+                    "state": collection.get("worker_state", "UNKNOWN")
+                    if collection else "UNKNOWN"
+                },
+                "process": {
+                    "state": collection.get("runtime_state", "UNKNOWN")
+                    if collection else "UNKNOWN"
+                },
+                "model": collection,
+            })
         elif args.command == "decide":
             local_dir = local_run_dir(campaign, run)
             status = unsubmitted_status(campaign, run)
@@ -616,8 +722,22 @@ def main(argv: list[str] | None = None) -> int:
     print(json.dumps(outputs, ensure_ascii=False, indent=2, sort_keys=True))
     if args.command == "preflight" and any(not output.get("ready", False) for output in outputs):
         return 1
+    if args.command == "check-identity" and any(not output.get("available", False) for output in outputs):
+        return 1
     return 0
 
 
+def cli(argv: list[str] | None = None) -> int:
+    """Render expected operational failures without a Python traceback."""
+    try:
+        return main(argv)
+    except (FileExistsError, FileNotFoundError, RuntimeError, ValueError) as error:
+        print(json.dumps({
+            "error": type(error).__name__,
+            "message": str(error),
+        }, ensure_ascii=False, sort_keys=True), file=sys.stderr)
+        return 2
+
+
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(cli())

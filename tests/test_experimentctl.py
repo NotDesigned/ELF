@@ -10,6 +10,7 @@ import pytest
 import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+import experimentctl
 from experimentctl import (
     annotate_collection,
     ensure_attempt_not_submitted,
@@ -17,6 +18,7 @@ from experimentctl import (
     load_campaign,
     materialize_run,
     prepare_run,
+    reconcile_submission,
     record_submission,
     record_submission_intent,
     resolved_run_overrides,
@@ -43,6 +45,16 @@ def test_preflight_cli_returns_nonzero_when_a_required_tool_is_unavailable():
     )
     assert result.returncode == 1
     assert '"ready": false' in result.stdout
+
+
+def test_cli_formats_expected_operational_error_without_traceback(monkeypatch, capsys):
+    def fail(_argv):
+        raise FileExistsError("identity consumed")
+
+    monkeypatch.setattr(experimentctl, "main", fail)
+    assert experimentctl.cli([]) == 2
+    error = json.loads(capsys.readouterr().err)
+    assert error == {"error": "FileExistsError", "message": "identity consumed"}
 
 
 def slurm_campaign(tmp_path: Path) -> dict:
@@ -117,6 +129,11 @@ def test_controller_manifest_is_accepted_unchanged_by_runtime(tmp_path, monkeypa
     run["storage"]["run_dir"] = str(remote_dir)
     prepare_run(campaign, run, "source-fixed", attempt_id="attempt-001")
     local_manifest = tmp_path / "local/controller-test/smoke-h100/manifest.yaml"
+    frozen = yaml.safe_load(local_manifest.read_text(encoding="utf-8"))
+    assert frozen["git_commit"] == "commit"
+    assert frozen["runtime_tree_id"] == "source-fixed"
+    assert frozen["campaign_id"] == "campaign-id"
+    assert frozen["image_id"] == run["image_id"]
     remote_dir.mkdir()
     shutil.copy2(local_manifest, remote_dir / "manifest.yaml")
     runtime_prepare(Namespace(
@@ -240,6 +257,35 @@ def test_submitted_attempt_cannot_be_submitted_twice(tmp_path, monkeypatch):
         ensure_attempt_not_submitted(campaign, run, "attempt-001")
 
 
+def test_reconcile_rejects_two_recorded_jobs_for_one_attempt(tmp_path, monkeypatch):
+    monkeypatch.chdir(REPO_ROOT)
+    campaign = slurm_campaign(tmp_path)
+    run = materialize_run(campaign, campaign["runs"][0], "source-fixed")
+    prepare_run(campaign, run, "source-fixed", attempt_id="attempt-001")
+    events_path = tmp_path / "local/controller-test/smoke-h100/events.jsonl"
+    with events_path.open("a", encoding="utf-8") as handle:
+        for job_id in ("1731", "1732"):
+            handle.write(json.dumps({
+                "attempt_id": "attempt-001",
+                "backend_job_id": job_id,
+                "event": "scheduler_accepted",
+            }) + "\n")
+    with pytest.raises(RuntimeError, match="records jobs.*1731.*1732"):
+        reconcile_submission(campaign, run, "attempt-001")
+
+
+def test_reconcile_fails_closed_on_corrupt_local_event_history(tmp_path, monkeypatch):
+    monkeypatch.chdir(REPO_ROOT)
+    campaign = slurm_campaign(tmp_path)
+    run = materialize_run(campaign, campaign["runs"][0], "source-fixed")
+    prepare_run(campaign, run, "source-fixed", attempt_id="attempt-001")
+    events_path = tmp_path / "local/controller-test/smoke-h100/events.jsonl"
+    with events_path.open("a", encoding="utf-8") as handle:
+        handle.write("{not-json}\n")
+    with pytest.raises(ValueError, match="invalid lifecycle event"):
+        reconcile_submission(campaign, run, "attempt-001")
+
+
 def test_read_operations_can_recover_frozen_source_identity(tmp_path, monkeypatch):
     monkeypatch.chdir(REPO_ROOT)
     campaign = slurm_campaign(tmp_path)
@@ -274,3 +320,5 @@ def test_collection_separates_stale_runtime_from_scheduler_truth():
     result = annotate_collection({"state": "RUNNING", "step": 10}, {"state": "CANCELLED"})
     assert result["runtime_state"] == "RUNNING"
     assert result["scheduler_state"] == "CANCELLED"
+    assert result["worker_state"] == "UNKNOWN"
+    assert result["model_state"] == "OBSERVED"

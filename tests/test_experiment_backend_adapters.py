@@ -1,6 +1,8 @@
 import json
 from pathlib import Path
 
+import pytest
+
 from experiment_control.runner import CommandResult, SubprocessRunner
 from experiment_control.backends.wyd import WydSlurmBackend
 from experiment_projects.elf import ElfProjectAdapter
@@ -66,6 +68,37 @@ def test_sensecore_preflight_fails_closed_on_malformed_sanitized_response():
     finally:
         set_command_runner(SubprocessRunner())
     assert report.ready is False
+
+
+def test_sensecore_identity_probe_reports_consumed_exact_name():
+    run = {
+        "run_id": "sensecore-identity",
+        "backend": {
+            "kind": "sensecore", "workspace": "workspace",
+            "job_name": "sensecore-identity",
+        },
+    }
+    fake = QueueRunner([
+        CommandResult(
+            ("safe-list",), 0,
+            '[{"name":"sensecore-identity","state":"RUNNING"}]\n',
+        ),
+    ])
+    services = backend_services()
+    backend = SenseCoreBackend(type(services)(
+        fake.run, services.local_run_dir, services.backend_record,
+        services.summarize_run, services.parse_metric, services.parse_checkpoint,
+        services.atomic_write, services.utc_now,
+    ))
+    report = backend.identity(
+        {"campaign": "identity-test"}, run, "attempt-001"
+    ).to_dict()
+    assert report == {
+        "available": False,
+        "ambiguous": False,
+        "scheduler_job_ids": ["sensecore-identity"],
+        "remote_manifest_exists": None,
+    }
 
 
 def test_slurm_preflight_checks_tools_live_resources_and_storage(tmp_path: Path):
@@ -160,8 +193,31 @@ def test_slurm_submit_stages_canonical_manifest_before_job_script(tmp_path, monk
     finally:
         set_command_runner(SubprocessRunner())
     assert job_id == "4321"
+    assert ".submission-attempt-001" in " ".join(fake.commands[1])
     assert fake.commands[2][-1].endswith("/manifest.yaml")
     assert "controller-attempt-001.sbatch" in fake.commands[3][-1]
+
+
+def test_slurm_submit_claim_blocks_duplicate_scheduler_mutation(tmp_path):
+    campaign = slurm_campaign(tmp_path)
+    run = materialize_run(campaign, campaign["runs"][0], "source-fixed")
+    manifest = prepare_run(campaign, run, "source-fixed", attempt_id="attempt-001")
+    fake = QueueRunner([
+        CommandResult(
+            ("validate-live",), 0,
+            "h100|up|3-00:00:00|gpu:h100:8\nuser|lab||normal|normal\n",
+        ),
+        CommandResult(("claim",), 1, "", "already exists"),
+    ])
+    services = backend_services()
+    backend = WydSlurmBackend(type(services)(
+        fake.run, services.local_run_dir, services.backend_record,
+        services.summarize_run, services.parse_metric, services.parse_checkpoint,
+        services.atomic_write, services.utc_now,
+    ))
+    with pytest.raises(FileExistsError, match="submission claim"):
+        backend.submit(campaign, run, manifest, dry_run=False)
+    assert len(fake.commands) == 2
 
 
 def test_slurm_collection_reports_latest_remote_completed_checkpoint(tmp_path):
@@ -189,16 +245,71 @@ def test_slurm_submission_intent_recovers_job_by_unique_comment(tmp_path: Path, 
     prepare_run(campaign, run, "source-fixed", attempt_id="attempt-009")
     intent = record_submission_intent(campaign, run, "attempt-009")
     token = intent["request"]["submission_token"]
-    fake = QueueRunner([CommandResult(("ssh",), 0, f"9876|smoke-h100--attempt-009|{token}\n")])
+    fake = QueueRunner([
+        CommandResult(("squeue",), 0, f"9876|smoke-h100--attempt-009|{token}\n"),
+        CommandResult(("sacct",), 0, "9876|smoke-h100--attempt-009\n"),
+    ])
     set_command_runner(fake)
     try:
         assert reconcile_submission(campaign, run, "attempt-009") == "9876"
     finally:
         set_command_runner(SubprocessRunner())
-    backend = json.loads(
-        (tmp_path / "local/controller-test/smoke-h100/backend.json").read_text(encoding="utf-8")
+    backend_record = json.loads(
+        (tmp_path / "local/controller-test/smoke-h100/backend.json").read_text(
+            encoding="utf-8"
+        )
     )
-    assert backend["backend_job_id"] == "9876"
+    assert backend_record["backend_job_id"] == "9876"
+
+
+def test_slurm_submission_recovery_rejects_multiple_matching_jobs(tmp_path: Path):
+    campaign = slurm_campaign(tmp_path)
+    run = materialize_run(campaign, campaign["runs"][0], "source-fixed")
+    fake = QueueRunner([
+        CommandResult(("squeue",), 0, "1732|smoke-h100--attempt-001|token\n"),
+        CommandResult(
+            ("sacct",), 0,
+            "1731|smoke-h100--attempt-001\n1732|smoke-h100--attempt-001\n",
+        ),
+    ])
+    backend = WydSlurmBackend(type(backend_services())(
+        fake.run,
+        backend_services().local_run_dir,
+        backend_services().backend_record,
+        backend_services().summarize_run,
+        backend_services().parse_metric,
+        backend_services().parse_checkpoint,
+        backend_services().atomic_write,
+        backend_services().utc_now,
+    ))
+    with pytest.raises(RuntimeError, match="2 jobs match"):
+        backend.recover_submission(
+            run, {"submission_token": "token"}, "attempt-001"
+        )
+
+
+def test_slurm_identity_probe_is_read_only_and_reports_availability(tmp_path: Path):
+    campaign = slurm_campaign(tmp_path)
+    run = materialize_run(campaign, campaign["runs"][0], "source-fixed")
+    fake = QueueRunner([
+        CommandResult(("squeue",), 0, ""),
+        CommandResult(("sacct",), 0, ""),
+        CommandResult(("manifest",), 1, ""),
+    ])
+    services = backend_services()
+    backend = WydSlurmBackend(type(services)(
+        fake.run, services.local_run_dir, services.backend_record,
+        services.summarize_run, services.parse_metric, services.parse_checkpoint,
+        services.atomic_write, services.utc_now,
+    ))
+    report = backend.identity(campaign, run, "attempt-001").to_dict()
+    assert report == {
+        "available": True,
+        "ambiguous": False,
+        "scheduler_job_ids": [],
+        "remote_manifest_exists": False,
+    }
+    assert len(fake.commands) == 3
 
 
 def test_slurm_submission_intent_recovers_terminal_job_by_attempt_name(tmp_path: Path, monkeypatch):
