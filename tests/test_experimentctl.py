@@ -122,6 +122,28 @@ def test_prepare_and_render_preserve_explicit_partition(tmp_path, monkeypatch):
     assert manifest["resolved_config"]["log_freq"] == 10
 
 
+def test_submit_dry_run_reports_local_artifacts_and_next_gates(tmp_path):
+    campaign = slurm_campaign(tmp_path)
+    path = tmp_path / "campaign.yml"
+    path.write_text(yaml.safe_dump(campaign), encoding="utf-8")
+    result = subprocess.run(
+        [
+            sys.executable, "scripts/experimentctl.py", str(path), "submit",
+            "--run", "smoke-h100", "--attempt-id", "attempt-001", "--dry-run",
+        ],
+        cwd=REPO_ROOT, text=True, capture_output=True, check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)[0]
+    assert payload["scheduler_mutated"] is False
+    assert payload["state"] == "CREATED"
+    assert Path(payload["manifest_path"]).is_file()
+    assert Path(payload["submission_preview_path"]).is_file()
+    assert payload["next_gates"] == [
+        "check-identity", "assets-verify", "stage", "submit",
+    ]
+
+
 def test_controller_manifest_is_accepted_unchanged_by_runtime(tmp_path, monkeypatch):
     monkeypatch.chdir(REPO_ROOT)
     campaign = slurm_campaign(tmp_path)
@@ -523,3 +545,18 @@ def test_collection_classifies_pretraining_import_failure():
     assert result["process_state"] == "FAILED"
     assert result["model_state"] == "NOT_OBSERVED"
     assert result["failure_class"] == "configuration"
+
+
+def test_collection_marks_expired_external_evidence_inconclusive():
+    result = annotate_collection(
+        {
+            "state": None,
+            "model_observed": False,
+            "evidence_unavailable_reason": "live_logs_expired",
+        },
+        {"state": "SUCCEEDED"},
+    )
+    assert result["worker_state"] == "RELEASED"
+    assert result["process_state"] == "UNKNOWN"
+    assert result["model_state"] == "UNKNOWN"
+    assert result["evidence_outcome"] == "INCONCLUSIVE"

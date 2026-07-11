@@ -114,6 +114,7 @@ The controller accepts only non-secret tool overrides:
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `EXPERIMENTCTL_SCO_BIN` | `sco` | SenseCore CLI executable. |
+| `EXPERIMENTCTL_SCO_CREATE_TIMEOUT_SECONDS` | `120` | Bound SCO create before exact-name reconciliation. |
 | `EXPERIMENTCTL_SSH_BIN` | `ssh` | WYD SSH executable. |
 | `EXPERIMENTCTL_RSYNC_BIN` | `rsync` | WYD transfer executable. |
 | `EXPERIMENTCTL_DOCKER_BIN` | `docker` | Local registry publisher engine. |
@@ -233,6 +234,13 @@ evaluation failures are never silently retried or resource-adjusted.
 bars are normalized before the final line bound is applied. SenseCore uses a
 20-second live stream and reports `expired: true` when the terminal job's log
 token has expired instead of retrying indefinitely.
+
+SenseCore CLI v1.2 may print the exact non-JSON sentinel `No jobs found` on a
+successful exact-name query requested as JSON. The bundled sanitizer maps only
+that exact sentinel (or empty stdout) to `[]`; every other non-JSON response
+still fails closed. Expired live logs produce an explicit
+`evidence_unavailable_reason` and `INCONCLUSIVE` evidence outcome rather than a
+claim that model artifacts do not exist.
 
 Collection records both `scheduler_state` and `runtime_state`. They may differ
 after preemption or cancellation because a killed process cannot always update

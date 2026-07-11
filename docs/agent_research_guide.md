@@ -50,7 +50,8 @@ unique instance (do not overwrite an existing output):
 ```bash
 CAMPAIGN=$(python scripts/instantiate_campaign.py \
   experiments/templates/backend_smoke_slurm.yml \
-  --instance 20260712T120000)
+  --instance 20260712T120000 \
+  --local-root /tmp/elf-controller-state)
 ```
 
 Review the generated YAML and validate the relevant code/config. Then use one
@@ -74,6 +75,11 @@ consumed or ambiguous run/attempt. Dry-run writes controller-local metadata;
 Both mutations enforce their own scoped preflight. Real submit repeats the
 identity gate, so bypassing the documented order cannot silently duplicate a
 job.
+
+`--output` selects where the generated campaign YAML is written;
+`--local-root` independently selects where controller metadata is written.
+Dry-run output names the frozen manifest, attempt, and submission-preview
+paths and confirms `scheduler_mutated: false`.
 
 For a retry or historical inspection, pass the same explicit
 `--attempt-id attempt-NNN` to `status`, `logs`, `collect`, `observe`, `cancel`,

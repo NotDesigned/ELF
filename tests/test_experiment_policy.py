@@ -36,3 +36,13 @@ def test_scheduler_success_has_no_failure_class():
     )
     assert decision.action == "VERIFY_RESULTS"
     assert decision.failure_class == "none"
+    assert decision.evidence_outcome == "INCONCLUSIVE"
+
+
+def test_cancelled_run_is_not_a_failure_but_remains_inconclusive():
+    decision = decide_next_action(
+        {"state": "CANCELLED"}, retries_used=0, max_infra_retries=2
+    )
+    assert decision.action == "DO_NOT_RETRY"
+    assert decision.failure_class == "none"
+    assert decision.evidence_outcome == "INCONCLUSIVE"

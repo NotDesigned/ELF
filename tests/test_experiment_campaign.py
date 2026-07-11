@@ -173,6 +173,23 @@ def test_instantiate_campaign_cli_refuses_overwrite(tmp_path):
     assert load_and_resolve_campaign(output)["runs"][0]["run_id"].endswith("fresh-a")
 
 
+def test_instantiate_campaign_cli_can_isolate_controller_state(tmp_path):
+    output = tmp_path / "fresh.yml"
+    local_root = tmp_path / "controller-state"
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(REPO_ROOT / "scripts/instantiate_campaign.py"),
+            str(REPO_ROOT / "experiments/templates/backend_smoke_slurm.yml"),
+            "--instance", "isolated-a", "--output", str(output),
+            "--local-root", str(local_root),
+        ],
+        text=True, capture_output=True, check=False,
+    )
+    assert result.returncode == 0
+    assert load_and_resolve_campaign(output)["local_root"] == str(local_root)
+
+
 @pytest.mark.parametrize(
     ("filename", "expected_runs"),
     [

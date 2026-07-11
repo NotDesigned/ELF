@@ -48,6 +48,22 @@ def test_job_list_ignores_non_objects() -> None:
     assert json.loads(result.stdout)[0]["normalized_state"] == "RUNNING"
 
 
+def test_job_list_normalizes_successful_empty_stdout() -> None:
+    result = run_safe("job-list", "   \n")
+    assert result.returncode == 0
+    assert json.loads(result.stdout) == []
+
+
+def test_job_list_normalizes_only_the_sco_v1_2_no_match_sentinel() -> None:
+    result = run_safe("job-list", "No jobs found\n")
+    assert result.returncode == 0
+    assert json.loads(result.stdout) == []
+
+    unexpected = run_safe("job-list", "No resources available\n")
+    assert unexpected.returncode != 0
+    assert "raw response suppressed" in unexpected.stderr
+
+
 def test_job_summary_tolerates_missing_external_state() -> None:
     result = run_safe("job-summary", json.dumps({"name": "job-without-state"}))
     assert result.returncode == 0

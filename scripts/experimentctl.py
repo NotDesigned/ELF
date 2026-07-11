@@ -704,8 +704,13 @@ def annotate_collection(
         summary.get("latest_completed_checkpoint"),
     )
     annotated["model_state"] = (
-        "OBSERVED" if any(value is not None and value is not False for value in model_evidence)
+        "UNKNOWN" if summary.get("evidence_unavailable_reason")
+        else "OBSERVED" if any(value is not None and value is not False for value in model_evidence)
         else "NOT_OBSERVED"
+    )
+    annotated["evidence_outcome"] = (
+        "INCONCLUSIVE" if summary.get("evidence_unavailable_reason")
+        else "OBSERVED"
     )
     return annotated
 
@@ -801,9 +806,30 @@ def main(argv: list[str] | None = None) -> int:
                 record_submission_intent(campaign, run, args.attempt_id)
             assert manifest is not None
             job_id = backend_adapter.submit(campaign, run, manifest, dry_run=args.dry_run)
-            if not args.dry_run:
+            if args.dry_run:
+                root = run_root_dir(campaign, run)
+                attempt_dir = root / "attempts" / args.attempt_id
+                preview = attempt_dir / "submission.preview"
+                preview.write_text(
+                    backend_adapter.render(manifest) + "\n", encoding="utf-8"
+                )
+                outputs.append({
+                    "run_id": run["run_id"],
+                    "attempt_id": args.attempt_id,
+                    "backend_job_id": job_id,
+                    "state": "CREATED",
+                    "scheduler_mutated": False,
+                    "local_run_dir": str(root),
+                    "manifest_path": str(root / "manifest.yaml"),
+                    "attempt_path": str(attempt_dir / "attempt.yaml"),
+                    "submission_preview_path": str(preview),
+                    "next_gates": [
+                        "check-identity", "assets-verify", "stage", "submit",
+                    ],
+                })
+            else:
                 record_submission(campaign, run, args.attempt_id, job_id)
-            outputs.append({"run_id": run["run_id"], "backend_job_id": job_id})
+                outputs.append({"run_id": run["run_id"], "backend_job_id": job_id})
         elif args.command == "status":
             reconcile_submission(campaign, run, args.attempt_id)
             selected_record = ExperimentStateStore(

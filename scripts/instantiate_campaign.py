@@ -20,6 +20,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("template", type=Path)
     parser.add_argument("--instance", required=True)
     parser.add_argument("--output", type=Path)
+    parser.add_argument(
+        "--local-root", type=Path,
+        help="override controller metadata root in the generated definition",
+    )
     return parser.parse_args(argv)
 
 
@@ -28,6 +32,11 @@ def main(argv: list[str] | None = None) -> int:
     template = args.template.resolve()
     payload = yaml.safe_load(template.read_text(encoding="utf-8"))
     campaign = instantiate_campaign_template(payload, args.instance)
+    if args.local_root is not None:
+        local_root = args.local_root
+        if not local_root.is_absolute():
+            local_root = (Path.cwd() / local_root).resolve()
+        campaign["local_root"] = str(local_root)
     try:
         generated_from = str(template.relative_to(REPO_ROOT))
     except ValueError:

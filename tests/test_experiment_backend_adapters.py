@@ -146,6 +146,7 @@ def test_sensecore_attempt_identity_and_render_pin_the_recorded_digest():
     assert "--name sensecore-render--attempt-002" in rendered
     assert f"--container-image-url registry.example/project/image@{digest}" in rendered
     assert "image:runtime-source-fixed" not in rendered
+    assert rendered.startswith("timeout 120s env ")
     assert backend.submit({}, run, manifest, dry_run=True) == "DRY_RUN"
     assert fake.commands == []
 
@@ -163,6 +164,13 @@ def test_sensecore_attempt_resource_names_are_distinct_and_bounded():
     assert digest_pinned_image(
         "registry.example:5000/ns/image:source-abc", "sha256:" + "c" * 64
     ) == "registry.example:5000/ns/image@sha256:" + "c" * 64
+
+
+def test_sensecore_create_timeout_is_bounded(monkeypatch):
+    backend = SenseCoreBackend(backend_services())
+    monkeypatch.setenv("EXPERIMENTCTL_SCO_CREATE_TIMEOUT_SECONDS", "9")
+    with pytest.raises(ValueError, match="integer from 10 to 600"):
+        backend.create_timeout_seconds()
 
 
 @pytest.mark.parametrize("method_name", ["find", "describe"])
@@ -189,7 +197,8 @@ def test_sensecore_query_errors_are_redacted_before_exception(method_name: str):
         getattr(backend, method_name)(run, "job--attempt-001")
     assert secret not in str(captured.value)
     assert "<redacted>" in str(captured.value)
-    assert "2>&1" in fake.commands[0][-1]
+    assert "redact-lines" in fake.commands[0][-1]
+    assert "2>&1" not in fake.commands[0][-1]
 
 
 def test_slurm_preflight_checks_tools_live_resources_and_storage(tmp_path: Path):

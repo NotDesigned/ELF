@@ -16,6 +16,7 @@ class Decision:
     retries_used: int
     retries_allowed: int
     resume_checkpoint: str | None = None
+    evidence_outcome: str = "INCONCLUSIVE"
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -28,11 +29,23 @@ def decide_next_action(
     """Recommend, but never execute, a bounded action from normalized evidence."""
     state = str(status.get("state", "UNKNOWN"))
     if state in {"CREATED", "NOT_SUBMITTED"}:
-        return Decision("SUBMIT", FailureClass.UNKNOWN.value, "run has no scheduler job", retries_used, max_infra_retries)
+        return Decision(
+            "SUBMIT", FailureClass.UNKNOWN.value, "run has no scheduler job",
+            retries_used, max_infra_retries, evidence_outcome="PENDING",
+        )
     if state in {"QUEUED", "STARTING", "RUNNING", "EVALUATING", "SUBMITTING"}:
-        return Decision("OBSERVE", FailureClass.UNKNOWN.value, "run is nonterminal", retries_used, max_infra_retries)
+        return Decision(
+            "OBSERVE", FailureClass.UNKNOWN.value, "run is nonterminal",
+            retries_used, max_infra_retries, evidence_outcome="PENDING",
+        )
     if state == "SUCCEEDED":
         return Decision("VERIFY_RESULTS", FailureClass.NONE.value, "scheduler succeeded; verify required metrics", retries_used, max_infra_retries)
+    if state == "CANCELLED":
+        return Decision(
+            "DO_NOT_RETRY", FailureClass.NONE.value,
+            "run was explicitly cancelled; scientific evidence may be incomplete",
+            retries_used, max_infra_retries,
+        )
     declared = str(status.get("failure_class") or "")
     try:
         failure = FailureClass(declared) if declared else classify_failure(diagnostic_text)
