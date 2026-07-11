@@ -324,6 +324,12 @@ immutable image tag+digest, worker spec, spot quota, and AFS mount. Campaign
 environment fields use a strict non-secret allowlist; credentials must not be
 placed in YAML or startup commands.
 
+The SenseCore resource name is validated locally against the live API rule:
+1–63 characters, starting with a lowercase letter, ending with a lowercase
+letter or digit, and containing only lowercase letters, digits, and hyphens.
+Attempt IDs used on SenseCore follow the same lowercase/internal-hyphen
+discipline. Display names are not assumed to share this constraint.
+
 SenseCore preflight checks the SCO executable and an exact-name workspace query
 through `safe_sco.py`; malformed/non-JSON responses fail closed. WYD observe
 preflight checks only SSH and Slurm control access; stage adds rsync/storage;

@@ -166,6 +166,23 @@ def test_sensecore_attempt_resource_names_are_distinct_and_bounded():
     ) == "registry.example:5000/ns/image@sha256:" + "c" * 64
 
 
+@pytest.mark.parametrize(
+    ("base_name", "attempt_id"),
+    [
+        ("Run", "attempt-001"),
+        ("run_name", "attempt-001"),
+        ("1run", "attempt-001"),
+        ("run", "Attempt-001"),
+        ("run", "attempt-001-"),
+    ],
+)
+def test_sensecore_resource_name_rejects_values_the_api_would_reject(
+    base_name, attempt_id
+):
+    with pytest.raises(ValueError, match="SenseCore"):
+        sensecore_scheduler_job_name(base_name, attempt_id)
+
+
 def test_sensecore_create_timeout_is_bounded(monkeypatch):
     backend = SenseCoreBackend(backend_services())
     monkeypatch.setenv("EXPERIMENTCTL_SCO_CREATE_TIMEOUT_SECONDS", "9")
