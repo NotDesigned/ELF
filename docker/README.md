@@ -34,7 +34,7 @@ Build and push:
 ```bash
 docker build . \
   -f docker/Dockerfile.seed \
-  --build-arg SOURCE_ID="$(bash scripts/source_identity.sh)" \
+  --build-arg SOURCE_ID="$(bash scripts/source_identity.sh --runtime)" \
   --build-context hf_cache=/home/proton/.cache/elf/docker-hf-cache \
   --build-context elf_b_ckpt=/home/proton/.cache/elf/checkpoints/ELF-B-owt-torch \
   -t "$IMAGE:seed"
@@ -62,10 +62,26 @@ After `/data` is hydrated:
 
 ```bash
 docker build . -f docker/Dockerfile \
-  --build-arg SOURCE_ID="$(bash scripts/source_identity.sh)" \
+  --build-arg SOURCE_ID="$(bash scripts/source_identity.sh --runtime)" \
   -t "$IMAGE:runtime"
 docker push "$IMAGE:runtime"
 ```
+
+For a recorded run, publish a source-qualified immutable tag through the
+bounded repository helper and record the digest it prints:
+
+```bash
+SOURCE_ID=$(bash scripts/source_identity.sh --runtime)
+IMMUTABLE_IMAGE="$IMAGE:runtime-$SOURCE_ID"
+docker tag "$IMAGE:runtime" "$IMMUTABLE_IMAGE"
+scripts/push_registry_image.sh --dry-run "$IMMUTABLE_IMAGE"
+scripts/push_registry_image.sh "$IMMUTABLE_IMAGE"
+```
+
+The helper tries Docker first, stops on authentication/authorization errors,
+and only uses a temporary `docker save` plus native `crane`/`skopeo` fallback
+for classified transport failures such as TLS EOF or HTTP 502. It removes the
+archive on every exit and succeeds only after verifying the remote digest.
 
 The short `seed` and `runtime` tags above are convenient staging aliases. A
 recorded research run must use an immutable source-qualified tag or image

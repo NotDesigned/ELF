@@ -71,6 +71,10 @@ ENCODER_MODEL="${ENCODER_MODEL:-t5-small}"
 ELF_B_CHECKPOINT_FILE="${ELF_B_CHECKPOINT_FILE:-checkpoint_95085}"
 ELF_B_OWT_CHECKPOINT="${ELF_B_OWT_CHECKPOINT:-$CHECKPOINT_ROOT/ELF-B-owt-torch/$ELF_B_CHECKPOINT_FILE}"
 SOURCE_ID="${SOURCE_ID:-${ELF_SOURCE_ID:-unknown}}"
+RUNTIME_TREE_ID="${RUNTIME_TREE_ID:-$SOURCE_ID}"
+GIT_COMMIT="${GIT_COMMIT:-unknown}"
+CAMPAIGN_ID="${CAMPAIGN_ID:-unknown}"
+CAMPAIGN_NAME="${CAMPAIGN_NAME:-unknown}"
 IMAGE_ID="${IMAGE_ID:-${ELF_IMAGE_ID:-unknown}}"
 
 # Return success when a launcher value uses a supported true spelling.
@@ -89,26 +93,6 @@ cache_key_model() {
 # Convert a Hugging Face dataset ID to its datasets-cache directory name.
 cache_key_dataset() {
     printf '%s\n' "$(printf '%s' "$1" | sed 's#/#___#g')"
-}
-
-# Print one fully inherited YAML config field. This intentionally runs before
-# CLI overrides are assembled: it is used only for scientific asset discovery,
-# while the launcher's supported environment overrides are operational fields.
-resolved_config_field() {
-    local field_name="$1"
-    python - "$CONFIG" "$field_name" "${preflight_config_overrides[@]}" <<'PY'
-import sys
-
-from configs.config import apply_config_overrides, load_config_from_yaml
-
-config = load_config_from_yaml(sys.argv[1])
-config = apply_config_overrides(config, sys.argv[3:])
-value = getattr(config, sys.argv[2])
-if isinstance(value, bool):
-    print("true" if value else "false")
-elif value is not None:
-    print(value)
-PY
 }
 
 # Return a baked-directory content identity from its marker or file metadata.
@@ -265,30 +249,21 @@ fail_fast_for_offline_cache() {
         return
     fi
 
-    local config_dataset config_encoder config_online_eval config_use_plan plan_encoder_type
-    local sentence_t5_model eval_ppl_model
-    config_dataset="$(resolved_config_field data_path)"
-    config_encoder="$(resolved_config_field encoder_model_name)"
-    config_online_eval="$(resolved_config_field online_eval)"
-    config_use_plan="$(resolved_config_field use_sentence_plan)"
-    plan_encoder_type="$(resolved_config_field sentence_encoder_type)"
-
-    require_model_cache "${config_encoder:-$ENCODER_MODEL}"
-    require_dataset_cache "${config_dataset:-$DATASET_ID}"
-
-    # Frozen-plan experiments otherwise fail only after the distributed workers
-    # have started, which wastes a scheduled GPU allocation.
-    if truthy "$config_use_plan" && [[ "$plan_encoder_type" == "sentence_t5" ]]; then
-        sentence_t5_model="$(resolved_config_field sentence_t5_model_name)"
-        require_model_cache "$sentence_t5_model"
-    fi
-
-    # Final generation evaluates through this model even when eval_freq is
-    # larger than the run length, so validate it before allocating GPUs.
-    if truthy "$config_online_eval"; then
-        eval_ppl_model="$(resolved_config_field eval_ppl_model)"
-        require_model_cache "$eval_ppl_model"
-    fi
+    local asset_output asset_kind asset_identity asset_reason
+    local asset_cmd=(python scripts/experiment_assets.py plan "$CONFIG" --format tsv)
+    for preflight_override in "${preflight_config_overrides[@]}"; do
+        asset_cmd+=(--config-override "$preflight_override")
+    done
+    asset_output="$("${asset_cmd[@]}")"
+    while IFS=$'\t' read -r asset_kind asset_identity asset_reason; do
+        [[ -n "$asset_kind" ]] || continue
+        case "$asset_kind" in
+            model) require_model_cache "$asset_identity" ;;
+            dataset) require_dataset_cache "$asset_identity" ;;
+            file) require_file "$asset_identity" ;;
+            *) echo "[cloud_train] unknown asset kind: $asset_kind" >&2; exit 1 ;;
+        esac
+    done <<< "$asset_output"
 
     if truthy "${USE_ELF_B_WARM_START:-0}" || truthy "${REQUIRE_ELF_B_CHECKPOINT:-0}"; then
         require_file "$ELF_B_OWT_CHECKPOINT"
@@ -346,6 +321,7 @@ export WANDB_CACHE_DIR
 export SAVE_DIR
 export ELF_B_OWT_CHECKPOINT
 export PYTHONPATH="$REPO_ROOT/src:/app/src:${PYTHONPATH:-}"
+export PYTHONUNBUFFERED=1
 
 if [[ "${DRY_RUN:-0}" != "1" ]]; then
     mkdir -p "$OUTPUT_DIR" "$HF_HOME" "$HF_DATASETS_CACHE" "$WANDB_DIR" \
@@ -367,8 +343,6 @@ add_override() {
     manifest_overrides+=(--config-override "$1")
 }
 
-add_override "output_dir=$OUTPUT_DIR"
-
 # Mirror explicit Python config overrides into the resolved manifest. Other
 # Python flags remain recorded in the sanitized command but do not alter Config.
 for ((extra_index = 0; extra_index < ${#extra_args[@]}; extra_index++)); do
@@ -385,49 +359,16 @@ for ((extra_index = 0; extra_index < ${#extra_args[@]}; extra_index++)); do
     fi
 done
 
-if [[ -n "${USE_WANDB:-}" ]]; then
-    add_override "use_wandb=$USE_WANDB"
-fi
-if [[ -n "${WANDB_PROJECT:-}" ]]; then
-    add_override "wandb_project=$WANDB_PROJECT"
-fi
-if [[ -n "${WANDB_ENTITY:-}" ]]; then
-    add_override "wandb_entity=$WANDB_ENTITY"
-fi
 WANDB_RUN_NAME="${WANDB_RUN_NAME:-$RUN_ID}"
 WANDB_RUN_ID="${WANDB_RUN_ID:-$RUN_ID}"
 WANDB_RESUME="${WANDB_RESUME:-allow}"
-add_override "wandb_run_name=$WANDB_RUN_NAME"
-add_override "wandb_run_id=$WANDB_RUN_ID"
-add_override "wandb_resume=$WANDB_RESUME"
-if [[ -n "${GLOBAL_BATCH_SIZE:-}" ]]; then
-    add_override "global_batch_size=$GLOBAL_BATCH_SIZE"
-fi
-if [[ -n "${BATCH_SIZE:-}" ]]; then
-    add_override "global_batch_size=null"
-    add_override "batch_size=$BATCH_SIZE"
-fi
-if [[ -n "${NUM_WORKERS:-}" ]]; then
-    add_override "num_workers=$NUM_WORKERS"
-fi
-if [[ -n "${LOG_FREQ:-}" ]]; then
-    add_override "log_freq=$LOG_FREQ"
-fi
-if [[ -n "${USE_COMPILE:-}" ]]; then
-    add_override "use_compile=$USE_COMPILE"
-fi
-if [[ -n "${WARM_START:-}" ]]; then
-    add_override "warm_start=$WARM_START"
-fi
-if [[ -n "${WARM_START_USE_EMA:-}" ]]; then
-    add_override "warm_start_use_ema=$WARM_START_USE_EMA"
-fi
-if [[ -n "${RESUME:-}" ]]; then
-    add_override "resume=$RESUME"
-fi
-if [[ -n "${HF_REPO_ID:-}" ]]; then
-    add_override "hf_repo_id=$HF_REPO_ID"
-fi
+export RUN_ID WANDB_RUN_NAME WANDB_RUN_ID WANDB_RESUME
+export USE_WANDB WANDB_PROJECT WANDB_ENTITY GLOBAL_BATCH_SIZE BATCH_SIZE
+export NUM_WORKERS LOG_FREQ USE_COMPILE WARM_START WARM_START_USE_EMA RESUME HF_REPO_ID
+override_output="$(python scripts/experiment_overrides.py --output-dir "$OUTPUT_DIR" --format lines)"
+while IFS= read -r planned_override; do
+    [[ -n "$planned_override" ]] && add_override "$planned_override"
+done <<< "$override_output"
 
 echo "[cloud_train] config=$CONFIG"
 echo "[cloud_train] run_id=$RUN_ID attempt_id=$ATTEMPT_ID backend=$BACKEND backend_job_id=${BACKEND_JOB_ID:-<pending>}"
@@ -475,6 +416,10 @@ manifest_cmd=(
     --config "$CONFIG"
     --output-dir "$OUTPUT_DIR"
     --source-id "$SOURCE_ID"
+    --runtime-tree-id "$RUNTIME_TREE_ID"
+    --git-commit "$GIT_COMMIT"
+    --campaign-id "$CAMPAIGN_ID"
+    --campaign "$CAMPAIGN_NAME"
     --image-id "$IMAGE_ID"
     --gpus "$NGPU"
     --nodes "${NNODES:-1}"
