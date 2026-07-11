@@ -159,18 +159,22 @@ def _checkpoint_step(checkpoint_name: str) -> int:
 
 
 def find_all_checkpoints(ckpt_dir: str, prefix: str = "checkpoint_"):
-    """Find completed local checkpoints, sorted by microstep ascending."""
+    """Find marker-validated local checkpoints, sorted by microstep ascending."""
     ckpt_dir = _local_path(ckpt_dir)
     if not os.path.isdir(ckpt_dir):
         return []
     pattern = re.compile(rf"^{re.escape(prefix)}\d+$")
-    names = sorted(
-        [
-            name for name in os.listdir(ckpt_dir)
-            if pattern.fullmatch(name) and os.path.isfile(os.path.join(ckpt_dir, f"{name}.complete"))
-        ],
-        key=_checkpoint_step,
-    )
+    names = []
+    for name in os.listdir(ckpt_dir):
+        path = os.path.join(ckpt_dir, name)
+        if not pattern.fullmatch(name) or not os.path.isfile(path):
+            continue
+        try:
+            _validate_completion_marker(path)
+        except (KeyError, OSError, TypeError, ValueError, json.JSONDecodeError):
+            continue
+        names.append(name)
+    names.sort(key=_checkpoint_step)
     return [os.path.join(ckpt_dir, name) for name in names]
 
 
@@ -200,7 +204,15 @@ def _validate_completion_marker(path: str) -> None:
         raise ValueError(f"checkpoint has no completion marker: {marker_path}")
     with open(marker_path, "r", encoding="utf-8") as handle:
         marker = json.load(handle)
-    expected_size = int(marker["bytes"])
+    if not isinstance(marker, dict) or not isinstance(marker.get("bytes"), int):
+        raise ValueError(f"checkpoint completion marker is invalid: {marker_path}")
+    expected_step = _checkpoint_step(os.path.basename(path))
+    if expected_step >= 0 and marker.get("step") != expected_step:
+        raise ValueError(
+            f"checkpoint step does not match completion marker: "
+            f"expected {expected_step}, got {marker.get('step')!r}"
+        )
+    expected_size = marker["bytes"]
     actual_size = os.path.getsize(path)
     if actual_size != expected_size:
         raise ValueError(
@@ -259,7 +271,12 @@ def _load_checkpoint_payload(checkpoint_path: str, require_optimizer: bool) -> T
     if os.path.exists(local_path):
         try:
             log_for_0(f"Loading local checkpoint from {local_path}...")
-            ckpt = _restore_checkpoint(local_path, require_complete=require_optimizer)
+            # A directory is an implicit "latest" selection. Only committed
+            # payloads may participate, including evaluation and warm starts.
+            # Explicit files retain legacy/HF-compatible behavior for callers
+            # that intentionally name one payload.
+            require_complete = require_optimizer or os.path.isdir(local_path)
+            ckpt = _restore_checkpoint(local_path, require_complete=require_complete)
             _validate_checkpoint(ckpt, require_optimizer=require_optimizer)
             loaded_from = "local"
         except Exception as e:

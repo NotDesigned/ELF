@@ -4,10 +4,17 @@
 
 # Local environments and tool caches
 .env
+.env.*
+.netrc
+.npmrc
+.pypirc
+.ssh/
+.aws/
 .venv/
 venv/
 env/
 .claude/
+.codex/
 .cache/
 hf_cache/
 huggingface/
@@ -22,6 +29,8 @@ __pycache__/
 .ruff_cache/
 .ipynb_checkpoints/
 *.egg-info/
+build/
+dist/
 
 # Experiment outputs and datasets
 outputs/

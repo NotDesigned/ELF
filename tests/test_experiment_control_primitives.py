@@ -25,7 +25,27 @@ def test_slurm_success_requires_zero_exit():
 
 
 def test_failure_classifier_does_not_hide_resource_or_model_failures():
+    assert FailureClass.NONE.value == "none"
+    assert classify_failure("unrecognized failure") is FailureClass.UNKNOWN
     assert classify_failure("CUDA out of memory") is FailureClass.RESOURCE
     assert classify_failure("loss became NaN") is FailureClass.MODEL
     assert classify_failure("TLS EOF") is FailureClass.TRANSPORT
     assert classify_failure("ModuleNotFoundError: No module named 'pkg'") is FailureClass.CONFIGURATION
+
+
+@pytest.mark.parametrize("message", [
+    "ssh: connect to host wyd-l40s port 22: Connection timed out",
+    "Connection timed out during banner exchange",
+    "TLS ClientHello handshake timeout",
+])
+def test_connection_timeouts_are_transport_failures(message):
+    assert classify_failure(message) is FailureClass.TRANSPORT
+
+
+@pytest.mark.parametrize("message", [
+    "TIMEOUT",
+    "Job timed out after reaching its wall time",
+    "slurmstepd: error: DUE TO TIME LIMIT",
+])
+def test_scheduler_wall_time_is_a_resource_failure(message):
+    assert classify_failure(message) is FailureClass.RESOURCE

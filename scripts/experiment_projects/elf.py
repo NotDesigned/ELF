@@ -67,9 +67,10 @@ class ElfProjectAdapter:
     name = "elf"
     safe_env_keys = frozenset({
         "BATCH_SIZE", "DATA_ROOT", "GLOBAL_BATCH_SIZE", "HF_DATASETS_OFFLINE",
-        "HF_DATASETS_CACHE", "HF_HOME", "HF_HUB_OFFLINE", "LOG_FREQ",
-        "MAX_INFRA_RETRIES", "NUM_WORKERS", "PROJECT_DATA_ROOT",
+        "HF_DATASETS_CACHE", "HF_HOME", "HF_HUB_OFFLINE", "HF_REPO_ID", "LOG_FREQ",
+        "MAX_INFRA_RETRIES", "NUM_WORKERS", "PROJECT_DATA_ROOT", "RESUME",
         "REQUIRE_OFFLINE_CACHE", "TRANSFORMERS_OFFLINE", "USE_COMPILE", "USE_WANDB",
+        "WANDB_RESUME",
     })
 
     def validate_run(self, run: dict[str, Any]) -> None:
@@ -135,7 +136,19 @@ class ElfProjectAdapter:
         return SourceBundle(
             root=repo_root,
             excludes=(
-                ".git/", "outputs/", "runs/", "checkpoints/", "wandb/", "*.log",
+                # Keep the immutable runtime snapshot aligned with the Docker
+                # build context and exclude common local credential stores.
+                ".git/", ".gitignore", ".dockerignore",
+                ".env", ".env.*", ".netrc", ".npmrc", ".pypirc", ".ssh/", ".aws/",
+                ".venv/", "venv/", "env/", ".claude/", ".codex/",
+                ".cache/", "hf_cache/", "huggingface/",
+                "__pycache__/", "*.py[cod]", "*$py.class",
+                ".pytest_cache/", ".mypy_cache/", ".ruff_cache/",
+                ".ipynb_checkpoints/", "*.egg-info/", "build/", "dist/",
+                "outputs/", "output_dir/", "saved_models/", "checkpoints/",
+                "wandb/", "runs/", "data/",
+                "*.log", "*.tar.gz", "*.pt", "*.pth", "*.ckpt", "*.safetensors",
+                ".DS_Store", "Thumbs.db",
             ),
             container_path="/app",
             identity_command=("bash", "scripts/source_identity.sh", "--runtime"),

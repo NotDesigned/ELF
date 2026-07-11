@@ -79,6 +79,48 @@ def test_directory_resume_falls_back_from_corrupt_completed_checkpoint(tmp_path,
     assert step == 8
 
 
+def test_eval_directory_ignores_uncommitted_or_size_mismatched_checkpoints(tmp_path):
+    state = make_state()
+    payload = {
+        "params": state.model.state_dict(),
+        "step": 8,
+        "epoch": 1,
+    }
+    committed = tmp_path / "checkpoint_8"
+    torch.save(payload, committed)
+    (tmp_path / "checkpoint_8.complete").write_text(
+        json.dumps({"bytes": committed.stat().st_size, "step": 8}), encoding="utf-8"
+    )
+
+    uncommitted = tmp_path / "checkpoint_9"
+    torch.save({**payload, "step": 9}, uncommitted)
+    mismatched = tmp_path / "checkpoint_10"
+    torch.save({**payload, "step": 10}, mismatched)
+    (tmp_path / "checkpoint_10.complete").write_text(
+        json.dumps({"bytes": mismatched.stat().st_size + 1, "step": 10}), encoding="utf-8"
+    )
+    wrong_step = tmp_path / "checkpoint_11"
+    torch.save({**payload, "step": 11}, wrong_step)
+    (tmp_path / "checkpoint_11.complete").write_text(
+        json.dumps({"bytes": wrong_step.stat().st_size, "step": 99}), encoding="utf-8"
+    )
+
+    assert find_latest_checkpoint(str(tmp_path)) == str(committed)
+    _, step = load_checkpoint(str(tmp_path), state, load_optimizer=False)
+    assert step == 8
+
+
+def test_eval_explicit_legacy_checkpoint_does_not_require_marker(tmp_path):
+    state = make_state()
+    checkpoint = tmp_path / "legacy_checkpoint"
+    torch.save(
+        {"params": state.model.state_dict(), "step": 7, "epoch": 1}, checkpoint
+    )
+
+    _, step = load_checkpoint(str(checkpoint), state, load_optimizer=False)
+    assert step == 7
+
+
 def test_checkpoint_rejects_partial_accumulation_state(tmp_path, monkeypatch):
     monkeypatch.setenv("RANK", "0")
     state = make_state()
