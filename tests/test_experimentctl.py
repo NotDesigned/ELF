@@ -560,3 +560,16 @@ def test_collection_marks_expired_external_evidence_inconclusive():
     assert result["process_state"] == "UNKNOWN"
     assert result["model_state"] == "UNKNOWN"
     assert result["evidence_outcome"] == "INCONCLUSIVE"
+
+
+def test_cancelled_without_process_or_model_evidence_is_inconclusive():
+    result = annotate_collection(
+        {
+            "state": None, "model_observed": False,
+            "worker_state": "RELEASED", "worker_phases": ["Deleted"],
+        },
+        {"state": "CANCELLED"},
+    )
+    assert result["model_state"] == "NOT_OBSERVED"
+    assert result["evidence_outcome"] == "INCONCLUSIVE"
+    assert result["evidence_unavailable_reason"] == "cancelled_before_observation"

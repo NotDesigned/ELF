@@ -242,6 +242,11 @@ still fails closed. Expired live logs produce an explicit
 `evidence_unavailable_reason` and `INCONCLUSIVE` evidence outcome rather than a
 claim that model artifacts do not exist.
 
+Likewise, accessible logs that contain no project-parsed process or model
+evidence are not proof that the model never executed. A cancelled terminal run
+is reported as `INCONCLUSIVE/cancelled_before_observation`; other terminal runs
+without either layer use `terminal_without_process_or_model_evidence`.
+
 Collection records both `scheduler_state` and `runtime_state`. They may differ
 after preemption or cancellation because a killed process cannot always update
 its own status file; scheduler truth must not overwrite the historical runtime
@@ -294,7 +299,8 @@ Fresh executable identities come from templates. For example:
 ```bash
 python scripts/instantiate_campaign.py \
   experiments/templates/backend_smoke_slurm.yml \
-  --instance 20260712T120000
+  --instance 20260712T120000 \
+  --local-root /tmp/elf-controller-state
 ```
 
 The generator renders only `{instance}`, preserves controller placeholders

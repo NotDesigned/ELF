@@ -708,8 +708,17 @@ def annotate_collection(
         else "OBSERVED" if any(value is not None and value is not False for value in model_evidence)
         else "NOT_OBSERVED"
     )
+    evidence_reason = summary.get("evidence_unavailable_reason")
+    if not evidence_reason and scheduler_terminal and annotated["model_state"] != "OBSERVED" and not process_observed:
+        evidence_reason = (
+            "cancelled_before_observation"
+            if scheduler_status.get("state") == "CANCELLED"
+            else "terminal_without_process_or_model_evidence"
+        )
+    annotated["evidence_unavailable_reason"] = evidence_reason
     annotated["evidence_outcome"] = (
-        "INCONCLUSIVE" if summary.get("evidence_unavailable_reason")
+        "INCONCLUSIVE" if evidence_reason
+        else "PENDING" if not scheduler_terminal
         else "OBSERVED"
     )
     return annotated
