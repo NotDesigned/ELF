@@ -19,6 +19,7 @@ import yaml
 
 _TOKEN_RE = re.compile(r"\{([A-Za-z_][A-Za-z0-9_.]*)\}")
 _EXACT_TOKEN_RE = re.compile(r"^\{([A-Za-z_][A-Za-z0-9_.]*)\}$")
+_INSTANCE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 
 
 def deep_merge(base: Mapping[str, Any], override: Mapping[str, Any]) -> dict[str, Any]:
@@ -159,3 +160,25 @@ def load_and_resolve_campaign(path: Path) -> dict[str, Any]:
     if not isinstance(payload, Mapping):
         raise ValueError(f"campaign must be a mapping: {path}")
     return resolve_campaign(payload)
+
+
+def instantiate_campaign_template(
+    payload: Mapping[str, Any], instance: str
+) -> dict[str, Any]:
+    """Render one explicit fresh-instance token without resolving authoring helpers.
+
+    Templates keep ``{run_id}`` and ``{source_id}`` for the normal campaign
+    resolver/controller. Only ``{instance}`` is consumed here, making the
+    generated campaign reviewable before any controller or backend mutation.
+    """
+    if not _INSTANCE_RE.fullmatch(instance):
+        raise ValueError(
+            "instance must use 1-64 letters, digits, '.', '_' or '-'"
+        )
+    rendered = _render(payload, {"instance": instance})
+    if not isinstance(rendered, dict):
+        raise ValueError("campaign template must render to a mapping")
+    if "{instance}" in yaml.safe_dump(rendered, sort_keys=False):
+        raise ValueError("campaign template contains an unresolved {instance} token")
+    rendered["instance"] = instance
+    return rendered

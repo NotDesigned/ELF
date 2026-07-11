@@ -1,4 +1,5 @@
 import copy
+import subprocess
 import sys
 from pathlib import Path
 
@@ -6,7 +7,12 @@ import pytest
 import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
-from experiment_campaign import deep_merge, load_and_resolve_campaign, resolve_campaign
+from experiment_campaign import (
+    deep_merge,
+    instantiate_campaign_template,
+    load_and_resolve_campaign,
+    resolve_campaign,
+)
 from experimentctl import materialize_run, validate_run
 
 
@@ -128,6 +134,43 @@ def test_load_and_resolve_campaign(tmp_path):
         encoding="utf-8",
     )
     assert load_and_resolve_campaign(path)["runs"][0]["resources"] == {"gpus": 1}
+
+
+def test_instantiate_campaign_template_creates_fresh_reviewable_identities():
+    template = yaml.safe_load(
+        (REPO_ROOT / "experiments/templates/backend_smoke_slurm.yml").read_text()
+    )
+    authored = instantiate_campaign_template(template, "20260712-a")
+    assert authored["campaign"] == "backend-smoke-slurm-20260712-a"
+    assert authored["runs"][0]["run_id"] == "elf-smoke-slurm-l40s-20260712-a"
+    assert authored["instance"] == "20260712-a"
+    resolved = resolve_campaign(authored)
+    assert resolved["runs"][0]["storage"]["run_dir"].endswith("/{run_id}")
+    materialized = materialize_run(resolved, resolved["runs"][0], "fresh-source")
+    validate_run(materialized, project="elf")
+    assert materialized["storage"]["run_dir"].endswith(
+        "/elf-smoke-slurm-l40s-20260712-a"
+    )
+
+
+def test_instantiate_campaign_template_rejects_unsafe_instance():
+    with pytest.raises(ValueError, match="instance must use"):
+        instantiate_campaign_template({"campaign": "x-{instance}"}, "bad/value")
+
+
+def test_instantiate_campaign_cli_refuses_overwrite(tmp_path):
+    output = tmp_path / "fresh.yml"
+    command = [
+        sys.executable,
+        str(REPO_ROOT / "scripts/instantiate_campaign.py"),
+        str(REPO_ROOT / "experiments/templates/backend_smoke_slurm.yml"),
+        "--instance", "fresh-a", "--output", str(output),
+    ]
+    first = subprocess.run(command, text=True, capture_output=True, check=False)
+    second = subprocess.run(command, text=True, capture_output=True, check=False)
+    assert first.returncode == 0
+    assert second.returncode != 0
+    assert load_and_resolve_campaign(output)["runs"][0]["run_id"].endswith("fresh-a")
 
 
 @pytest.mark.parametrize(

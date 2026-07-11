@@ -77,12 +77,13 @@ The controller freezes campaign metadata locally before scheduler submission
 and exposes the same operations for SenseCore and WYD Slurm:
 
 ```bash
-python scripts/experimentctl.py experiments/campaigns/CAMPAIGN.yml prepare
+python scripts/experimentctl.py experiments/campaigns/CAMPAIGN.yml check-identity --run RUN_ID
 python scripts/experimentctl.py experiments/campaigns/CAMPAIGN.yml assets-plan
+python scripts/experimentctl.py experiments/campaigns/CAMPAIGN.yml prepare
 python scripts/experimentctl.py experiments/campaigns/CAMPAIGN.yml preflight --scope submit
-python scripts/experimentctl.py experiments/campaigns/CAMPAIGN.yml stage
 python scripts/experimentctl.py experiments/campaigns/CAMPAIGN.yml submit --run RUN_ID --dry-run
 python scripts/experimentctl.py experiments/campaigns/CAMPAIGN.yml assets-verify --run RUN_ID
+python scripts/experimentctl.py experiments/campaigns/CAMPAIGN.yml stage
 python scripts/experimentctl.py experiments/campaigns/CAMPAIGN.yml submit --run RUN_ID
 python scripts/experimentctl.py experiments/campaigns/CAMPAIGN.yml status --run RUN_ID
 python scripts/experimentctl.py experiments/campaigns/CAMPAIGN.yml collect --run RUN_ID
@@ -99,6 +100,11 @@ python scripts/experimentctl.py experiments/campaigns/CAMPAIGN.yml cancel --run 
 backend. `stage` and non-dry-run `submit` require the corresponding preflight
 to pass before remote mutation. Local-only `prepare`, `assets-plan`, and
 dry-run submission do not require an active platform login.
+
+`check-identity` combines local durable history with the backend package's
+read-only scheduler/storage probe. It rejects a consumed identity and reports
+all matching job IDs when history is ambiguous. Non-dry-run submission repeats
+this gate immediately before recording its submission intent.
 
 The controller accepts only non-secret tool overrides:
 
@@ -124,6 +130,7 @@ without network access:
 | Module | Responsibility |
 | --- | --- |
 | `experiment_campaign.py` | Resolve defaults, profiles, matrices, and authored runs. |
+| `instantiate_campaign.py` | Render one explicit fresh ELF campaign instance without overwriting history. |
 | `experiment_manifest.py` | Atomic run/attempt store, lifecycle states, submission outbox, reconciliation. |
 | `experiment_assets.py` | ELF asset discovery and Hugging Face cache layout used by the ELF project adapter. |
 | `experiment_overrides.py` | ELF's ordered environment-to-config override sequence. |
@@ -132,11 +139,11 @@ without network access:
 | `packages/experiment-control/.../preflight.py` | Sanitized backend readiness checks and fail-closed reports. |
 | `packages/experiment-control` | Independently installable backend, preflight, runner, state, sanitizer, and project-protocol package. |
 | `scripts/experiment_projects/elf.py` | The only adapter that knows ELF Config, `cloud_train.sh`, ELF checkpoints, metrics, and summaries. |
-| `packages/experiment-control/.../backends/wyd.py` | SSH, rsync, Slurm, Apptainer staging/status/collection/cancellation. |
-| `packages/experiment-control/.../backends/sensecore.py` | SCO submission/status/logging/cancellation through packaged sanitization. |
+| `packages/experiment-control/.../backends/wyd.py` | SSH, rsync, Slurm, identity probes, Apptainer staging/status/collection/cancellation. |
+| `packages/experiment-control/.../backends/sensecore.py` | Sanitized SCO identity/submission/status/logging/cancellation. |
 
 The backend registry dispatches validation, platform environment resolution,
-asset verification, submission recovery, `stage`, `render`, `submit`,
+identity and asset verification, submission recovery, `stage`, `render`, `submit`,
 `status`, `collect`, `logs`, and `cancel`. Adding a backend does not add a new
 backend-kind branch or scheduler field to the CLI loop. Shared storage and
 launcher paths live in the backend profile's `storage` mapping; scheduler-only
@@ -150,6 +157,11 @@ assuming a repository root, rsync exclusion list, container mount, or working
 directory. `tests/test_project_adapter_contract.py` prepares and renders a
 dummy project with no import from ELF's `src/configs`, guarding this boundary.
 
+The installed package owns backend `identity()` probes and refuses multiple
+scheduler matches. ELF owns campaign YAML, fresh-instance generation, local
+event reconciliation, and scientific health gates. This keeps site mechanics
+reusable without teaching the package ELF run names or configs.
+
 ### Submission recovery
 
 Before calling `sbatch` or `sco ... create`, the controller atomically writes a
@@ -162,6 +174,8 @@ SenseCore recovery queries the exact unique resource name. Slurm scripts carry
 `campaign/run/attempt` in `#SBATCH --comment`, allowing a controller that
 crashed after `sbatch` acceptance to recover the job from the queue. If an
 intent remains unresolved, the controller refuses to create a second job.
+Existing legacy events are also audited: two recorded job IDs for one attempt
+are an ambiguity error, never a “latest job wins” choice.
 
 ### Identity separation
 
@@ -174,6 +188,10 @@ image or SIF rebuild. Manifests record four separate provenance values:
 - runtime tree identity;
 - campaign-file identity;
 - registry image digest or SIF SHA-256.
+
+These fields are required for newly prepared runs. Historical runs created by
+older controller versions may lack some fields and must be reported as legacy
+evidence rather than silently attributed to the current source.
 
 The default `source_identity.sh --full` remains available for complete dirty
 working-tree provenance.
@@ -230,6 +248,19 @@ until the immutable source identity and run are materialized. Executable
 examples live under [`experiments/campaigns/`](../experiments/campaigns/), so
 schema examples cannot drift independently from validated campaigns.
 
+Files under `experiments/campaigns/` are immutable authored/history records.
+Fresh executable identities come from templates. For example:
+
+```bash
+python scripts/instantiate_campaign.py \
+  experiments/templates/backend_smoke_slurm.yml \
+  --instance 20260712T120000
+```
+
+The generator renders only `{instance}`, preserves controller placeholders
+such as `{run_id}` and `{source_id}`, writes exclusively, and fails rather than
+overwriting a previously generated campaign.
+
 `profile` may also be an ordered list, for example
 `[wyd-common, l40s]`, so shared login/storage settings and accelerator
 placement remain independently reusable. Lists are intentionally not appended:
@@ -267,6 +298,11 @@ storage. A scheduler `RUNNING` state and a first `train_metrics.jsonl` record
 remain separate gates. SenseCore abrupt eviction may prevent the process from
 updating its own status, so external scheduler observation takes precedence
 for `PREEMPTED` classification.
+
+`observe` reports scheduler, worker, process, and model layers separately.
+Unavailable worker evidence is explicitly `UNKNOWN`; it is never inferred from
+scheduler success. Collection records `scheduler_state`, `runtime_state`,
+`worker_state`, and `model_state` alongside the underlying metrics/artifacts.
 
 Controller and runtime use `experiment_run_manifest.build_run_manifest` for
 the same canonical `manifest.yaml` schema. Slurm stages that manifest before
@@ -340,6 +376,10 @@ Continue a run beyond one epoch only if:
 3. `oracle_plan_ppl < shuffled_plan_ppl` for plan-enabled models;
 4. generation is non-empty and entropy is not degenerate;
 5. token reconstruction does not catastrophically regress from A0.
+
+This four-rank scientific gate is distinct from the one-GPU backend smoke. The
+backend smoke validates one process through its first finite metric and
+completed checkpoint; it makes no DDP/NCCL claim.
 
 The first gate is diagnostic, not a final scientific claim. Final comparisons
 must use matched training budgets and additional seeds.

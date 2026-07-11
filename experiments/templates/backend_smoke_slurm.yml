@@ -1,0 +1,48 @@
+schema_version: 1
+campaign: backend-smoke-slurm-{instance}
+project: elf
+source_id: auto
+local_root: outputs/experiment_campaigns
+
+defaults:
+  config: src/configs/training_configs/ablations/owt_elfb/tier0_0_pure_elf_len256.yml
+  config_overrides:
+    - data_path=/data/liangluocheng/elf/datasets/smoke-owt-tokenized-v1
+    - epochs=1
+    - online_eval=false
+    - reconstruction_eval=false
+    - num_samples=4
+  image_id: sha256:1e25f456cd26219ff89015a41b8653efb0db4444f911522802f850a791710de4
+  resources: {gpus: 1, cpus: 8}
+  env:
+    BATCH_SIZE: "4"
+    LOG_FREQ: "10"
+    NUM_WORKERS: "0"
+    REQUIRE_OFFLINE_CACHE: "1"
+    USE_WANDB: "false"
+  storage:
+    run_dir: /data/liangluocheng/elf/runs/{run_id}
+  retry: {max_infra_retries: 0}
+
+profiles:
+  wyd-l40s:
+    storage:
+      data_root: /data/liangluocheng
+      project_data_root: /data/liangluocheng/elf
+      hf_home: /data/liangluocheng/elf/cache/huggingface
+      hf_datasets_cache: /data/liangluocheng/elf/cache/huggingface/datasets
+    backend:
+      kind: slurm
+      ssh_alias: wyd-l40s
+      partition: l40s
+      account: lab
+      qos: normal
+      gres: gpu:l40s:1
+      time: "00:10:00"
+      source_dir: /data/liangluocheng/elf/sources/{source_id}
+      sif_path: /data/liangluocheng/elf/images/1e25f456cd26219ff89015a41b8653efb0db4444f911522802f850a791710de4.sif
+      mount_root: /data
+
+runs:
+  - run_id: elf-smoke-slurm-l40s-{instance}
+    profile: wyd-l40s
