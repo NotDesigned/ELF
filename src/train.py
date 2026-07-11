@@ -602,14 +602,16 @@ def run_training(config, *, force_cpu: bool = False):
             if global_step % config.log_freq == 0:
                 stacked = torch.stack([
                     torch.stack([m["loss"] for m in train_metrics]).mean(),
-                    torch.stack([m["l2_loss"] for m in train_metrics]).mean(),
-                    torch.stack([m["ce_loss"] for m in train_metrics]).mean(),
                     torch.stack([m["plan_loss"] for m in train_metrics]).mean(),
                     torch.stack([m["plan_aux_loss"] for m in train_metrics]).mean(),
                     torch.stack([m["plan_emb_batch_var"] for m in train_metrics]).mean(),
                     torch.stack([m["plan_emb_norm"] for m in train_metrics]).mean(),
                     torch.stack([m["plan_pred_batch_var"] for m in train_metrics]).mean(),
                     torch.stack([m["plan_pred_norm"] for m in train_metrics]).mean(),
+                    torch.stack([m["ce_loss_sum"] for m in train_metrics]).sum(),
+                    torch.stack([m["ce_token_count"] for m in train_metrics]).sum(),
+                    torch.stack([m["l2_loss_sum"] for m in train_metrics]).sum(),
+                    torch.stack([m["l2_token_count"] for m in train_metrics]).sum(),
                 ])
                 # Average each metric across DDP ranks before logging — done
                 # once per log_freq so we never sync on every train step.
@@ -617,10 +619,13 @@ def run_training(config, *, force_cpu: bool = False):
                     dist.all_reduce(stacked, op=dist.ReduceOp.SUM)
                     stacked = stacked / dist.get_world_size()
                 (
-                    avg_loss, avg_l2, avg_ce, avg_plan, avg_plan_aux,
+                    avg_loss, avg_plan, avg_plan_aux,
                     avg_plan_emb_var, avg_plan_emb_norm,
                     avg_plan_pred_var, avg_plan_pred_norm,
+                    ce_loss_sum, ce_token_count, l2_loss_sum, l2_token_count,
                 ) = (float(x) for x in stacked.tolist())
+                avg_ce = ce_loss_sum / max(ce_token_count, 1.0)
+                avg_l2 = l2_loss_sum / max(l2_token_count, 1.0)
                 now = time.time()
                 steps_per_sec = (global_step - last_log_step) / max(now - last_log_time, 1e-8)
                 current_lr = state.optimizer.param_groups[0]["lr"]

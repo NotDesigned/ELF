@@ -423,4 +423,26 @@ def test_train_step_without_sentence_plan_keeps_zero_plan_metrics():
 
     assert metrics["plan_loss"].item() == pytest.approx(0.0)
     assert metrics["plan_aux_loss"].item() == pytest.approx(0.0)
+
+
+@pytest.mark.parametrize(
+    ("decoder_prob", "active_count", "inactive_count"),
+    [
+        (1.0, "ce_token_count", "l2_token_count"),
+        (0.0, "l2_token_count", "ce_token_count"),
+    ],
+)
+def test_branch_metrics_expose_token_weighted_numerators(decoder_prob, active_count, inactive_count):
+    _, metrics = run_tiny_train_step(
+        tiny_config(
+            decoder_prob=decoder_prob,
+            use_sentence_plan=False,
+            sentence_encoder_type="learned",
+            num_self_cond_cfg_tokens=0,
+        ),
+        model=tiny_model(use_sentence_plan=False, num_self_cond_cfg_tokens=0),
+    )
+
+    assert metrics[active_count].item() > 0
+    assert metrics[inactive_count].item() == pytest.approx(0.0)
     assert metrics["plan_emb_batch_var"].item() == pytest.approx(0.0)

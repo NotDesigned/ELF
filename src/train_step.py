@@ -462,10 +462,12 @@ def train_step(
     loss = loss + float(getattr(config, "plan_loss_weight", 1.0)) * plan_loss_for_backward
 
     # Per-branch metrics: mean per-token within each branch.
-    ce_loss_val = ((ce_per_token * ce_mask).sum()
-                   / torch.clamp(ce_mask.sum(), min=1.0)).detach()
-    l2_loss_val = ((l2_per_token * l2_mask).sum()
-                   / torch.clamp(l2_mask.sum(), min=1.0)).detach()
+    ce_loss_sum = (ce_per_token * ce_mask).sum().detach()
+    ce_token_count = ce_mask.sum().detach()
+    l2_loss_sum = (l2_per_token * l2_mask).sum().detach()
+    l2_token_count = l2_mask.sum().detach()
+    ce_loss_val = ce_loss_sum / torch.clamp(ce_token_count, min=1.0)
+    l2_loss_val = l2_loss_sum / torch.clamp(l2_token_count, min=1.0)
 
     (loss / accumulation_divisor).backward()
     state.micro_step = int(getattr(state, "micro_step", state.step)) + 1
@@ -490,12 +492,16 @@ def train_step(
         "loss": loss.detach(),
         "l2_loss": l2_loss_val,
         "ce_loss": ce_loss_val,
+        "ce_loss_sum": ce_loss_sum,
+        "ce_token_count": ce_token_count,
         "plan_loss": plan_loss.detach(),
         "plan_aux_loss": plan_aux_loss.detach(),
         "plan_emb_batch_var": plan_emb_batch_var.detach(),
         "plan_emb_norm": plan_emb_norm.detach(),
         "plan_pred_batch_var": plan_pred_batch_var.detach(),
         "plan_pred_norm": plan_pred_norm.detach(),
+        "l2_loss_sum": l2_loss_sum,
+        "l2_token_count": l2_token_count,
         "optimizer_step": torch.tensor(state.optimizer_step, device=loss.device),
         "did_optimizer_step": torch.tensor(is_optimizer_step, device=loss.device),
     }
