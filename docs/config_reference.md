@@ -219,6 +219,12 @@ Storage and offline assets:
   `REQUIRE_ELF_B_CHECKPOINT`, and `HYDRATE_LOCK_TIMEOUT_SECONDS` control
   offline validation and hydration.
 
+When offline validation is enabled, the launcher resolves the inherited YAML
+and checks the token encoder, dataset, config-selected Sentence-T5 model (only
+for frozen-plan runs), config-selected PPL evaluator (when online evaluation is
+enabled), and requested warm-start checkpoint before starting distributed
+workers.
+
 Training overrides:
 
 - `USE_WANDB`, `WANDB_PROJECT`, `WANDB_ENTITY`, `WANDB_RUN_NAME`,

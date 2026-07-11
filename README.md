@@ -92,7 +92,9 @@ Available training configs:
 
 See [`docs/config_reference.md`](docs/config_reference.md) for every training,
 sampling, CLI, and cloud-launcher flag, including gradient accumulation and
-resume semantics.
+resume semantics. See [`docs/experiment_workflow.md`](docs/experiment_workflow.md)
+for durable manifests, per-function automation contracts, offline preflight,
+campaign summaries, and the first fusion experiment decision set.
 
 **Estimated wall-clock:** ~4 h per epoch on 8× H200 (OpenWebText, ELF-B,
 global batch size 512, bf16). The default ELF-B OWT run is 5 epochs.
