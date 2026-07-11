@@ -104,6 +104,12 @@ Before training starts, the launcher atomically writes:
 - `manifest.yaml`: immutable scientific config and source/image identities.
 - `attempts/<attempt-id>/attempt.yaml`: command, backend, resources, and resume source.
 - `events.jsonl`, `backend.json`, and `status.json`: durable Agent-facing control records.
+- `attempts/<attempt-id>/stdout.log` and `stderr.log`: persistent process logs.
+
+The launcher transitions `status.json` through `CREATED`, `RUNNING`, and then
+`SUCCEEDED` or `FAILED`, appending the matching lifecycle events and exit code.
+Scheduler-side spot eviction still has to be normalized to `PREEMPTED` by the
+external SenseCore observer when the container cannot execute its exit path.
 
 Spot recovery keeps the same `RUN_ID`, uses a new `ATTEMPT_ID`, and explicitly
 sets `RESUME` to the run directory or a completed checkpoint. Reusing an

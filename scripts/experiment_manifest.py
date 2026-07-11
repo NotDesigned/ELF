@@ -259,6 +259,53 @@ def prepare(args: argparse.Namespace) -> dict[str, Any]:
     return {"manifest": str(manifest_path), "attempt": str(attempt_path)}
 
 
+def record(args: argparse.Namespace) -> dict[str, Any]:
+    _validate_identity("run_id", args.run_id)
+    _validate_identity("attempt_id", args.attempt_id)
+    run_dir = Path(args.output_dir).resolve()
+    manifest_path = run_dir / "manifest.yaml"
+    attempt_path = run_dir / "attempts" / args.attempt_id / "attempt.yaml"
+    if not manifest_path.is_file() or not attempt_path.is_file():
+        raise FileNotFoundError(
+            f"cannot record lifecycle event before manifest/attempt exists in {run_dir}"
+        )
+    manifest = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
+    if manifest.get("project") != args.project or manifest.get("run_id") != args.run_id:
+        raise ValueError("lifecycle event identity conflicts with run manifest")
+
+    backend_path = run_dir / "backend.json"
+    backend = json.loads(backend_path.read_text(encoding="utf-8")) if backend_path.is_file() else {}
+    timestamp = utc_now()
+    status = {
+        "project": args.project,
+        "run_id": args.run_id,
+        "attempt_id": args.attempt_id,
+        "state": args.state,
+        "updated_at": timestamp,
+    }
+    if args.exit_code is not None:
+        status["exit_code"] = args.exit_code
+    atomic_write(run_dir / "status.json", status)
+
+    payload: dict[str, Any] = {}
+    if args.exit_code is not None:
+        payload["exit_code"] = args.exit_code
+    if args.reason:
+        payload["reason"] = args.reason
+    event = {
+        "timestamp": timestamp,
+        "project": args.project,
+        "run_id": args.run_id,
+        "attempt_id": args.attempt_id,
+        "backend": backend.get("backend"),
+        "backend_job_id": backend.get("backend_job_id"),
+        "event": args.event,
+        "payload": payload,
+    }
+    append_event(run_dir / "events.jsonl", event)
+    return {"status": str(run_dir / "status.json"), "event": args.event}
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--project", required=True)
@@ -281,8 +328,28 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+def parse_record_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Record an ELF experiment lifecycle transition.")
+    parser.add_argument("--project", required=True)
+    parser.add_argument("--run-id", required=True)
+    parser.add_argument("--attempt-id", required=True)
+    parser.add_argument("--output-dir", required=True)
+    parser.add_argument(
+        "--state",
+        choices=("CREATED", "QUEUED", "STARTING", "RUNNING", "EVALUATING", "SUCCEEDED", "FAILED", "PREEMPTED", "CANCELLED", "UNKNOWN"),
+        required=True,
+    )
+    parser.add_argument("--event", required=True)
+    parser.add_argument("--exit-code", type=int)
+    parser.add_argument("--reason", default="")
+    return parser.parse_args(argv)
+
+
 def main() -> None:
-    result = prepare(parse_args())
+    if len(sys.argv) > 1 and sys.argv[1] == "record":
+        result = record(parse_record_args(sys.argv[2:]))
+    else:
+        result = prepare(parse_args())
     print(json.dumps(result, sort_keys=True))
 
 

@@ -385,4 +385,32 @@ if truthy "${PREPARE_ONLY:-0}"; then
     exit 0
 fi
 
-exec "${cmd[@]}"
+record_lifecycle() {
+    local state="$1"
+    local event="$2"
+    shift 2
+    python scripts/experiment_manifest.py record \
+        --project "$PROJECT_NAME" \
+        --run-id "$RUN_ID" \
+        --attempt-id "$ATTEMPT_ID" \
+        --output-dir "$OUTPUT_DIR" \
+        --state "$state" \
+        --event "$event" \
+        "$@"
+}
+
+attempt_log_dir="$OUTPUT_DIR/attempts/$ATTEMPT_ID"
+record_lifecycle RUNNING process_started
+set +e
+"${cmd[@]}" \
+    > >(tee -a "$attempt_log_dir/stdout.log") \
+    2> >(tee -a "$attempt_log_dir/stderr.log" >&2)
+exit_code=$?
+set -e
+
+if [[ "$exit_code" -eq 0 ]]; then
+    record_lifecycle SUCCEEDED process_exited --exit-code "$exit_code"
+else
+    record_lifecycle FAILED process_exited --exit-code "$exit_code" --reason training_process_nonzero_exit
+fi
+exit "$exit_code"

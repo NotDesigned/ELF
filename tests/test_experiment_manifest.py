@@ -96,6 +96,42 @@ def test_prepare_requires_immutable_identities(tmp_path):
     assert "source_id must be an immutable" in result.stderr
 
 
+def test_record_updates_status_and_appends_lifecycle_event(tmp_path):
+    run_dir = tmp_path / "run"
+    subprocess.run(prepare_args(run_dir), cwd=REPO_ROOT, check=True, capture_output=True)
+    subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPT),
+            "record",
+            "--project",
+            "elf",
+            "--run-id",
+            "test-run-s0",
+            "--attempt-id",
+            "attempt-001",
+            "--output-dir",
+            str(run_dir),
+            "--state",
+            "SUCCEEDED",
+            "--event",
+            "process_exited",
+            "--exit-code",
+            "0",
+        ],
+        cwd=REPO_ROOT,
+        check=True,
+        capture_output=True,
+    )
+
+    status = json.loads((run_dir / "status.json").read_text(encoding="utf-8"))
+    events = [json.loads(line) for line in (run_dir / "events.jsonl").read_text().splitlines()]
+    assert status["state"] == "SUCCEEDED"
+    assert status["exit_code"] == 0
+    assert events[-1]["event"] == "process_exited"
+    assert events[-1]["payload"]["exit_code"] == 0
+
+
 def test_manifest_command_redacts_secret_values():
     assert sanitize_command(
         ["train", "WANDB_API_KEY=secret-value", "--access-token", "secret-value", "seed=42"]
