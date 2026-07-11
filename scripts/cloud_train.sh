@@ -8,6 +8,8 @@
 #   HYDRATE_ONLY=1 bash scripts/cloud_train.sh
 set -euo pipefail
 
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
 DEFAULT_CONFIG="src/configs/training_configs/ablations/owt_elfb/tier0_0_pure_elf.yml"
 
 if [[ $# -gt 0 ]]; then
@@ -16,6 +18,21 @@ if [[ $# -gt 0 ]]; then
 else
     CONFIG="${CONFIG:-$DEFAULT_CONFIG}"
 fi
+extra_args=("$@")
+preflight_config_overrides=()
+for ((preflight_index = 0; preflight_index < ${#extra_args[@]}; preflight_index++)); do
+    preflight_arg="${extra_args[$preflight_index]}"
+    if [[ "$preflight_arg" == "--config_override" ]]; then
+        if ((preflight_index + 1 >= ${#extra_args[@]})); then
+            echo "[cloud_train] --config_override requires FIELD=VALUE" >&2
+            exit 1
+        fi
+        preflight_index=$((preflight_index + 1))
+        preflight_config_overrides+=("${extra_args[$preflight_index]}")
+    elif [[ "$preflight_arg" == --config_override=* ]]; then
+        preflight_config_overrides+=("${preflight_arg#--config_override=}")
+    fi
+done
 
 PROJECT_NAME="${PROJECT_NAME:-elf}"
 DATA_ROOT="${DATA_ROOT:-/data}"
@@ -56,6 +73,7 @@ ELF_B_OWT_CHECKPOINT="${ELF_B_OWT_CHECKPOINT:-$CHECKPOINT_ROOT/ELF-B-owt-torch/$
 SOURCE_ID="${SOURCE_ID:-${ELF_SOURCE_ID:-unknown}}"
 IMAGE_ID="${IMAGE_ID:-${ELF_IMAGE_ID:-unknown}}"
 
+# Return success when a launcher value uses a supported true spelling.
 truthy() {
     case "${1:-}" in
         1|true|TRUE|yes|YES|y|Y|on|ON) return 0 ;;
@@ -63,14 +81,37 @@ truthy() {
     esac
 }
 
+# Convert a Hugging Face model ID to its on-disk hub cache directory name.
 cache_key_model() {
     printf 'models--%s\n' "$(printf '%s' "$1" | sed 's#/#--#g')"
 }
 
+# Convert a Hugging Face dataset ID to its datasets-cache directory name.
 cache_key_dataset() {
     printf '%s\n' "$(printf '%s' "$1" | sed 's#/#___#g')"
 }
 
+# Print one fully inherited YAML config field. This intentionally runs before
+# CLI overrides are assembled: it is used only for scientific asset discovery,
+# while the launcher's supported environment overrides are operational fields.
+resolved_config_field() {
+    local field_name="$1"
+    python - "$CONFIG" "$field_name" "${preflight_config_overrides[@]}" <<'PY'
+import sys
+
+from configs.config import apply_config_overrides, load_config_from_yaml
+
+config = load_config_from_yaml(sys.argv[1])
+config = apply_config_overrides(config, sys.argv[3:])
+value = getattr(config, sys.argv[2])
+if isinstance(value, bool):
+    print("true" if value else "false")
+elif value is not None:
+    print(value)
+PY
+}
+
+# Return a baked-directory content identity from its marker or file metadata.
 dir_id() {
     local source_dir="$1"
     local id_file="$2"
@@ -86,6 +127,7 @@ dir_id() {
         | awk '{print $1}'
 }
 
+# Return success when two paths resolve to the same filesystem directory.
 same_dir() {
     local left="$1"
     local right="$2"
@@ -93,6 +135,7 @@ same_dir() {
        "$(readlink -f "$right" 2>/dev/null || printf '%s' "$right")" ]]
 }
 
+# Hydrate one baked asset tree exactly once across concurrent workers.
 copy_baked_dir_once() {
     local source_dir="$1"
     local dest_dir="$2"
@@ -153,6 +196,7 @@ copy_baked_dir_once() {
     copy_baked_dir_once "$source_dir" "$dest_dir" "$id_file" "$marker_subdir" "$label"
 }
 
+# Hydrate the image's HF cache and checkpoints into persistent shared storage.
 hydrate_baked_assets() {
     copy_baked_dir_once \
         "$BAKED_HF_HOME" \
@@ -169,6 +213,7 @@ hydrate_baked_assets() {
         "checkpoints"
 }
 
+# Fail with an actionable message unless a required directory exists.
 require_dir() {
     if [[ ! -d "$1" ]]; then
         echo "[cloud_train] required directory is missing: $1" >&2
@@ -176,6 +221,7 @@ require_dir() {
     fi
 }
 
+# Fail with an actionable message unless a required non-empty file exists.
 require_file() {
     if [[ ! -s "$1" ]]; then
         echo "[cloud_train] required file is missing or empty: $1" >&2
@@ -183,6 +229,29 @@ require_file() {
     fi
 }
 
+# Require either an explicit local model directory or the corresponding
+# Hugging Face hub cache directory. Model IDs are converted using the hub's
+# models--organization--name convention.
+require_model_cache() {
+    local model_name="$1"
+    if [[ "$model_name" == /* || "$model_name" == ./* ]]; then
+        require_dir "$model_name"
+    else
+        require_dir "$HF_HOME/hub/$(cache_key_model "$model_name")"
+    fi
+}
+
+# Require an explicit local dataset directory or its Hugging Face cache root.
+require_dataset_cache() {
+    local dataset_name="$1"
+    if [[ "$dataset_name" == /* || "$dataset_name" == ./* ]]; then
+        require_dir "$dataset_name"
+    else
+        require_dir "$HF_DATASETS_CACHE/$(cache_key_dataset "$dataset_name")"
+    fi
+}
+
+# Resolve the selected config and verify every offline asset needed at runtime.
 fail_fast_for_offline_cache() {
     local require_offline_cache="${REQUIRE_OFFLINE_CACHE:-}"
     if [[ -z "$require_offline_cache" ]]; then
@@ -196,8 +265,30 @@ fail_fast_for_offline_cache() {
         return
     fi
 
-    require_dir "$HF_HOME/hub/$(cache_key_model "$ENCODER_MODEL")"
-    require_dir "$HF_DATASETS_CACHE/$(cache_key_dataset "$DATASET_ID")"
+    local config_dataset config_encoder config_online_eval config_use_plan plan_encoder_type
+    local sentence_t5_model eval_ppl_model
+    config_dataset="$(resolved_config_field data_path)"
+    config_encoder="$(resolved_config_field encoder_model_name)"
+    config_online_eval="$(resolved_config_field online_eval)"
+    config_use_plan="$(resolved_config_field use_sentence_plan)"
+    plan_encoder_type="$(resolved_config_field sentence_encoder_type)"
+
+    require_model_cache "${config_encoder:-$ENCODER_MODEL}"
+    require_dataset_cache "${config_dataset:-$DATASET_ID}"
+
+    # Frozen-plan experiments otherwise fail only after the distributed workers
+    # have started, which wastes a scheduled GPU allocation.
+    if truthy "$config_use_plan" && [[ "$plan_encoder_type" == "sentence_t5" ]]; then
+        sentence_t5_model="$(resolved_config_field sentence_t5_model_name)"
+        require_model_cache "$sentence_t5_model"
+    fi
+
+    # Final generation evaluates through this model even when eval_freq is
+    # larger than the run length, so validate it before allocating GPUs.
+    if truthy "$config_online_eval"; then
+        eval_ppl_model="$(resolved_config_field eval_ppl_model)"
+        require_model_cache "$eval_ppl_model"
+    fi
 
     if truthy "${USE_ELF_B_WARM_START:-0}" || truthy "${REQUIRE_ELF_B_CHECKPOINT:-0}"; then
         require_file "$ELF_B_OWT_CHECKPOINT"
@@ -207,6 +298,7 @@ fail_fast_for_offline_cache() {
     fi
 }
 
+# Resolve per-node GPU count from explicit launcher/scheduler signals or PyTorch.
 detect_ngpu() {
     if [[ -n "${NGPU:-}" ]]; then
         printf '%s\n' "$NGPU"
@@ -253,7 +345,7 @@ export WANDB_DIR
 export WANDB_CACHE_DIR
 export SAVE_DIR
 export ELF_B_OWT_CHECKPOINT
-export PYTHONPATH="/app/src:${PYTHONPATH:-}"
+export PYTHONPATH="$REPO_ROOT/src:/app/src:${PYTHONPATH:-}"
 
 if [[ "${DRY_RUN:-0}" != "1" ]]; then
     mkdir -p "$OUTPUT_DIR" "$HF_HOME" "$HF_DATASETS_CACHE" "$WANDB_DIR" \
@@ -269,12 +361,29 @@ fi
 overrides=()
 manifest_overrides=()
 
+# Add one typed override to both the training command and frozen manifest config.
 add_override() {
     overrides+=(--config_override "$1")
     manifest_overrides+=(--config-override "$1")
 }
 
 add_override "output_dir=$OUTPUT_DIR"
+
+# Mirror explicit Python config overrides into the resolved manifest. Other
+# Python flags remain recorded in the sanitized command but do not alter Config.
+for ((extra_index = 0; extra_index < ${#extra_args[@]}; extra_index++)); do
+    extra_arg="${extra_args[$extra_index]}"
+    if [[ "$extra_arg" == "--config_override" ]]; then
+        if ((extra_index + 1 >= ${#extra_args[@]})); then
+            echo "[cloud_train] --config_override requires FIELD=VALUE" >&2
+            exit 1
+        fi
+        extra_index=$((extra_index + 1))
+        manifest_overrides+=(--config-override "${extra_args[$extra_index]}")
+    elif [[ "$extra_arg" == --config_override=* ]]; then
+        manifest_overrides+=(--config-override "${extra_arg#--config_override=}")
+    fi
+done
 
 if [[ -n "${USE_WANDB:-}" ]]; then
     add_override "use_wandb=$USE_WANDB"
@@ -332,7 +441,7 @@ echo "[cloud_train] checkpoint_root=$CHECKPOINT_ROOT"
 echo "[cloud_train] baked_hf_home=$BAKED_HF_HOME baked_checkpoint_root=$BAKED_CHECKPOINT_ROOT"
 echo "[cloud_train] NGPU=$NGPU NNODES=${NNODES:-1} NODE_RANK=${NODE_RANK:-0}"
 
-cmd=(bash scripts/launch.sh train "$CONFIG" "${overrides[@]}" "$@")
+cmd=(bash scripts/launch.sh train "$CONFIG" "${overrides[@]}" "${extra_args[@]}")
 printf '[cloud_train] command:'
 for command_arg in "${cmd[@]}"; do
     command_key="${command_arg%%=*}"
@@ -385,6 +494,7 @@ if truthy "${PREPARE_ONLY:-0}"; then
     exit 0
 fi
 
+# Persist one normalized process state transition for the current attempt.
 record_lifecycle() {
     local state="$1"
     local event="$2"

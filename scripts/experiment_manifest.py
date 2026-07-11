@@ -39,10 +39,17 @@ OPERATIONAL_CONFIG_FIELDS = {
 
 
 def utc_now() -> str:
+    """Return the current UTC timestamp in RFC 3339 form with a ``Z`` suffix."""
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 def _plain(value: Any) -> Any:
+    """Recursively convert config objects into YAML/JSON-safe primitive values.
+
+    Dataclass-like config objects are detected through class annotations. A
+    ``TypeError`` is raised for unknown values so manifests never silently
+    stringify a scientific setting.
+    """
     if value is None or isinstance(value, (bool, int, float, str)):
         return value
     if isinstance(value, (list, tuple)):
@@ -56,12 +63,14 @@ def _plain(value: Any) -> Any:
 
 
 def resolved_config(config_path: str, overrides: list[str]) -> dict[str, Any]:
+    """Load inheritance, apply typed overrides, and return every Config field."""
     config = load_config_from_yaml(config_path)
     config = apply_config_overrides(config, overrides)
     return {name: _plain(getattr(config, name)) for name in Config.__annotations__}
 
 
 def scientific_config(config: dict[str, Any]) -> dict[str, Any]:
+    """Remove retry/attempt-specific fields before manifest compatibility checks."""
     return {
         key: value
         for key, value in config.items()
@@ -70,6 +79,7 @@ def scientific_config(config: dict[str, Any]) -> dict[str, Any]:
 
 
 def sanitize_command(command: list[str]) -> list[str]:
+    """Redact secret-bearing ``KEY=value`` and flag-following command arguments."""
     sanitized: list[str] = []
     redact_next = False
     for argument in command:
@@ -88,6 +98,7 @@ def sanitize_command(command: list[str]) -> list[str]:
 
 
 def _fsync_dir(path: Path) -> None:
+    """Persist a directory entry update after an atomic file replacement."""
     fd = os.open(path, os.O_RDONLY)
     try:
         os.fsync(fd)
@@ -96,6 +107,11 @@ def _fsync_dir(path: Path) -> None:
 
 
 def atomic_write(path: Path, payload: Any, *, yaml_format: bool = False) -> None:
+    """Durably replace a JSON or YAML file using fsync plus atomic rename.
+
+    The temporary file is created in the destination directory so ``os.replace``
+    stays on one filesystem. Any leftover temporary file is removed on failure.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     suffix = ".yaml" if yaml_format else ".json"
     fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=suffix, dir=path.parent)
@@ -116,6 +132,7 @@ def atomic_write(path: Path, payload: Any, *, yaml_format: bool = False) -> None
 
 
 def append_event(path: Path, event: dict[str, Any]) -> None:
+    """Append and fsync one compact JSON object to a lifecycle event stream."""
     path.parent.mkdir(parents=True, exist_ok=True)
     line = (json.dumps(event, ensure_ascii=False, sort_keys=True, allow_nan=False) + "\n").encode()
     fd = os.open(path, os.O_APPEND | os.O_CREAT | os.O_WRONLY, 0o644)
@@ -127,6 +144,7 @@ def append_event(path: Path, event: dict[str, Any]) -> None:
 
 
 def _validate_identity(label: str, value: str) -> None:
+    """Require a scheduler/filesystem-safe run or attempt identity."""
     if not IDENTITY_RE.fullmatch(value):
         raise ValueError(
             f"{label}={value!r} is invalid; use 1-128 letters, digits, '.', '_' or '-'"
@@ -134,11 +152,22 @@ def _validate_identity(label: str, value: str) -> None:
 
 
 def _require_immutable(label: str, value: str) -> None:
+    """Reject missing, mutable, or placeholder source/image identities."""
     if not value or value.lower() in {"unknown", "latest", "runtime", "seed"}:
         raise ValueError(f"{label} must be an immutable, non-placeholder identity")
 
 
 def prepare(args: argparse.Namespace) -> dict[str, Any]:
+    """Create or validate a scientific run and append one immutable attempt.
+
+    A new run writes its resolved manifest. A retry may reuse the run only when
+    project, run ID, source, image, and scientific config are identical. Attempt
+    directories are never overwritten. The function also initializes backend
+    and normalized status files and records ``attempt_created``.
+
+    Returns:
+        Paths to the run manifest and newly created attempt manifest.
+    """
     _validate_identity("run_id", args.run_id)
     _validate_identity("attempt_id", args.attempt_id)
     if args.require_immutable_identities:
@@ -260,6 +289,11 @@ def prepare(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def record(args: argparse.Namespace) -> dict[str, Any]:
+    """Atomically update normalized status and append a lifecycle event.
+
+    Recording is allowed only after the run and attempt manifests exist and
+    their identities agree with the command arguments.
+    """
     _validate_identity("run_id", args.run_id)
     _validate_identity("attempt_id", args.attempt_id)
     run_dir = Path(args.output_dir).resolve()
@@ -307,6 +341,7 @@ def record(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    """Parse arguments for initial run/attempt manifest creation."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--project", required=True)
     parser.add_argument("--run-id", required=True)
@@ -329,6 +364,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 def parse_record_args(argv: list[str] | None = None) -> argparse.Namespace:
+    """Parse arguments for a normalized lifecycle state transition."""
     parser = argparse.ArgumentParser(description="Record an ELF experiment lifecycle transition.")
     parser.add_argument("--project", required=True)
     parser.add_argument("--run-id", required=True)
@@ -346,6 +382,7 @@ def parse_record_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 def main() -> None:
+    """Dispatch the default prepare command or the explicit ``record`` command."""
     if len(sys.argv) > 1 and sys.argv[1] == "record":
         result = record(parse_record_args(sys.argv[2:]))
     else:
