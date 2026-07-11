@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Prepare, submit, inspect, and collect ELF campaigns through registered backends."""
+"""Prepare, submit, inspect, and collect project campaigns through registered backends."""
 
 from __future__ import annotations
 
@@ -26,42 +26,21 @@ from experiment_manifest import (  # noqa: E402
     RunState,
     append_event,
     atomic_write,
-    resolved_config,
     sanitize_command,
     utc_now,
 )
 from experiment_campaign import load_and_resolve_campaign  # noqa: E402
-from experiment_assets import plan_assets  # noqa: E402
-from experiment_overrides import operational_overrides  # noqa: E402
 from experiment_policy import decide_next_action  # noqa: E402
 from experiment_control.backends import build_registry  # noqa: E402
 from experiment_control.backends.services import BackendServices  # noqa: E402
+from experiment_control.projects import build_project_registry  # noqa: E402
 from experiment_control.runner import (  # noqa: E402
     CommandResult,
     CommandRunner,
     SubprocessRunner,
 )
-from experiment_control.metrics import parse_training_metric_line  # noqa: E402
-from summarize_experiments import summarize_run  # noqa: E402
 
 
-SAFE_ENV_KEYS = {
-    "BATCH_SIZE",
-    "DATA_ROOT",
-    "GLOBAL_BATCH_SIZE",
-    "HF_DATASETS_OFFLINE",
-    "HF_DATASETS_CACHE",
-    "HF_HOME",
-    "HF_HUB_OFFLINE",
-    "LOG_FREQ",
-    "MAX_INFRA_RETRIES",
-    "NUM_WORKERS",
-    "PROJECT_DATA_ROOT",
-    "REQUIRE_OFFLINE_CACHE",
-    "TRANSFORMERS_OFFLINE",
-    "USE_COMPILE",
-    "USE_WANDB",
-}
 _COMMAND_RUNNER: CommandRunner = SubprocessRunner()
 
 
@@ -111,14 +90,14 @@ def load_campaign(path: Path) -> dict[str, Any]:
         raise ValueError("campaign runs must be a non-empty list")
     seen: set[str] = set()
     for run in payload["runs"]:
-        validate_run(run)
+        validate_run(run, project=str(payload["project"]))
         if run["run_id"] in seen:
             raise ValueError(f"duplicate run_id: {run['run_id']}")
         seen.add(run["run_id"])
     return payload
 
 
-def validate_run(run: Any) -> None:
+def validate_run(run: Any, *, project: str | None = None) -> None:
     """Validate one backend-neutral run and reject secret-bearing settings."""
     if not isinstance(run, dict):
         raise ValueError("each campaign run must be a mapping")
@@ -135,7 +114,8 @@ def validate_run(run: Any) -> None:
     env = run.get("env", {})
     if not isinstance(env, dict):
         raise ValueError(f"run {run['run_id']} env must be a mapping")
-    forbidden = [key for key in env if key not in SAFE_ENV_KEYS or SECRET_KEY_RE.search(key)]
+    allowed_env = PROJECTS.get(project).safe_env_keys if project is not None else frozenset()
+    forbidden = [key for key in env if key not in allowed_env or SECRET_KEY_RE.search(key)]
     if forbidden:
         raise ValueError(f"run {run['run_id']} has forbidden env keys: {sorted(forbidden)}")
     for value in env.values():
@@ -157,6 +137,8 @@ def validate_run(run: Any) -> None:
         if isinstance(value, str) and ("\n" in value or "\x00" in value):
             raise ValueError(f"run {run['run_id']} backend/storage values must be single-line text")
     BACKENDS.get(str(backend["kind"])).validate(run)
+    if project is not None:
+        PROJECTS.get(project).validate_run(run)
 
 
 def source_identity(campaign: dict[str, Any]) -> str:
@@ -164,7 +146,10 @@ def source_identity(campaign: dict[str, Any]) -> str:
     configured = str(campaign.get("source_id", "auto"))
     if configured != "auto":
         return configured
-    result = run_command(["bash", "scripts/source_identity.sh", "--runtime"], cwd=REPO_ROOT)
+    bundle = PROJECTS.get(str(campaign["project"])).source_bundle(REPO_ROOT)
+    if not bundle.identity_command:
+        raise ValueError(f"project {campaign['project']} has no source identity command")
+    result = run_command(list(bundle.identity_command), cwd=bundle.root)
     return result.stdout.strip()
 
 
@@ -212,7 +197,7 @@ def materialize_run(campaign: dict[str, Any], run: dict[str, Any], identity: str
         return value
 
     materialized = expand(run)
-    validate_run(materialized)
+    validate_run(materialized, project=str(campaign["project"]))
     return materialized
 
 
@@ -263,16 +248,7 @@ def command_environment(
             "HF_DATASETS_CACHE": str(storage["hf_datasets_cache"]),
         }
     )
-    project_root = str(storage["project_data_root"])
-    env.update(
-        {
-            "CHECKPOINT_ROOT": f"{project_root}/checkpoints",
-            "ELF_B_OWT_CHECKPOINT": f"{project_root}/checkpoints/ELF-B-owt-torch/checkpoint_95085",
-            "SAVE_DIR": f"{project_root}/saved_models",
-            "WANDB_CACHE_DIR": f"{project_root}/wandb_cache",
-            "WANDB_DIR": f"{project_root}/wandb",
-        }
-    )
+    env.update(PROJECTS.get(str(campaign["project"])).environment(campaign, run))
     env.update(backend.environment(campaign, run, source_id, attempt_id))
     return env
 
@@ -284,17 +260,19 @@ def launcher_command(
     env = command_environment(campaign, run, source_id, attempt_id)
     command: list[str] = ["env"]
     command.extend(f"{key}={value}" for key, value in sorted(env.items()))
-    command.extend(["bash", "scripts/cloud_train.sh", str(run["config"])])
-    for override in run.get("config_overrides", []):
-        command.extend(["--config_override", str(override)])
+    command.extend(PROJECTS.get(str(campaign["project"])).command(run))
     return command
 
 
-def resolved_run_overrides(run: dict[str, Any], remote_run_dir: str) -> list[str]:
+def resolved_run_overrides(
+    campaign: dict[str, Any], run: dict[str, Any], remote_run_dir: str
+) -> list[str]:
     """Mirror launcher environment and explicit CLI overrides in execution order."""
     env = {str(key): str(value) for key, value in run.get("env", {}).items()}
     env.setdefault("RUN_ID", str(run["run_id"]))
-    overrides = operational_overrides(env, remote_run_dir)
+    overrides = PROJECTS.get(str(campaign["project"])).operational_overrides(
+        env, remote_run_dir
+    )
     overrides.extend(map(str, run.get("config_overrides", [])))
     return overrides
 
@@ -306,9 +284,11 @@ def prepare_run(
     local_dir = local_run_dir(campaign, run)
     manifest_path = local_dir / "manifest.yaml"
     remote_run_dir = str(run["storage"]["run_dir"])
-    overrides = resolved_run_overrides(run, remote_run_dir)
-    resolved = resolved_config(str(run["config"]), overrides)
+    project = PROJECTS.get(str(campaign["project"]))
+    overrides = resolved_run_overrides(campaign, run, remote_run_dir)
+    resolved = project.resolve_config(str(run["config"]), overrides)
     command = launcher_command(campaign, run, source_id, attempt_id)
+    bundle = project.source_bundle(REPO_ROOT)
     manifest = {
         "schema_version": 1,
         "campaign": campaign["campaign"],
@@ -328,12 +308,21 @@ def prepare_run(
         "resources": run.get("resources", {}),
         "storage": run["storage"],
         "command": sanitize_command(command),
+        "execution": {
+            "source_mount": bundle.container_path,
+            "workdir": bundle.container_path,
+        },
         "retry": run.get("retry", {"max_infra_retries": 0}),
     }
     if manifest_path.exists():
         existing = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
-        immutable_keys = ("campaign", "project", "run_id", "source_id", "image_id", "resolved_config", "backend")
+        immutable_keys = (
+            "campaign", "project", "run_id", "source_id", "image_id", "resolved_config",
+            "backend",
+        )
         conflicts = [key for key in immutable_keys if existing.get(key) != manifest.get(key)]
+        if existing.get("execution") not in (None, manifest["execution"]):
+            conflicts.append("execution")
         if conflicts:
             raise ValueError(f"existing control manifest conflicts in {conflicts}: {manifest_path}")
         base_manifest = existing
@@ -343,10 +332,13 @@ def prepare_run(
     effective = dict(base_manifest)
     effective["attempt_id"] = attempt_id
     effective["command"] = sanitize_command(command)
+    effective["execution"] = manifest["execution"]
     attempt_path = local_dir / "attempts" / attempt_id / "attempt.yaml"
     if attempt_path.exists():
         previous_attempt = yaml.safe_load(attempt_path.read_text(encoding="utf-8"))
-        if previous_attempt != effective:
+        comparable_attempt = dict(previous_attempt)
+        comparable_attempt.setdefault("execution", effective["execution"])
+        if comparable_attempt != effective:
             raise ValueError(f"existing control attempt conflicts: {attempt_path}")
     else:
         atomic_write(attempt_path, effective, yaml_format=True)
@@ -441,8 +433,19 @@ def backend_services() -> BackendServices:
     """Inject controller IO boundaries into platform-specific adapters."""
     return BackendServices(
         repo_root=REPO_ROOT, script_dir=SCRIPT_DIR, run_command=run_command, local_run_dir=local_run_dir,
-        backend_record=backend_record, summarize_run=summarize_run,
+        backend_record=backend_record, summarize_run=summarize_project_run,
+        parse_metric=parse_project_metric,
     )
+
+
+def summarize_project_run(campaign: dict[str, Any], run_dir: Path) -> dict[str, Any]:
+    """Dispatch result interpretation to the campaign's scientific project."""
+    return PROJECTS.get(str(campaign["project"])).summarize(run_dir)
+
+
+def parse_project_metric(campaign: dict[str, Any], line: str) -> dict[str, Any] | None:
+    """Dispatch training-log interpretation without teaching a backend project syntax."""
+    return PROJECTS.get(str(campaign["project"])).parse_metric(line)
 
 
 def backend_record(campaign: dict[str, Any], run: dict[str, Any]) -> dict[str, Any]:
@@ -491,7 +494,8 @@ def annotate_collection(
     return annotated
 
 
-BACKENDS = build_registry(backend_services(), parse_training_metric_line)
+PROJECTS = build_project_registry()
+BACKENDS = build_registry(backend_services())
 
 
 def unsubmitted_status(campaign: dict[str, Any], run: dict[str, Any]) -> dict[str, Any]:
@@ -546,7 +550,8 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "prepare":
             outputs.append({"run_id": run["run_id"], "state": "CREATED"})
         elif args.command == "stage":
-            staged = backend_adapter.stage(campaign, run, identity)
+            bundle = PROJECTS.get(str(campaign["project"])).source_bundle(REPO_ROOT)
+            staged = backend_adapter.stage(campaign, run, identity, bundle)
             outputs.append({"run_id": run["run_id"], "staged": staged})
         elif args.command == "render":
             assert manifest is not None
@@ -623,7 +628,8 @@ def main(argv: list[str] | None = None) -> int:
             atomic_write(local_dir / "decision.json", payload)
             outputs.append({"run_id": run["run_id"], **payload})
         elif args.command in {"assets-plan", "assets-verify"}:
-            requirements = plan_assets(
+            project = PROJECTS.get(str(campaign["project"]))
+            requirements = project.plan_assets(
                 str(run["config"]), list(map(str, run.get("config_overrides", [])))
             )
             result: dict[str, Any] = {
@@ -632,7 +638,8 @@ def main(argv: list[str] | None = None) -> int:
             }
             if args.command == "assets-verify":
                 env = command_environment(campaign, run, identity, args.attempt_id)
-                result.update(backend_adapter.verify_assets(run, requirements, env))
+                probes = project.asset_probes(requirements, env)
+                result.update(backend_adapter.verify_assets(run, probes))
             outputs.append(result)
     print(json.dumps(outputs, ensure_ascii=False, indent=2, sort_keys=True))
     return 0

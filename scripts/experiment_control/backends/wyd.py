@@ -8,7 +8,6 @@ import shlex
 from pathlib import Path
 from typing import Any
 
-from experiment_assets import cache_path
 from .services import BackendServices
 from safe_sco import redact_line
 
@@ -41,9 +40,13 @@ def render_job(manifest: dict[str, Any]) -> str:
         manifest["storage"]["run_dir"], backend["source_dir"], backend["sif_path"]
     )
     mount_root = str(backend["mount_root"])
-    cache = str(backend.get("apptainer_cache_dir", f"{mount_root.rstrip('/')}/apptainer/cache/liangluocheng"))
-    temp = str(backend.get("apptainer_tmp_dir", f"{mount_root.rstrip('/')}/apptainer/tmp/liangluocheng"))
+    project_root = str(manifest["storage"]["project_data_root"])
+    cache = str(backend.get("apptainer_cache_dir", f"{project_root}/apptainer/cache"))
+    temp = str(backend.get("apptainer_tmp_dir", f"{project_root}/apptainer/tmp"))
     command = shlex.join(manifest["command"])
+    execution = manifest.get("execution", {})
+    container_path = str(execution.get("source_mount", "/workspace"))
+    workdir = str(execution.get("workdir", container_path))
     comment = shlex.quote(f"{manifest.get('campaign', 'campaign')}/{manifest['run_id']}/{manifest['attempt_id']}")
     job_name = scheduler_job_name(str(manifest["run_id"]), str(manifest["attempt_id"]))
     return f"""#!/usr/bin/env bash
@@ -73,8 +76,8 @@ test -d {shlex.quote(source_dir)}
 test -s {shlex.quote(sif_path)}
 srun apptainer exec --nv \\
   --bind {shlex.quote(mount_root)}:{shlex.quote(mount_root)} \\
-  --bind {shlex.quote(source_dir)}:/app \\
-  --pwd /app \\
+  --bind {shlex.quote(source_dir)}:{shlex.quote(container_path)} \\
+  --pwd {shlex.quote(workdir)} \\
   {shlex.quote(sif_path)} \\
   {command}
 """
@@ -100,7 +103,7 @@ def parse_accounting(output: str, *, job_id: str, run_id: str, partition: str) -
 
 class WydSlurmBackend:
     kind = "slurm"
-    ssh_control_path = "/tmp/elf-experimentctl-%C"
+    ssh_control_path = "/tmp/experimentctl-%C"
 
     def __init__(self, services: BackendServices):
         self.s = services
@@ -178,19 +181,16 @@ class WydSlurmBackend:
             ]
         return matches[0] if len(matches) == 1 else None
 
-    def verify_assets(self, run, requirements, environment) -> dict[str, Any]:
-        hf_home = Path(environment["HF_HOME"])
-        datasets_cache = Path(environment["HF_DATASETS_CACHE"])
+    def verify_assets(self, run, probes) -> dict[str, Any]:
         missing = []
         alias = str(run["backend"]["ssh_alias"])
-        for requirement in requirements:
-            path = cache_path(requirement, hf_home, datasets_cache)
-            predicate = "-s" if requirement.kind == "file" else "-d"
-            if self.remote_exec(alias, shlex.join(["test", predicate, str(path)]), check=False).returncode:
-                missing.append({**requirement.__dict__, "path": str(path)})
+        for probe in probes:
+            predicate = "-s" if probe.file else "-d"
+            if self.remote_exec(alias, shlex.join(["test", predicate, probe.path]), check=False).returncode:
+                missing.append({**probe.requirement.__dict__, "path": probe.path})
         return {"missing": missing, "verification": "remote-ssh", "verified_on": alias}
 
-    def stage(self, campaign: dict[str, Any], run: dict[str, Any], source_id: str) -> bool:
+    def stage(self, campaign, run, source_id, source_bundle) -> bool:
         backend = run["backend"]
         expected_suffix = f"/sources/{source_id}"
         if not str(backend["source_dir"]).endswith(expected_suffix):
@@ -205,12 +205,16 @@ class WydSlurmBackend:
         ).returncode == 0
         if not staged:
             transport = f"ssh -o ControlMaster=auto -o ControlPersist=900 -o ControlPath={self.ssh_control_path}"
-            self.s.run_command(
-                ["rsync", "-a", "--delete", "-e", transport,
-                 "--exclude=.git/", "--exclude=outputs/", "--exclude=runs/",
-                 "--exclude=checkpoints/", "--exclude=wandb/", "--exclude=*.log",
-                 f"{self.s.repo_root}/", f"{backend['ssh_alias']}:{backend['source_dir']}/"]
+            command = ["rsync", "-a", "--delete", "-e", transport]
+            command.extend(
+                argument for pattern in source_bundle.excludes
+                for argument in ("--exclude", pattern)
             )
+            command.extend([
+                f"{source_bundle.root}/",
+                f"{backend['ssh_alias']}:{backend['source_dir']}/",
+            ])
+            self.s.run_command(command)
             self.remote_exec(backend["ssh_alias"], shlex.join(["touch", source_marker]))
         expected_image = str(run["image_id"])
         expected_sha = expected_image.removeprefix("sha256:")
@@ -316,7 +320,7 @@ class WydSlurmBackend:
              "--include=metrics.jsonl", "--exclude=*",
              f"{backend['ssh_alias']}:{run['storage']['run_dir']}/", f"{mirror}/"]
         )
-        summary = self.s.summarize_run(mirror)
+        summary = self.s.summarize_run(campaign, mirror)
         summary["collected_from"] = run["storage"]["run_dir"]
         summary["run_dir"] = run["storage"]["run_dir"]
         return summary

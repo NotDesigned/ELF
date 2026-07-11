@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Create durable run/attempt metadata before an ELF training process starts."""
+"""Create durable run/attempt metadata before a training process starts."""
 
 from __future__ import annotations
 
@@ -19,27 +19,12 @@ from typing import Any, Mapping
 import yaml
 
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
-SRC_ROOT = REPO_ROOT / "src"
-if str(SRC_ROOT) not in sys.path:
-    sys.path.insert(0, str(SRC_ROOT))
-
-from configs.config import Config, apply_config_overrides, load_config_from_yaml  # noqa: E402
-
-
 IDENTITY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 SECRET_KEY_RE = re.compile(
     r"(?:secret|token|password|credential|access[_-]?key|api[_-]?key|proxy|authorization|cookie)",
     re.IGNORECASE,
 )
 URL_USERINFO_RE = re.compile(r"(?P<scheme>[A-Za-z][A-Za-z0-9+.-]*://)[^/@\s]+@")
-OPERATIONAL_CONFIG_FIELDS = {
-    "output_dir",
-    "resume",
-    "wandb_run_name",
-    "wandb_run_id",
-    "wandb_resume",
-}
 
 
 class RunState(str, Enum):
@@ -105,41 +90,6 @@ class SubmissionIntent:
 def utc_now() -> str:
     """Return the current UTC timestamp in RFC 3339 form with a ``Z`` suffix."""
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-
-
-def _plain(value: Any) -> Any:
-    """Recursively convert config objects into YAML/JSON-safe primitive values.
-
-    Dataclass-like config objects are detected through class annotations. A
-    ``TypeError`` is raised for unknown values so manifests never silently
-    stringify a scientific setting.
-    """
-    if value is None or isinstance(value, (bool, int, float, str)):
-        return value
-    if isinstance(value, (list, tuple)):
-        return [_plain(item) for item in value]
-    if isinstance(value, dict):
-        return {str(key): _plain(item) for key, item in value.items()}
-    annotations = getattr(type(value), "__annotations__", {})
-    if annotations:
-        return {name: _plain(getattr(value, name)) for name in annotations}
-    raise TypeError(f"cannot serialize manifest value of type {type(value).__name__}")
-
-
-def resolved_config(config_path: str, overrides: list[str]) -> dict[str, Any]:
-    """Load inheritance, apply typed overrides, and return every Config field."""
-    config = load_config_from_yaml(config_path)
-    config = apply_config_overrides(config, overrides)
-    return {name: _plain(getattr(config, name)) for name in Config.__annotations__}
-
-
-def scientific_config(config: dict[str, Any]) -> dict[str, Any]:
-    """Remove retry/attempt-specific fields before manifest compatibility checks."""
-    return {
-        key: value
-        for key, value in config.items()
-        if key not in OPERATIONAL_CONFIG_FIELDS
-    }
 
 
 def sanitize_command(command: list[str]) -> list[str]:
@@ -676,7 +626,10 @@ def prepare(args: argparse.Namespace) -> dict[str, Any]:
             f"attempt already exists: {attempt_path}; choose a new ATTEMPT_ID"
         )
 
-    config = resolved_config(args.config, args.config_override)
+    from experiment_control.projects import build_project_registry
+
+    project = build_project_registry().get(args.project)
+    config = project.resolve_config(args.config, args.config_override)
     command = list(args.command)
     if command and command[0] == "--":
         command = command[1:]
@@ -716,8 +669,8 @@ def prepare(args: argparse.Namespace) -> dict[str, Any]:
             "source_id": (existing.get("source_id"), manifest["source_id"]),
             "image_id": (existing.get("image_id"), manifest["image_id"]),
             "scientific config": (
-                scientific_config(existing.get("resolved_config", {})),
-                scientific_config(manifest["resolved_config"]),
+                project.scientific_config(existing.get("resolved_config", {})),
+                project.scientific_config(manifest["resolved_config"]),
             ),
         }
         conflicts = [label for label, (old, new) in immutable_pairs.items() if old != new]
@@ -824,7 +777,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def parse_record_args(argv: list[str] | None = None) -> argparse.Namespace:
     """Parse arguments for a normalized lifecycle state transition."""
-    parser = argparse.ArgumentParser(description="Record an ELF experiment lifecycle transition.")
+    parser = argparse.ArgumentParser(description="Record an experiment lifecycle transition.")
     parser.add_argument("--project", required=True)
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--attempt-id", required=True)

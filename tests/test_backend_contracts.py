@@ -1,4 +1,5 @@
 from experiment_control.backends.base import BackendRegistry
+from experiment_control.projects.base import ProjectRegistry
 from experiment_control.backends.wyd import parse_accounting, scheduler_job_name
 import experimentctl
 
@@ -39,8 +40,16 @@ def test_controller_core_accepts_a_registered_backend_without_platform_branch(mo
         def environment(self, campaign, run, source_id, attempt_id):
             return {"FAKE_ALLOCATION": "ready"}
 
+    class FakeProject:
+        name = "project"
+        safe_env_keys = frozenset()
+
+        def environment(self, campaign, run):
+            return {"PROJECT_RUNTIME": "ready"}
+
     registry = BackendRegistry(FakeBackend())
     monkeypatch.setattr(experimentctl, "BACKENDS", registry)
+    monkeypatch.setattr(experimentctl, "PROJECTS", ProjectRegistry(FakeProject()))
     run = {
         "run_id": "abstract-run", "config": "config.yml", "image_id": "immutable",
         "backend": {"kind": "fake"}, "env": {},
@@ -57,3 +66,4 @@ def test_controller_core_accepts_a_registered_backend_without_platform_branch(mo
     assert run["validated_by_fake"] is True
     assert env["BACKEND"] == "fake"
     assert env["FAKE_ALLOCATION"] == "ready"
+    assert env["PROJECT_RUNTIME"] == "ready"

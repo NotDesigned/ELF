@@ -117,6 +117,7 @@ python scripts/experimentctl.py experiments/campaigns/CAMPAIGN.yml cancel --run 
 | `load_campaign` / `validate_run` | Validate schema, backend fields, safe environment allowlist, explicit Slurm GRES, and SenseCore spot policy. |
 | `source_identity` / `materialize_run` | Compute runtime-tree identity and expand immutable path placeholders. |
 | `prepare_run` | Resolve config/overrides and atomically freeze the canonical local run/attempt manifests before submission. |
+| `ProjectAdapter` | Own project config semantics, launcher command, runtime environment, assets, metrics, summary, and source-bundle policy. |
 | `WydSlurmBackend` | Stage immutable source/SIF artifacts and implement Slurm render, submit, status, collect, and cancel. |
 | `SenseCoreBackend` | Implement exact-name SCO submit/status/log collection/cancel through immediate sanitization. |
 | `BackendRegistry` | Dispatch the common backend contract without platform branches in the CLI. |
@@ -134,10 +135,12 @@ without network access:
 | --- | --- |
 | `experiment_campaign.py` | Resolve defaults, profiles, matrices, and authored runs. |
 | `experiment_manifest.py` | Atomic run/attempt store, lifecycle states, submission outbox, reconciliation. |
-| `experiment_assets.py` | Load a config once and plan/verify its offline model, dataset, and checkpoint requirements. |
-| `experiment_overrides.py` | Produce the one ordered environment-to-config override sequence used by controller and launcher. |
+| `experiment_assets.py` | ELF asset discovery and Hugging Face cache layout used by the ELF project adapter. |
+| `experiment_overrides.py` | ELF's ordered environment-to-config override sequence. |
 | `experiment_policy.py` | Classify failures and recommend bounded next actions without mutating a scheduler. |
 | `experiment_control/runner.py` | Injectable command boundary for production subprocesses and hermetic fakes. |
+| `experiment_control/projects/base.py` | Project protocol plus backend-verifiable asset and source-bundle value objects. |
+| `experiment_control/projects/elf.py` | The only controller module that knows ELF Config, `cloud_train.sh`, ELF checkpoints, metrics, and summaries. |
 | `experiment_control/backends/wyd.py` | SSH, rsync, Slurm, Apptainer staging/status/collection/cancellation. |
 | `experiment_control/backends/sensecore.py` | SCO submission/status/logging/cancellation through repository-local sanitization. |
 
@@ -147,6 +150,14 @@ asset verification, submission recovery, `stage`, `render`, `submit`,
 backend-kind branch or scheduler field to the CLI loop. Shared storage and
 launcher paths live in the backend profile's `storage` mapping; scheduler-only
 fields remain inside `backend`.
+
+The controller composes two independent adapters. A project adapter answers
+*what* is executed and interpreted; a backend answers *where and how* it is
+staged, scheduled, observed, and cancelled. Backends receive filesystem asset
+probes instead of model/dataset names, and receive a `SourceBundle` instead of
+assuming a repository root, rsync exclusion list, container mount, or working
+directory. `tests/test_project_adapter_contract.py` prepares and renders a
+dummy project with no import from ELF's `src/configs`, guarding this boundary.
 
 ### Submission recovery
 
@@ -163,7 +174,8 @@ intent remains unresolved, the controller refuses to create a second job.
 
 ### Identity separation
 
-`source_identity.sh --runtime` hashes only Docker/training runtime inputs.
+The ELF project adapter selects `source_identity.sh --runtime`, which hashes
+only Docker/training runtime inputs.
 Campaign YAML and documentation changes therefore do not force an identical
 image or SIF rebuild. Manifests record four separate provenance values:
 

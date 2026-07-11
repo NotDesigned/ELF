@@ -17,7 +17,7 @@ from experimentctl import (
     record_submission_intent,
 )
 from experiment_control.backends.wyd import render_job
-from experiment_control.metrics import parse_training_metric_line
+from experiment_control.projects.elf import parse_training_metric_line
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]

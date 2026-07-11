@@ -6,7 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from dataclasses import asdict, dataclass
+from dataclasses import asdict
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -15,14 +15,7 @@ if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
 from configs.config import apply_config_overrides, load_config_from_yaml  # noqa: E402
-
-
-@dataclass(frozen=True)
-class AssetRequirement:
-    kind: str
-    identity: str
-    reason: str
-
+from experiment_control.projects.base import AssetRequirement  # noqa: E402
 
 def plan_assets(config_path: str, overrides: list[str]) -> list[AssetRequirement]:
     """Load the resolved config once and return its complete offline asset set."""

@@ -148,6 +148,6 @@ def test_repository_campaigns_expand_to_valid_independent_runs(filename, expecte
     assert "profiles" not in campaign
     for run in campaign["runs"]:
         materialized = materialize_run(campaign, run, "test-source")
-        validate_run(materialized)
+        validate_run(materialized, project=campaign["project"])
         assert "profile" not in materialized
         assert "{run_id}" not in materialized["storage"]["run_dir"]

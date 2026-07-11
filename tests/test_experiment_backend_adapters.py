@@ -3,8 +3,8 @@ from pathlib import Path
 
 from experiment_control.runner import CommandResult, SubprocessRunner
 from experiment_control.backends.wyd import WydSlurmBackend
+from experiment_control.projects.elf import ElfProjectAdapter
 from experiment_control.backends.sensecore import SenseCoreBackend
-from experiment_control.metrics import parse_training_metric_line
 from experimentctl import (
     backend_services,
     materialize_run,
@@ -108,7 +108,7 @@ def test_sensecore_submit_contract_checks_exact_job_after_create(tmp_path: Path)
     )
     set_command_runner(fake)
     try:
-        job_id = SenseCoreBackend(backend_services(), parse_training_metric_line).submit(
+        job_id = SenseCoreBackend(backend_services()).submit(
             campaign, run, {"command": ["bash", "scripts/cloud_train.sh", "config.yml"]},
             dry_run=False,
         )
@@ -133,7 +133,8 @@ def test_slurm_stage_reuses_remote_source_and_sif_markers(tmp_path: Path, monkey
     )
     set_command_runner(fake)
     try:
-        WydSlurmBackend(backend_services()).stage(campaign, run, "source-fixed")
+        bundle = ElfProjectAdapter().source_bundle(Path(__file__).resolve().parents[1])
+        WydSlurmBackend(backend_services()).stage(campaign, run, "source-fixed", bundle)
     finally:
         set_command_runner(SubprocessRunner())
     assert len(fake.commands) == 3
@@ -173,7 +174,7 @@ def test_sensecore_logs_classify_expired_stream(tmp_path: Path):
     )
     set_command_runner(fake)
     try:
-        logs = SenseCoreBackend(backend_services(), parse_training_metric_line).logs({}, run, tail=5)
+        logs = SenseCoreBackend(backend_services()).logs({}, run, tail=5)
     finally:
         set_command_runner(SubprocessRunner())
     assert logs["expired"] is True

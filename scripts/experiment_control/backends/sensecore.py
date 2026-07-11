@@ -7,7 +7,7 @@ import re
 import shlex
 import sys
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from experiment_manifest import atomic_write, utc_now
 
@@ -38,9 +38,8 @@ def normalize_state(raw_state: str, *, cancellation_requested: bool = False) -> 
 class SenseCoreBackend:
     kind = "sensecore"
 
-    def __init__(self, services: BackendServices, metric_parser: Callable[[str], dict[str, Any] | None]):
+    def __init__(self, services: BackendServices):
         self.s = services
-        self.metric_parser = metric_parser
 
     def validate(self, run: dict[str, Any]) -> None:
         backend = run["backend"]
@@ -81,7 +80,7 @@ class SenseCoreBackend:
     def recover_submission(self, run, intent, attempt_id) -> str | None:
         return str(run["backend"]["job_name"]) if self.find(run) else None
 
-    def verify_assets(self, run, requirements, environment) -> dict[str, Any]:
+    def verify_assets(self, run, probes) -> dict[str, Any]:
         return {
             "missing": None,
             "verification": "requires-running-sensecore-worker",
@@ -124,7 +123,7 @@ class SenseCoreBackend:
             raise ValueError("SenseCore list sanitizer returned a non-list")
         return [item for item in payload if item.get("name") == backend["job_name"]]
 
-    def stage(self, campaign, run, source_id) -> bool:
+    def stage(self, campaign, run, source_id, source_bundle) -> bool:
         return False
 
     def render(self, manifest) -> str:
@@ -199,7 +198,7 @@ class SenseCoreBackend:
     def collect(self, campaign, run) -> dict[str, Any]:
         snapshot = self.logs(campaign, run, tail=200)
         lines = snapshot["lines"]
-        metrics = [metric for line in lines if (metric := self.metric_parser(line))]
+        metrics = [metric for line in lines if (metric := self.s.parse_metric(campaign, line))]
         metric_lines = [line for line in lines if "Step " in line or "gPPL:" in line or ("plan" in line.lower() and "ppl" in line.lower())]
         return {"run_id": run["run_id"], "backend": "sensecore", "model_observed": bool(metrics),
                 "latest_metric": metrics[-1] if metrics else None, "metric_log_lines": metric_lines[-20:],

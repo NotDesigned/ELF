@@ -16,4 +16,5 @@ class BackendServices:
     run_command: Callable[..., CommandResult]
     local_run_dir: Callable[[dict[str, Any], dict[str, Any]], Path]
     backend_record: Callable[[dict[str, Any], dict[str, Any]], dict[str, Any]]
-    summarize_run: Callable[[Path], dict[str, Any]]
+    summarize_run: Callable[[dict[str, Any], Path], dict[str, Any]]
+    parse_metric: Callable[[dict[str, Any], str], dict[str, Any] | None]
