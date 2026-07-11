@@ -6,6 +6,8 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import math
+import re
 import sys
 from pathlib import Path
 from typing import Any, Iterable, TextIO
@@ -37,6 +39,14 @@ EVAL_KEYS = (
     "shuffled_plan_ppl",
     "token_recon_ppl",
 )
+_SAMPLE_FILE_RE = re.compile(r"_(?P<epoch>\d+)_(?P<step>\d+)\.jsonl$")
+
+
+def finite_metric_value(value: Any) -> Any:
+    """Convert non-finite numeric evidence to JSON-safe missing evidence."""
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    return value
 SCIENTIFIC_CONFIG_KEYS = (
     "seed",
     "max_length",
@@ -153,6 +163,48 @@ def latest_record(records: Iterable[dict[str, Any]]) -> dict[str, Any]:
     return winner
 
 
+def collect_eval_evidence(
+    run_dir: Path,
+) -> tuple[dict[str, Any], dict[str, dict[str, Any]], list[str], list[str]]:
+    """Collect canonical values with source/step evidence and hard conflicts."""
+    selected: dict[str, tuple[float, str, Any]] = {}
+    warnings: list[str] = []
+    conflicts: list[str] = []
+    for path in sorted(run_dir.rglob("metrics.jsonl")):
+        for record in read_jsonl(path):
+            try:
+                step = float(record.get("step", -1))
+            except (TypeError, ValueError):
+                step = -1.0
+            candidates = [
+                (key, finite_metric_value(record[key]))
+                for key in EVAL_KEYS if key in record
+            ]
+            if record.get("mode") == "generation_refine_decode" and "mean_entropy" in record:
+                candidates.append((
+                    "generation_mean_entropy",
+                    finite_metric_value(record["mean_entropy"]),
+                ))
+            for key, value in candidates:
+                candidate = (step, str(path.relative_to(run_dir)), value)
+                previous = selected.get(key)
+                if previous and previous[0] == step and previous[2] != value:
+                    message = (
+                        f"{key} has conflicting values at step {step:g}: "
+                        f"{previous[1]}={previous[2]!r}, {candidate[1]}={value!r}"
+                    )
+                    warnings.append(message)
+                    conflicts.append(message)
+                if previous is None or candidate[:2] >= previous[:2]:
+                    selected[key] = candidate
+    metrics = {key: value for key, (_, _, value) in selected.items()}
+    evidence = {
+        key: {"step": step, "path": path, "value": value}
+        for key, (step, path, value) in selected.items()
+    }
+    return metrics, evidence, warnings, conflicts
+
+
 def collect_eval_metrics(run_dir: Path) -> tuple[dict[str, Any], list[str]]:
     """Collect the latest canonical evaluation metrics from a run tree.
 
@@ -169,27 +221,65 @@ def collect_eval_metrics(run_dir: Path) -> tuple[dict[str, Any], list[str]]:
         ``(metrics, warnings)`` where metrics contains canonical evaluation
         values and warnings describes same-step conflicts.
     """
-    selected: dict[str, tuple[float, str, Any]] = {}
-    warnings: list[str] = []
-    for path in sorted(run_dir.rglob("metrics.jsonl")):
-        for record in read_jsonl(path):
-            try:
-                step = float(record.get("step", -1))
-            except (TypeError, ValueError):
-                step = -1.0
-            for key in EVAL_KEYS:
-                if key not in record:
-                    continue
-                candidate = (step, str(path.relative_to(run_dir)), record[key])
-                previous = selected.get(key)
-                if previous and previous[0] == step and previous[2] != record[key]:
-                    warnings.append(
-                        f"{key} has conflicting values at step {step:g}: "
-                        f"{previous[1]}={previous[2]!r}, {candidate[1]}={candidate[2]!r}"
-                    )
-                if previous is None or candidate[:2] >= previous[:2]:
-                    selected[key] = candidate
-    return {key: value for key, (_, _, value) in selected.items()}, warnings
+    metrics, _, warnings, _ = collect_eval_evidence(run_dir)
+    return metrics, warnings
+
+
+def _artifact_summary(paths: list[Path]) -> dict[str, Any]:
+    records = 0
+    nonempty = 0
+    for path in paths:
+        payloads = read_jsonl(path)
+        records += len(payloads)
+        nonempty += sum(
+            isinstance(item.get("generated"), str) and bool(item["generated"].strip())
+            for item in payloads
+        )
+    return {
+        "matches": len(paths),
+        "records": records,
+        "nonempty_records": nonempty,
+    }
+
+
+def collect_artifact_evidence(run_dir: Path) -> dict[str, dict[str, Any]]:
+    """Expose project-normalized artifact counts to the generic policy layer."""
+    train = [run_dir / "train_metrics.jsonl"] if (run_dir / "train_metrics.jsonl").is_file() else []
+    evaluation = sorted(run_dir.rglob("metrics.jsonl"))
+    generated = sorted(run_dir.rglob("all_generated_*.jsonl"))
+    reconstructed = sorted(run_dir.rglob("all_token_reconstructed_*.jsonl"))
+    return {
+        "train_metrics": _artifact_summary(train),
+        "evaluation_metrics": _artifact_summary(evaluation),
+        "generated_samples": _artifact_summary(generated),
+        "reconstructed_samples": _artifact_summary(reconstructed),
+    }
+
+
+def latest_generation_nonempty_fraction(run_dir: Path) -> float | None:
+    """Return the latest primary-generation non-empty fraction, if observable."""
+    candidates: list[tuple[float, str, Path]] = []
+    for metrics_path in sorted(run_dir.rglob("metrics.jsonl")):
+        primary_steps = {
+            float(record["step"])
+            for record in read_jsonl(metrics_path)
+            if record.get("mode") == "generation_refine_decode"
+            and isinstance(record.get("step"), (int, float))
+        }
+        for sample_path in metrics_path.parent.glob("all_generated_*.jsonl"):
+            match = _SAMPLE_FILE_RE.search(sample_path.name)
+            if match and float(match.group("step")) in primary_steps:
+                candidates.append((float(match.group("step")), str(sample_path), sample_path))
+    if not candidates:
+        return None
+    records = read_jsonl(max(candidates)[2])
+    if not records:
+        return 0.0
+    nonempty = sum(
+        isinstance(item.get("generated"), str) and bool(item["generated"].strip())
+        for item in records
+    )
+    return nonempty / len(records)
 
 
 def summarize_run(run_dir: Path) -> dict[str, Any]:
@@ -235,18 +325,44 @@ def summarize_run(run_dir: Path) -> dict[str, Any]:
     train_path = run_dir / "train_metrics.jsonl"
     if train_path.is_file():
         latest_train = latest_record(read_jsonl(train_path))
-        row.update({key: latest_train[key] for key in TRAIN_KEYS if key in latest_train})
+        row.update({
+            key: finite_metric_value(latest_train[key])
+            for key in TRAIN_KEYS if key in latest_train
+        })
 
-    eval_metrics, warnings = collect_eval_metrics(run_dir)
+    eval_metrics, metric_evidence, warnings, conflicts = collect_eval_evidence(run_dir)
     row.update(eval_metrics)
+    row["metric_evidence"] = metric_evidence
+    row["artifacts"] = collect_artifact_evidence(run_dir)
+    nonempty_fraction = latest_generation_nonempty_fraction(run_dir)
+    if nonempty_fraction is not None:
+        row["generation_nonempty_fraction"] = nonempty_fraction
     checkpoint = discover_latest_completed_checkpoint(run_dir)
     if checkpoint:
         row["latest_completed_checkpoint"] = checkpoint["path"]
         row["latest_completed_checkpoint_step"] = checkpoint["step"]
-    if "oracle_plan_ppl" in row and "shuffled_plan_ppl" in row:
-        row["plan_ppl_gap"] = row["shuffled_plan_ppl"] - row["oracle_plan_ppl"]
+    nonfinite = sorted(
+        key for key in (*TRAIN_KEYS, *EVAL_KEYS, "generation_mean_entropy")
+        if key in row and row[key] is None
+    )
+    if nonfinite:
+        row["nonfinite_metrics"] = nonfinite
+    if (
+        isinstance(row.get("oracle_plan_ppl"), (int, float))
+        and isinstance(row.get("shuffled_plan_ppl"), (int, float))
+    ):
+        oracle = metric_evidence["oracle_plan_ppl"]
+        shuffled = metric_evidence["shuffled_plan_ppl"]
+        if oracle["step"] == shuffled["step"]:
+            row["plan_ppl_gap"] = row["shuffled_plan_ppl"] - row["oracle_plan_ppl"]
+        else:
+            message = "oracle_plan_ppl and shuffled_plan_ppl come from different steps"
+            warnings.append(message)
+            conflicts.append(message)
     if warnings:
         row["warnings"] = warnings
+    if conflicts:
+        row["evidence_conflicts"] = conflicts
     return row
 
 

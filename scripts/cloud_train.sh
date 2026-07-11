@@ -433,6 +433,16 @@ manifest_cmd=(
     --max-infra-retries "${MAX_INFRA_RETRIES:-2}"
     "${manifest_overrides[@]}"
 )
+if [[ -n "${RESEARCH_CONTRACT_B64:-}" || -n "${RESEARCH_ROLE:-}" ]]; then
+    [[ -n "${RESEARCH_CONTRACT_B64:-}" && -n "${RESEARCH_ROLE:-}" ]] || {
+        echo "[cloud_train] research contract and role must be supplied together" >&2
+        exit 2
+    }
+    manifest_cmd+=(
+        --research-contract-b64 "$RESEARCH_CONTRACT_B64"
+        --research-role "$RESEARCH_ROLE"
+    )
+fi
 if truthy "${REQUIRE_IMMUTABLE_IDENTITIES:-1}"; then
     manifest_cmd+=(--require-immutable-identities)
 fi

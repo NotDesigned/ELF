@@ -10,30 +10,49 @@ def build_run_manifest(
     resolved_config: dict[str, Any], source_id: str, runtime_tree_id: str,
     git_commit: str | None, campaign_id: str | None, campaign: str | None,
     image_id: str, run_dir: str, max_infra_retries: int,
+    research_contract: dict[str, Any] | None = None,
+    research_role: str | None = None,
 ) -> dict[str, Any]:
     """Build the platform-neutral immutable identity written as manifest.yaml."""
-    return {
+    # ``resume`` selects an attempt's starting checkpoint; it does not change
+    # the scientific run being continued.  Keeping it in the immutable run
+    # config would make attempt-002 conflict with attempt-001 solely because it
+    # resumes from the checkpoint produced by attempt-001.
+    scientific_config = {
+        key: value for key, value in resolved_config.items() if key != "resume"
+    }
+    manifest = {
         "schema_version": 1,
         "project": project,
         "run_id": run_id,
         "created_at": created_at,
         "config_path": config_path,
-        "resolved_config": resolved_config,
+        "resolved_config": scientific_config,
         "source_id": source_id,
         "runtime_tree_id": runtime_tree_id,
         "git_commit": git_commit,
         "campaign_id": campaign_id,
         "campaign": campaign,
         "image_id": image_id,
-        "seed": resolved_config.get("seed"),
+        "seed": scientific_config.get("seed"),
         "storage": {"run_dir": run_dir, "checkpoint_dir": run_dir},
         "resume_policy": {
             "enabled": True,
             "max_infra_retries": max_infra_retries,
         },
     }
+    if research_contract is not None:
+        manifest["research_contract"] = research_contract
+        manifest["research_role"] = research_role
+    return manifest
 
 
 def comparable_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
-    """Remove creation time, the only non-identity run-manifest field."""
-    return {key: value for key, value in manifest.items() if key != "created_at"}
+    """Return only scientific run identity, excluding attempt operations."""
+    comparable = {key: value for key, value in manifest.items() if key != "created_at"}
+    resolved = comparable.get("resolved_config")
+    if isinstance(resolved, dict):
+        comparable["resolved_config"] = {
+            key: value for key, value in resolved.items() if key != "resume"
+        }
+    return comparable

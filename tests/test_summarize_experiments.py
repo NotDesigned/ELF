@@ -80,6 +80,59 @@ def test_eval_conflict_is_reported_and_deterministic(tmp_path):
     assert warnings and "conflicting values" in warnings[0]
 
 
+def test_summary_exposes_artifacts_entropy_and_nonempty_generation(tmp_path):
+    run_dir = make_run(tmp_path)
+    generation = run_dir / "main-generation"
+    generation.mkdir()
+    (generation / "metrics.jsonl").write_text(
+        json.dumps({
+            "step": 200, "mode": "generation_refine_decode",
+            "g_ppl": 31.0, "mean_entropy": 2.5,
+        }) + "\n",
+        encoding="utf-8",
+    )
+    (generation / "all_generated_1_200.jsonl").write_text(
+        json.dumps({"generated": "text"}) + "\n"
+        + json.dumps({"generated": ""}) + "\n",
+        encoding="utf-8",
+    )
+    reconstruction = run_dir / "reconstruction"
+    reconstruction.mkdir()
+    (reconstruction / "all_token_reconstructed_1_200.jsonl").write_text(
+        json.dumps({"generated": "reconstructed"}) + "\n", encoding="utf-8"
+    )
+    row = summarize_run(run_dir)
+    assert row["generation_mean_entropy"] == 2.5
+    assert row["generation_nonempty_fraction"] == 0.5
+    assert row["artifacts"]["generated_samples"]["nonempty_records"] == 1
+    assert row["artifacts"]["reconstructed_samples"]["records"] == 1
+
+
+def test_plan_gap_is_not_assembled_across_different_steps(tmp_path):
+    run_dir = make_run(tmp_path)
+    eval_path = run_dir / "sampling" / "metrics.jsonl"
+    eval_path.write_text(
+        json.dumps({"step": 100, "oracle_plan_ppl": 20.0}) + "\n"
+        + json.dumps({"step": 200, "shuffled_plan_ppl": 25.0}) + "\n",
+        encoding="utf-8",
+    )
+    row = summarize_run(run_dir)
+    assert "plan_ppl_gap" not in row
+    assert row["evidence_conflicts"]
+
+
+def test_nonfinite_metrics_remain_json_safe_and_visible_to_policy(tmp_path):
+    run_dir = make_run(tmp_path)
+    (run_dir / "train_metrics.jsonl").write_text(
+        json.dumps({"step": 300, "train_loss": float("nan")}) + "\n",
+        encoding="utf-8",
+    )
+    row = summarize_run(run_dir)
+    assert row["train_loss"] is None
+    assert row["nonfinite_metrics"] == ["train_loss"]
+    json.dumps(row, allow_nan=False)
+
+
 def test_malformed_jsonl_reports_path_and_line(tmp_path):
     path = tmp_path / "broken.jsonl"
     path.write_text('{"ok": 1}\nnot-json\n', encoding="utf-8")

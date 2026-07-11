@@ -22,7 +22,9 @@ from experimentctl import (
     record_submission,
     record_submission_intent,
     resolved_run_overrides,
+    identity_report,
 )
+from experiment_control.identity import IdentityReport
 from experiment_manifest import prepare as runtime_prepare
 from experiment_control.backends.wyd import render_job
 from experiment_projects.elf import parse_training_metric_line
@@ -208,6 +210,24 @@ def test_load_campaign_rejects_unreviewed_or_secret_env(tmp_path):
         load_campaign(path)
 
 
+def test_load_campaign_rejects_nested_credentials_and_url_userinfo(tmp_path):
+    campaign = slurm_campaign(tmp_path)
+    campaign["runs"][0]["backend"]["api_token"] = "must-not-persist"
+    path = tmp_path / "nested-secret.yml"
+    path.write_text(yaml.safe_dump(campaign), encoding="utf-8")
+    with pytest.raises(ValueError, match="credential-bearing campaign field"):
+        load_campaign(path)
+
+    campaign = slurm_campaign(tmp_path)
+    campaign["runs"][0]["config_overrides"].append(
+        "endpoint=https://user:password@example.invalid/api"
+    )
+    path = tmp_path / "url-userinfo.yml"
+    path.write_text(yaml.safe_dump(campaign), encoding="utf-8")
+    with pytest.raises(ValueError, match="URL userinfo"):
+        load_campaign(path)
+
+
 def test_prepare_refuses_changed_scientific_identity(tmp_path, monkeypatch):
     monkeypatch.chdir(REPO_ROOT)
     campaign = slurm_campaign(tmp_path)
@@ -244,6 +264,167 @@ def test_new_attempt_keeps_run_manifest_and_gets_its_own_command(tmp_path, monke
     assert second["attempt_id"] == "attempt-002"
     assert "ATTEMPT_ID=attempt-002" in second["command"]
     assert (tmp_path / "local/controller-test/smoke-h100/attempts/attempt-002/attempt.yaml").is_file()
+
+
+def test_retry_resume_is_attempt_operational_state_not_run_identity(tmp_path, monkeypatch):
+    monkeypatch.chdir(REPO_ROOT)
+    campaign = slurm_campaign(tmp_path)
+    run = materialize_run(campaign, campaign["runs"][0], "source-fixed")
+    prepare_run(campaign, run, "source-fixed", attempt_id="attempt-001")
+
+    checkpoint = "/data/liangluocheng/elf/runs/smoke-h100/checkpoint_100"
+    resumed = {**run, "env": {**run["env"], "RESUME": checkpoint}}
+    second = prepare_run(campaign, resumed, "source-fixed", attempt_id="attempt-002")
+    run_dir = tmp_path / "local/controller-test/smoke-h100"
+    manifest = yaml.safe_load((run_dir / "manifest.yaml").read_text())
+
+    assert "resume" not in manifest["resolved_config"]
+    assert second["resume_from"] == checkpoint
+    assert f"RESUME={checkpoint}" in second["command"]
+    assert json.loads((run_dir / "status.json").read_text())["attempt_id"] == "attempt-002"
+    assert json.loads((run_dir / "status.json").read_text())["state"] == "CREATED"
+    assert json.loads((run_dir / "backend.json").read_text())["backend_job_id"] is None
+
+
+def test_owned_remote_run_manifest_allows_a_new_attempt_only_with_local_ownership(
+    tmp_path, monkeypatch
+):
+    monkeypatch.chdir(REPO_ROOT)
+    campaign = slurm_campaign(tmp_path)
+    run = materialize_run(campaign, campaign["runs"][0], "source-fixed")
+
+    class RemoteManifestBackend:
+        kind = "slurm"
+
+        def identity(self, _campaign, _run, _attempt_id):
+                return IdentityReport(
+                    available=False, ambiguous=False, remote_manifest_exists=True,
+                    remote_manifest_matches=True,
+                )
+
+    class Registry:
+        kinds = frozenset({"slurm"})
+
+        def get(self, _kind):
+            return RemoteManifestBackend()
+
+    real_backends = experimentctl.BACKENDS
+    monkeypatch.setattr(experimentctl, "BACKENDS", Registry())
+    without_owner = identity_report(campaign, run, "attempt-002")
+    assert without_owner["available"] is False
+    assert without_owner["remote_manifest_owned"] is False
+
+    # Restore the real adapter while preparing the locally owned run.
+    monkeypatch.setattr(experimentctl, "BACKENDS", real_backends)
+    prepare_run(campaign, run, "source-fixed", attempt_id="attempt-001")
+    monkeypatch.setattr(experimentctl, "BACKENDS", Registry())
+    owned = identity_report(campaign, run, "attempt-002")
+    assert owned["available"] is True
+    assert owned["remote_manifest_owned"] is True
+
+
+def test_cli_read_and_cancel_operations_target_explicit_historical_attempt(
+    tmp_path, monkeypatch, capsys
+):
+    monkeypatch.chdir(REPO_ROOT)
+    campaign = slurm_campaign(tmp_path)
+    run = materialize_run(campaign, campaign["runs"][0], "source-fixed")
+    prepare_run(campaign, run, "source-fixed", attempt_id="attempt-001")
+    record_submission_intent(campaign, run, "attempt-001")
+    record_submission(campaign, run, "attempt-001", "111")
+    prepare_run(campaign, run, "source-fixed", attempt_id="attempt-002")
+    record_submission_intent(campaign, run, "attempt-002")
+    record_submission(campaign, run, "attempt-002", "222")
+
+    run_dir = tmp_path / "local/controller-test/smoke-h100"
+    (run_dir / "collection.json").write_text(
+        json.dumps({"attempt": "attempt-002"}), encoding="utf-8"
+    )
+    campaign_path = tmp_path / "campaign.yml"
+    campaign_path.write_text(yaml.safe_dump(campaign), encoding="utf-8")
+
+    class AttemptBackend:
+        kind = "slurm"
+
+        def __init__(self):
+            self.seen: list[tuple[str, str, str]] = []
+
+        def validate(self, _run):
+            return None
+
+        def _record(self, operation, selected_campaign, selected_run):
+            record = experimentctl.backend_record(selected_campaign, selected_run)
+            selected_dir = experimentctl.local_run_dir(selected_campaign, selected_run)
+            self.seen.append((operation, str(record["backend_job_id"]), str(selected_dir)))
+            return record
+
+        def recover_submission(self, _run, _intent, _attempt_id):
+            return None
+
+        def status(self, selected_campaign, selected_run):
+            record = self._record("status", selected_campaign, selected_run)
+            return {
+                "run_id": selected_run["run_id"], "backend": "slurm",
+                "backend_job_id": record["backend_job_id"], "state": "RUNNING",
+                "raw_state": "RUNNING",
+            }
+
+        def logs(self, selected_campaign, selected_run, *, tail):
+            record = self._record("logs", selected_campaign, selected_run)
+            return {
+                "run_id": selected_run["run_id"], "backend": "slurm",
+                "backend_job_id": record["backend_job_id"], "tail": tail,
+                "stdout": ["historical attempt"], "stderr": [],
+            }
+
+        def collect(self, selected_campaign, selected_run):
+            record = self._record("collect", selected_campaign, selected_run)
+            return {
+                "run_id": selected_run["run_id"], "backend": "slurm",
+                "backend_job_id": record["backend_job_id"], "state": "RUNNING",
+                "step": 7,
+            }
+
+        def cancel(self, selected_campaign, selected_run):
+            record = self._record("cancel", selected_campaign, selected_run)
+            return {
+                "run_id": selected_run["run_id"], "backend": "slurm",
+                "backend_job_id": record["backend_job_id"], "state": "CANCELLED",
+                "raw_state": "CANCELLED",
+            }
+
+    fake = AttemptBackend()
+
+    class Registry:
+        kinds = frozenset({"slurm"})
+
+        def get(self, _kind):
+            return fake
+
+    monkeypatch.setattr(experimentctl, "BACKENDS", Registry())
+    for command in ("status", "logs", "collect", "observe", "cancel"):
+        assert experimentctl.main([
+            str(campaign_path), command, "--run", "smoke-h100",
+            "--attempt-id", "attempt-001",
+        ]) == 0
+        output = json.loads(capsys.readouterr().out)
+        rendered = json.dumps(output)
+        assert "111" in rendered
+        assert "222" not in rendered
+
+    assert fake.seen
+    assert {job_id for _, job_id, _ in fake.seen} == {"111"}
+    assert all(path.endswith("attempts/attempt-001") for _, _, path in fake.seen)
+    assert json.loads((run_dir / "backend.json").read_text())["backend_job_id"] == "222"
+    assert json.loads((run_dir / "status.json").read_text())["attempt_id"] == "attempt-002"
+    assert json.loads((run_dir / "status.json").read_text())["state"] == "QUEUED"
+    assert json.loads((run_dir / "attempts/attempt-001/status.json").read_text())[
+        "state"
+    ] == "CANCELLED"
+    assert (run_dir / "attempts/attempt-001/collection.json").is_file()
+    assert json.loads((run_dir / "collection.json").read_text()) == {
+        "attempt": "attempt-002"
+    }
 
 
 def test_submitted_attempt_cannot_be_submitted_twice(tmp_path, monkeypatch):
@@ -320,7 +501,7 @@ def test_collection_separates_stale_runtime_from_scheduler_truth():
     result = annotate_collection({"state": "RUNNING", "step": 10}, {"state": "CANCELLED"})
     assert result["runtime_state"] == "RUNNING"
     assert result["scheduler_state"] == "CANCELLED"
-    assert result["worker_state"] == "UNKNOWN"
+    assert result["worker_state"] == "RELEASED"
     assert result["process_state"] == "RUNNING"
     assert result["model_state"] == "OBSERVED"
 
@@ -338,7 +519,7 @@ def test_collection_classifies_pretraining_import_failure():
         },
         {"state": "FAILED"},
     )
-    assert result["worker_state"] == "ALLOCATED"
+    assert result["worker_state"] == "RELEASED"
     assert result["process_state"] == "FAILED"
     assert result["model_state"] == "NOT_OBSERVED"
     assert result["failure_class"] == "configuration"

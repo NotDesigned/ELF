@@ -4,8 +4,10 @@
 from __future__ import annotations
 
 import argparse
+import base64
 from dataclasses import asdict
 import json
+import re
 import sys
 from pathlib import Path
 from typing import Any, Iterable
@@ -21,6 +23,7 @@ if str(SCRIPT_DIR) not in sys.path:
 from experiment_manifest import (  # noqa: E402
     IDENTITY_RE,
     SECRET_KEY_RE,
+    URL_USERINFO_RE,
     ExperimentStateStore,
     RunState,
     append_event,
@@ -31,6 +34,11 @@ from experiment_manifest import (  # noqa: E402
 from experiment_campaign import load_and_resolve_campaign  # noqa: E402
 from experiment_policy import decide_next_action  # noqa: E402
 from experiment_run_manifest import build_run_manifest  # noqa: E402
+from research_contract import (  # noqa: E402
+    evaluate_research_block,
+    evaluate_research_run,
+    validate_research_contract,
+)
 from experiment_control.backends import build_registry  # noqa: E402
 from experiment_control.backends.services import BackendServices  # noqa: E402
 from experiment_projects import build_project_registry  # noqa: E402
@@ -43,6 +51,30 @@ from experiment_control.states import FailureClass, classify_failure  # noqa: E4
 
 
 _COMMAND_RUNNER: CommandRunner = SubprocessRunner()
+_ATTEMPT_SELECTOR = "__experiment_attempt_id"
+_CAMPAIGN_SECRET_KEY_RE = re.compile(
+    r"(?:^|[_-])(?:secret|password|credential|access[_-]?key(?:[_-](?:id|secret))?"
+    r"|api[_-]?key|authorization|cookie|token)(?:$|[_-])",
+    re.IGNORECASE,
+)
+
+
+def _reject_embedded_credentials(value: Any, *, path: str) -> None:
+    """Reject campaign fields that could persist credentials in run metadata."""
+    if isinstance(value, dict):
+        for key, item in value.items():
+            name = str(key)
+            child = f"{path}.{name}"
+            if _CAMPAIGN_SECRET_KEY_RE.search(name):
+                raise ValueError(f"credential-bearing campaign field is forbidden: {child}")
+            _reject_embedded_credentials(item, path=child)
+        return
+    if isinstance(value, (list, tuple)):
+        for index, item in enumerate(value):
+            _reject_embedded_credentials(item, path=f"{path}[{index}]")
+        return
+    if isinstance(value, str) and URL_USERINFO_RE.search(value):
+        raise ValueError(f"URL userinfo is forbidden in campaign metadata: {path}")
 
 
 def run_command(
@@ -95,6 +127,8 @@ def load_campaign(path: Path) -> dict[str, Any]:
         if run["run_id"] in seen:
             raise ValueError(f"duplicate run_id: {run['run_id']}")
         seen.add(run["run_id"])
+    _reject_embedded_credentials(payload, path="campaign")
+    validate_research_contract(payload)
     return payload
 
 
@@ -137,6 +171,7 @@ def validate_run(run: Any, *, project: str | None = None) -> None:
     for value in [*backend.values(), *storage.values()]:
         if isinstance(value, str) and ("\n" in value or "\x00" in value):
             raise ValueError(f"run {run['run_id']} backend/storage values must be single-line text")
+    _reject_embedded_credentials(run, path=f"run {run['run_id']}")
     BACKENDS.get(str(backend["kind"])).validate(run)
     if project is not None:
         PROJECTS.get(project).validate_run(run)
@@ -202,19 +237,44 @@ def materialize_run(campaign: dict[str, Any], run: dict[str, Any], identity: str
     return materialized
 
 
-def local_run_dir(campaign: dict[str, Any], run: dict[str, Any]) -> Path:
-    """Return the controller-owned local metadata directory for one run."""
+def run_root_dir(campaign: dict[str, Any], run: dict[str, Any]) -> Path:
+    """Return the controller-owned local metadata root for one scientific run."""
     root = Path(campaign.get("local_root", "outputs/experiment_campaigns"))
     if not root.is_absolute():
         root = REPO_ROOT / root
     return root / campaign["campaign"] / run["run_id"]
 
 
+def selected_attempt_id(run: dict[str, Any]) -> str | None:
+    """Return the private controller selector injected for attempt reads."""
+    value = run.get(_ATTEMPT_SELECTOR)
+    if value is None:
+        return None
+    attempt_id = str(value)
+    if not IDENTITY_RE.fullmatch(attempt_id):
+        raise ValueError(f"invalid internal attempt selector: {attempt_id!r}")
+    return attempt_id
+
+
+def select_attempt(run: dict[str, Any], attempt_id: str) -> dict[str, Any]:
+    """Return a shallow materialized-run view targeting one durable attempt."""
+    selected = dict(run)
+    selected[_ATTEMPT_SELECTOR] = attempt_id
+    return selected
+
+
+def local_run_dir(campaign: dict[str, Any], run: dict[str, Any]) -> Path:
+    """Return the backend-local directory for the selected attempt or run root."""
+    root = run_root_dir(campaign, run)
+    attempt_id = selected_attempt_id(run)
+    return root / "attempts" / attempt_id if attempt_id else root
+
+
 def frozen_source_identity(
     campaign: dict[str, Any], run: dict[str, Any], fallback: str
 ) -> str:
     """Return a prepared run's frozen source identity, or a supplied fallback."""
-    manifest_path = local_run_dir(campaign, run) / "manifest.yaml"
+    manifest_path = run_root_dir(campaign, run) / "manifest.yaml"
     if manifest_path.is_file():
         payload = yaml.safe_load(manifest_path.read_text(encoding="utf-8")) or {}
         if payload.get("source_id"):
@@ -252,6 +312,17 @@ def command_environment(
     )
     env.update(PROJECTS.get(str(campaign["project"])).environment(campaign, run))
     env.update(backend.environment(campaign, run, source_id, attempt_id))
+    if campaign.get("research_contract") is not None:
+        encoded = base64.urlsafe_b64encode(
+            json.dumps(
+                campaign["research_contract"],
+                ensure_ascii=True,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).decode("ascii")
+        env["RESEARCH_CONTRACT_B64"] = encoded
+        env["RESEARCH_ROLE"] = str(run["research_role"])
     return env
 
 
@@ -283,7 +354,7 @@ def prepare_run(
     campaign: dict[str, Any], run: dict[str, Any], source_id: str, *, attempt_id: str
 ) -> dict[str, Any]:
     """Freeze local control metadata before any scheduler mutation occurs."""
-    local_dir = local_run_dir(campaign, run)
+    local_dir = run_root_dir(campaign, run)
     store = ExperimentStateStore(local_dir)
     remote_run_dir = str(run["storage"]["run_dir"])
     project = PROJECTS.get(str(campaign["project"]))
@@ -300,6 +371,8 @@ def prepare_run(
         campaign=str(campaign["campaign"]), image_id=str(run["image_id"]),
         run_dir=remote_run_dir,
         max_infra_retries=int(retry.get("max_infra_retries", 0)),
+        research_contract=campaign.get("research_contract"),
+        research_role=run.get("research_role"),
     )
     base_manifest = store.ensure_manifest(manifest)
     effective = dict(base_manifest)
@@ -311,6 +384,7 @@ def prepare_run(
     effective["retry"] = retry
     effective["command"] = sanitize_command(command)
     effective["execution"] = {"source_mount": bundle.container_path, "workdir": bundle.container_path}
+    effective["resume_from"] = resolved.get("resume")
     attempt_path = store.attempt_path(attempt_id)
     if attempt_path.exists():
         previous_attempt = store.load_attempt(attempt_id)
@@ -328,7 +402,7 @@ def record_submission(
     campaign: dict[str, Any], run: dict[str, Any], attempt_id: str, backend_job_id: str
 ) -> None:
     """Atomically record scheduler acceptance in controller-owned metadata."""
-    local_dir = local_run_dir(campaign, run)
+    local_dir = run_root_dir(campaign, run)
     store = ExperimentStateStore(local_dir)
     store.reconcile_submission(
         project=str(campaign["project"]), run_id=str(run["run_id"]),
@@ -340,7 +414,7 @@ def record_submission_intent(
     campaign: dict[str, Any], run: dict[str, Any], attempt_id: str
 ) -> dict[str, Any]:
     """Durably record scheduler mutation intent before crossing the API boundary."""
-    local_dir = local_run_dir(campaign, run)
+    local_dir = run_root_dir(campaign, run)
     token = f"{campaign['campaign']}/{run['run_id']}/{attempt_id}"
     backend = BACKENDS.get(str(run["backend"]["kind"]))
     request = {"submission_token": token}
@@ -356,18 +430,28 @@ def reconcile_submission(
     campaign: dict[str, Any], run: dict[str, Any], attempt_id: str
 ) -> str | None:
     """Recover a scheduler identity after acceptance/local-record crash."""
-    local_dir = local_run_dir(campaign, run)
+    local_dir = run_root_dir(campaign, run)
     recorded = recorded_scheduler_job_ids(local_dir, attempt_id)
     if len(recorded) > 1:
         raise RuntimeError(
             f"ambiguous scheduler identity: attempt {attempt_id} records jobs {recorded}"
         )
-    root_record = local_dir / "backend.json"
-    if root_record.is_file():
-        payload = json.loads(root_record.read_text(encoding="utf-8"))
-        if payload.get("backend_job_id") and payload.get("attempt_id") == attempt_id:
-            return str(payload["backend_job_id"])
-    submission = ExperimentStateStore(local_dir).read_submission(attempt_id)
+    store = ExperimentStateStore(local_dir)
+    payload = store.load_backend(attempt_id) or {}
+    if payload.get("backend_job_id"):
+        return str(payload["backend_job_id"])
+    submission = store.read_submission(attempt_id)
+    if len(recorded) == 1 and submission:
+        store.reconcile_submission(
+            project=str(campaign["project"]), run_id=str(run["run_id"]),
+            attempt_id=attempt_id, backend_job_id=recorded[0], state=RunState.QUEUED,
+        )
+        return recorded[0]
+    if len(recorded) == 1:
+        raise RuntimeError(
+            f"attempt {attempt_id} records scheduler job {recorded[0]} without a "
+            "durable submission intent"
+        )
     if not submission or submission.get("state") != "SUBMITTING":
         return None
     intent = {**submission, **submission.get("request", {})}
@@ -401,6 +485,7 @@ def recorded_scheduler_job_ids(local_dir: Path, attempt_id: str) -> list[str]:
                 found.add(str(event["backend_job_id"]))
     for path in (
         local_dir / "backend.json",
+        local_dir / "attempts" / attempt_id / "backend.json",
         local_dir / "attempts" / attempt_id / "submission.json",
     ):
         if path.is_file():
@@ -414,7 +499,7 @@ def identity_report(
     campaign: dict[str, Any], run: dict[str, Any], attempt_id: str
 ) -> dict[str, Any]:
     """Combine local durable history with the backend's read-only identity probe."""
-    local_dir = local_run_dir(campaign, run)
+    local_dir = run_root_dir(campaign, run)
     local_jobs = recorded_scheduler_job_ids(local_dir, attempt_id)
     remote = BACKENDS.get(str(run["backend"]["kind"])).identity(
         campaign, run, attempt_id
@@ -424,15 +509,25 @@ def identity_report(
         key=lambda value: (len(value), value),
     )
     ambiguous = bool(remote.get("ambiguous")) or len(all_jobs) > 1
-    available = bool(remote.get("available")) and not local_jobs and not ambiguous
+    local_manifest_exists = (local_dir / "manifest.yaml").is_file()
+    owned_remote_manifest = bool(
+        local_manifest_exists and remote.get("remote_manifest_matches") is True
+    )
+    available = (
+        (bool(remote.get("available")) or owned_remote_manifest)
+        and not local_jobs
+        and not ambiguous
+    )
     return {
         "run_id": run["run_id"],
         "attempt_id": attempt_id,
         "available": available,
         "ambiguous": ambiguous,
         "scheduler_job_ids": all_jobs,
-        "local_manifest_exists": (local_dir / "manifest.yaml").is_file(),
+        "local_manifest_exists": local_manifest_exists,
         "remote_manifest_exists": remote.get("remote_manifest_exists"),
+        "remote_manifest_matches": remote.get("remote_manifest_matches"),
+        "remote_manifest_owned": owned_remote_manifest,
     }
 
 
@@ -452,7 +547,7 @@ def ensure_attempt_not_submitted(
     campaign: dict[str, Any], run: dict[str, Any], attempt_id: str
 ) -> None:
     """Reject a second scheduler mutation for an already submitted attempt."""
-    submission = ExperimentStateStore(local_run_dir(campaign, run)).read_submission(attempt_id)
+    submission = ExperimentStateStore(run_root_dir(campaign, run)).read_submission(attempt_id)
     if submission and submission.get("backend_job_id"):
         raise FileExistsError(
             f"attempt {attempt_id} already has backend job {submission.get('backend_job_id')}; "
@@ -492,10 +587,12 @@ def parse_project_checkpoint(campaign: dict[str, Any], line: str) -> dict[str, A
 
 def backend_record(campaign: dict[str, Any], run: dict[str, Any]) -> dict[str, Any]:
     """Load the recorded scheduler identity for a submitted run."""
-    path = local_run_dir(campaign, run) / "backend.json"
-    if not path.is_file():
+    attempt_id = selected_attempt_id(run)
+    store = ExperimentStateStore(run_root_dir(campaign, run))
+    payload = store.load_backend(attempt_id)
+    path = store.attempt_backend_path(attempt_id) if attempt_id else store.backend_path
+    if payload is None:
         raise FileNotFoundError(f"run has not been submitted: {run['run_id']}")
-    payload = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(payload, dict) or not payload.get("backend_job_id"):
         raise ValueError(f"invalid backend record: {path}")
     return payload
@@ -503,16 +600,20 @@ def backend_record(campaign: dict[str, Any], run: dict[str, Any]) -> dict[str, A
 
 def update_observed_status(campaign: dict[str, Any], run: dict[str, Any], status: dict[str, Any]) -> None:
     """Persist one normalized scheduler observation without claiming model progress."""
-    local_dir = local_run_dir(campaign, run)
+    local_dir = run_root_dir(campaign, run)
+    record = backend_record(campaign, run)
+    attempt_id = str(record["attempt_id"])
     payload = dict(status)
     payload["updated_at"] = utc_now()
-    atomic_write(local_dir / "status.json", payload)
+    payload.setdefault("project", campaign["project"])
+    payload.setdefault("run_id", run["run_id"])
+    ExperimentStateStore(local_dir).write_status_payload(attempt_id, payload)
     append_event(
         local_dir / "events.jsonl",
         {
             "timestamp": payload["updated_at"],
             "run_id": run["run_id"],
-            "attempt_id": backend_record(campaign, run).get("attempt_id"),
+            "attempt_id": attempt_id,
             "backend": status["backend"],
             "backend_job_id": status["backend_job_id"],
             "event": "scheduler_observed",
@@ -523,7 +624,51 @@ def update_observed_status(campaign: dict[str, Any], run: dict[str, Any], status
 
 def write_local_collection(campaign: dict[str, Any], run: dict[str, Any], summary: dict[str, Any]) -> None:
     """Persist the latest collected scientific/process observation locally."""
-    atomic_write(local_run_dir(campaign, run) / "collection.json", summary)
+    root = run_root_dir(campaign, run)
+    attempt_id = selected_attempt_id(run) or str(backend_record(campaign, run)["attempt_id"])
+    attempt_path = root / "attempts" / attempt_id / "collection.json"
+    atomic_write(attempt_path, summary)
+    current = ExperimentStateStore(root).load_backend()
+    if current and current.get("attempt_id") == attempt_id:
+        atomic_write(root / "collection.json", summary)
+
+
+def campaign_research_block(
+    campaign: dict[str, Any], *, current_run_id: str,
+    current_decision: dict[str, Any], attempt_id: str,
+) -> dict[str, Any]:
+    """Combine current-attempt role decisions without mixing stale attempts."""
+    contract = campaign["research_contract"]
+    records: dict[str, dict[str, Any]] = {}
+    for candidate in campaign["runs"]:
+        role = candidate.get("research_role")
+        if not role:
+            continue
+        root = run_root_dir(campaign, candidate)
+        manifest_path = root / "manifest.yaml"
+        if not manifest_path.is_file():
+            continue
+        manifest = yaml.safe_load(manifest_path.read_text(encoding="utf-8")) or {}
+        if not isinstance(manifest, dict):
+            continue
+        if candidate["run_id"] == current_run_id:
+            decision = current_decision
+            selected_attempt = attempt_id
+        else:
+            decision_path = root / "decision.json"
+            if not decision_path.is_file():
+                continue
+            decision = json.loads(decision_path.read_text(encoding="utf-8"))
+            selected_attempt = str(decision.get("attempt_id", ""))
+        current_backend = ExperimentStateStore(root).load_backend() or {}
+        if current_backend.get("attempt_id") != selected_attempt:
+            continue
+        records[str(role)] = {
+            "research_outcome": decision.get("research_outcome"),
+            "manifest": manifest,
+            "run": candidate,
+        }
+    return evaluate_research_block(contract=contract, role_records=records)
 
 
 def annotate_collection(
@@ -537,9 +682,15 @@ def annotate_collection(
     process_observed = bool(
         isinstance(process_evidence, dict) and process_evidence.get("observed")
     )
-    annotated["worker_state"] = summary.get(
-        "worker_state", "ALLOCATED" if process_observed else "UNKNOWN"
+    scheduler_terminal = scheduler_status.get("state") in {
+        "SUCCEEDED", "FAILED", "PREEMPTED", "CANCELLED"
+    }
+    inferred_worker = (
+        "RELEASED" if scheduler_terminal
+        else "ALLOCATED" if process_observed
+        else "UNKNOWN"
     )
+    annotated["worker_state"] = summary.get("worker_state", inferred_worker)
     annotated["process_state"] = summary.get("state") or "UNKNOWN"
     if scheduler_status.get("state") == "FAILED" and process_observed:
         annotated["process_state"] = "FAILED"
@@ -565,13 +716,14 @@ BACKENDS = build_registry(backend_services())
 
 def unsubmitted_status(campaign: dict[str, Any], run: dict[str, Any]) -> dict[str, Any]:
     """Return controller state for a prepared run without raising on no job ID."""
-    path = local_run_dir(campaign, run) / "status.json"
-    if path.is_file():
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    else:
-        payload = {"run_id": run["run_id"], "state": "NOT_SUBMITTED"}
+    store = ExperimentStateStore(run_root_dir(campaign, run))
+    attempt_id = selected_attempt_id(run)
+    payload = store.load_status_payload(attempt_id)
+    if payload is None:
+        payload = store.read_status(attempt_id).to_dict()
+    backend = store.load_backend(attempt_id) or {}
     payload.setdefault("backend", run["backend"]["kind"])
-    payload.setdefault("backend_job_id", None)
+    payload.setdefault("backend_job_id", backend.get("backend_job_id"))
     return payload
 
 
@@ -608,7 +760,10 @@ def main(argv: list[str] | None = None) -> int:
         identity = str(run.get("source_id", default_identity))
         if args.command in {"status", "collect", "cancel", "observe", "logs", "decide"}:
             identity = frozen_source_identity(campaign, run, identity)
-        runs_with_identity.append((materialize_run(campaign, run, identity), identity))
+        materialized = materialize_run(campaign, run, identity)
+        if args.command in {"status", "collect", "cancel", "observe", "logs", "decide"}:
+            materialized = select_attempt(materialized, args.attempt_id)
+        runs_with_identity.append((materialized, identity))
     outputs: list[dict[str, Any]] = []
     for run, identity in runs_with_identity:
         backend_kind = run["backend"]["kind"]
@@ -651,10 +806,10 @@ def main(argv: list[str] | None = None) -> int:
             outputs.append({"run_id": run["run_id"], "backend_job_id": job_id})
         elif args.command == "status":
             reconcile_submission(campaign, run, args.attempt_id)
-            backend_path = local_run_dir(campaign, run) / "backend.json"
-            submitted = False
-            if backend_path.is_file():
-                submitted = bool(json.loads(backend_path.read_text(encoding="utf-8")).get("backend_job_id"))
+            selected_record = ExperimentStateStore(
+                run_root_dir(campaign, run)
+            ).load_backend(args.attempt_id) or {}
+            submitted = bool(selected_record.get("backend_job_id"))
             if not submitted:
                 status = unsubmitted_status(campaign, run)
             else:
@@ -677,8 +832,9 @@ def main(argv: list[str] | None = None) -> int:
             outputs.append(status)
         elif args.command == "observe":
             reconcile_submission(campaign, run, args.attempt_id)
-            backend_path = local_run_dir(campaign, run) / "backend.json"
-            backend_payload = json.loads(backend_path.read_text(encoding="utf-8")) if backend_path.is_file() else {}
+            backend_payload = ExperimentStateStore(
+                run_root_dir(campaign, run)
+            ).load_backend(args.attempt_id) or {}
             if backend_payload.get("backend_job_id"):
                 status = backend_adapter.status(campaign, run)
                 update_observed_status(campaign, run, status)
@@ -702,9 +858,9 @@ def main(argv: list[str] | None = None) -> int:
                 "model": collection,
             })
         elif args.command == "decide":
-            local_dir = local_run_dir(campaign, run)
+            local_dir = run_root_dir(campaign, run)
             status = unsubmitted_status(campaign, run)
-            collection_path = local_dir / "collection.json"
+            collection_path = local_dir / "attempts" / args.attempt_id / "collection.json"
             collection = json.loads(collection_path.read_text(encoding="utf-8")) if collection_path.is_file() else {}
             attempts = [path for path in (local_dir / "attempts").glob("attempt-*") if path.is_dir()]
             retry = run.get("retry", {"max_infra_retries": 0})
@@ -716,7 +872,32 @@ def main(argv: list[str] | None = None) -> int:
                 completed_checkpoint=collection.get("latest_completed_checkpoint"),
             )
             payload = decision.to_dict()
-            atomic_write(local_dir / "decision.json", payload)
+            payload["attempt_id"] = args.attempt_id
+            contract = campaign.get("research_contract")
+            if contract is not None:
+                role = str(run["research_role"])
+                research = evaluate_research_run(
+                    status=status, collection=collection,
+                    contract=contract, role=role,
+                )
+                payload.update(research)
+                block = campaign_research_block(
+                    campaign, current_run_id=str(run["run_id"]),
+                    current_decision=payload, attempt_id=args.attempt_id,
+                )
+                payload.update(block)
+                if decision.action == "OBSERVE" and research["research_action"] == "STOP_RECOMMENDED":
+                    payload["action"] = "STOP_RECOMMENDED"
+                elif decision.action == "VERIFY_RESULTS":
+                    if research["research_outcome"] == "PASS":
+                        payload["action"] = block["block_action"]
+                    else:
+                        payload["action"] = research["research_action"]
+            decision_path = local_dir / "attempts" / args.attempt_id / "decision.json"
+            atomic_write(decision_path, payload)
+            current = ExperimentStateStore(local_dir).load_backend()
+            if current and current.get("attempt_id") == args.attempt_id:
+                atomic_write(local_dir / "decision.json", payload)
             outputs.append({"run_id": run["run_id"], **payload})
         elif args.command in {"assets-plan", "assets-verify"}:
             project = PROJECTS.get(str(campaign["project"]))

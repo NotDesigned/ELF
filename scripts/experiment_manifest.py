@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import fcntl
 import json
 import os
@@ -268,6 +269,107 @@ class ExperimentStateStore:
     def submission_path(self, attempt_id: str) -> Path:
         return self.attempt_dir(attempt_id) / "submission.json"
 
+    def attempt_status_path(self, attempt_id: str) -> Path:
+        """Return the canonical mutable status path for one attempt."""
+        return self.attempt_dir(attempt_id) / "status.json"
+
+    def attempt_backend_path(self, attempt_id: str) -> Path:
+        """Return the canonical scheduler identity path for one attempt."""
+        return self.attempt_dir(attempt_id) / "backend.json"
+
+    @staticmethod
+    def _load_json(path: Path) -> dict[str, Any]:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict):
+            raise ValueError(f"state record is not an object: {path}")
+        return payload
+
+    def _current_attempt_id(self) -> str | None:
+        """Return the attempt represented by root mirrors, failing on drift."""
+        attempt_ids = {
+            str(payload["attempt_id"])
+            for path in (self.backend_path, self.status_path)
+            if path.is_file()
+            for payload in (self._load_json(path),)
+            if payload.get("attempt_id")
+        }
+        if len(attempt_ids) > 1:
+            raise ValueError(
+                "root backend/status mirrors disagree about the current attempt"
+            )
+        return next(iter(attempt_ids), None)
+
+    def _snapshot_root_mirrors(self) -> None:
+        """Preserve legacy/current root state before selecting a new attempt."""
+        current = self._current_attempt_id()
+        if not current:
+            return
+        for root_path, canonical_path in (
+            (self.backend_path, self.attempt_backend_path(current)),
+            (self.status_path, self.attempt_status_path(current)),
+        ):
+            if not root_path.is_file():
+                continue
+            root_payload = self._load_json(root_path)
+            if canonical_path.is_file():
+                if self._load_json(canonical_path) != root_payload:
+                    raise ValueError(
+                        f"root mirror conflicts with canonical attempt state: {root_path}"
+                    )
+            else:
+                atomic_create(canonical_path, root_payload)
+
+    def _mirror_if_current(self, attempt_id: str, path: Path, payload: Mapping[str, Any]) -> None:
+        current = self._current_attempt_id()
+        if current in {None, attempt_id}:
+            atomic_write(path, dict(payload))
+
+    def load_backend(self, attempt_id: str | None = None) -> dict[str, Any] | None:
+        """Load one attempt scheduler record, or the current root mirror."""
+        if attempt_id is None:
+            return self._load_json(self.backend_path) if self.backend_path.is_file() else None
+        path = self.attempt_backend_path(attempt_id)
+        if path.is_file():
+            payload = self._load_json(path)
+            if payload.get("attempt_id") != attempt_id:
+                raise ValueError(f"backend record conflicts with selected attempt: {path}")
+            return payload
+        if self.backend_path.is_file():
+            payload = self._load_json(self.backend_path)
+            if payload.get("attempt_id") == attempt_id:
+                return payload
+        return None
+
+    def load_status_payload(self, attempt_id: str | None = None) -> dict[str, Any] | None:
+        """Load one attempt status record, or the current root mirror."""
+        if attempt_id is None:
+            return self._load_json(self.status_path) if self.status_path.is_file() else None
+        path = self.attempt_status_path(attempt_id)
+        if path.is_file():
+            payload = self._load_json(path)
+            if payload.get("attempt_id") != attempt_id:
+                raise ValueError(f"status record conflicts with selected attempt: {path}")
+            return payload
+        if self.status_path.is_file():
+            payload = self._load_json(self.status_path)
+            if payload.get("attempt_id") == attempt_id:
+                return payload
+        return None
+
+    def write_status_payload(
+        self, attempt_id: str, payload: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        """Write canonical attempt status and refresh its root mirror if current."""
+        self.load_attempt(attempt_id)
+        normalized = dict(payload)
+        recorded_attempt = normalized.get("attempt_id")
+        if recorded_attempt not in {None, attempt_id}:
+            raise ValueError("status payload conflicts with selected attempt")
+        normalized["attempt_id"] = attempt_id
+        atomic_write(self.attempt_status_path(attempt_id), normalized)
+        self._mirror_if_current(attempt_id, self.status_path, normalized)
+        return normalized
+
     def load_manifest(self) -> dict[str, Any]:
         if not self.manifest_path.is_file():
             raise FileNotFoundError(f"run manifest does not exist: {self.manifest_path}")
@@ -311,6 +413,7 @@ class ExperimentStateStore:
 
     def initialize_attempt_records(self, attempt_id: str) -> LifecycleStatus:
         """Idempotently initialize derived status, backend, and event records."""
+        self._snapshot_root_mirrors()
         attempt = self.load_attempt(attempt_id)
         timestamp = attempt["created_at"]
         attempt_backend = attempt["backend"]
@@ -319,35 +422,33 @@ class ExperimentStateStore:
             if isinstance(attempt_backend, Mapping)
             else attempt_backend
         )
-        backend = (
-            json.loads(self.backend_path.read_text(encoding="utf-8"))
-            if self.backend_path.is_file()
-            else {}
-        )
-        if backend.get("attempt_id") != attempt_id:
-            atomic_write(
-                self.backend_path,
-                {
-                    "backend": backend_kind,
-                    "backend_job_id": attempt.get("backend_job_id"),
-                    "attempt_id": attempt_id,
-                },
-            )
-        existing_status = self.read_status(attempt_id)
-        if (
-            not self.status_path.is_file()
-            or existing_status.attempt_id != attempt_id
-            or existing_status.state == RunState.NOT_SUBMITTED
-        ):
+        backend = self.load_backend(attempt_id)
+        if backend is None:
+            backend = {
+                "backend": backend_kind,
+                "backend_job_id": attempt.get("backend_job_id"),
+                "attempt_id": attempt_id,
+            }
+            atomic_write(self.attempt_backend_path(attempt_id), backend)
+        status_payload = self.load_status_payload(attempt_id)
+        if status_payload is None:
             status = self._write_status(
                 project=attempt["project"],
                 run_id=attempt["run_id"],
                 attempt_id=attempt_id,
                 state=RunState.CREATED,
                 timestamp=timestamp,
+                mirror=False,
             )
         else:
-            status = existing_status
+            status = self.read_status(attempt_id)
+        # Preparing an attempt explicitly makes it current.  The root records
+        # are read-model mirrors only; canonical history remains below attempts/.
+        atomic_write(self.backend_path, backend)
+        atomic_write(
+            self.status_path,
+            self._load_json(self.attempt_status_path(attempt_id)),
+        )
         append_event_once(
             self.events_path,
             {
@@ -370,17 +471,16 @@ class ExperimentStateStore:
 
     def read_status(self, attempt_id: str | None = None) -> LifecycleStatus:
         """Read normalized state without raising for an unsubmitted run."""
-        if self.status_path.is_file():
-            payload = json.loads(self.status_path.read_text(encoding="utf-8"))
-            if attempt_id is None or payload.get("attempt_id") == attempt_id:
-                return LifecycleStatus(
-                    project=payload.get("project"),
-                    run_id=payload.get("run_id"),
-                    attempt_id=payload.get("attempt_id"),
-                    state=RunState(payload.get("state", RunState.UNKNOWN.value)),
-                    updated_at=payload.get("updated_at"),
-                    exit_code=payload.get("exit_code"),
-                )
+        payload = self.load_status_payload(attempt_id)
+        if payload is not None:
+            return LifecycleStatus(
+                project=payload.get("project"),
+                run_id=payload.get("run_id"),
+                attempt_id=payload.get("attempt_id"),
+                state=RunState(payload.get("state", RunState.UNKNOWN.value)),
+                updated_at=payload.get("updated_at"),
+                exit_code=payload.get("exit_code"),
+            )
         if attempt_id and self.attempt_path(attempt_id).is_file():
             attempt = self.load_attempt(attempt_id)
             return LifecycleStatus(
@@ -425,6 +525,7 @@ class ExperimentStateStore:
         state: RunState,
         exit_code: int | None = None,
         timestamp: str | None = None,
+        mirror: bool = True,
     ) -> LifecycleStatus:
         status = LifecycleStatus(
             project=project,
@@ -434,7 +535,10 @@ class ExperimentStateStore:
             updated_at=timestamp or utc_now(),
             exit_code=exit_code,
         )
-        atomic_write(self.status_path, status.to_dict())
+        payload = status.to_dict()
+        atomic_write(self.attempt_status_path(attempt_id), payload)
+        if mirror:
+            self._mirror_if_current(attempt_id, self.status_path, payload)
         return status
 
     def begin_submission(
@@ -488,10 +592,11 @@ class ExperimentStateStore:
         # reconciled submission back to SUBMITTING.
         if intent.get("state") == "SUBMITTING":
             timestamp = intent["created_at"]
-            atomic_write(
-                self.backend_path,
-                {"backend": backend, "backend_job_id": None, "attempt_id": attempt_id},
-            )
+            backend_payload = {
+                "backend": backend, "backend_job_id": None, "attempt_id": attempt_id
+            }
+            atomic_write(self.attempt_backend_path(attempt_id), backend_payload)
+            self._mirror_if_current(attempt_id, self.backend_path, backend_payload)
             self._write_status(
                 project=project,
                 run_id=run_id,
@@ -544,14 +649,13 @@ class ExperimentStateStore:
             "reconciled_at": timestamp,
         }
         atomic_write(self.submission_path(attempt_id), reconciled)
-        atomic_write(
-            self.backend_path,
-            {
-                "backend": intent["backend"],
-                "backend_job_id": backend_job_id,
-                "attempt_id": attempt_id,
-            },
-        )
+        backend_payload = {
+            "backend": intent["backend"],
+            "backend_job_id": backend_job_id,
+            "attempt_id": attempt_id,
+        }
+        atomic_write(self.attempt_backend_path(attempt_id), backend_payload)
+        self._mirror_if_current(attempt_id, self.backend_path, backend_payload)
         self._write_status(
             project=project,
             run_id=run_id,
@@ -598,11 +702,7 @@ class ExperimentStateStore:
             exit_code=exit_code,
             timestamp=timestamp,
         )
-        backend = (
-            json.loads(self.backend_path.read_text(encoding="utf-8"))
-            if self.backend_path.is_file()
-            else {}
-        )
+        backend = self.load_backend(attempt_id) or {}
         record = {
             "timestamp": timestamp,
             "project": project,
@@ -646,6 +746,30 @@ def prepare(args: argparse.Namespace) -> dict[str, Any]:
             f"attempt already exists: {attempt_path}; choose a new ATTEMPT_ID"
         )
 
+    research_contract: dict[str, Any] | None = None
+    research_role: str | None = None
+    encoded_contract = getattr(args, "research_contract_b64", "")
+    requested_role = getattr(args, "research_role", "")
+    if encoded_contract or requested_role:
+        if not encoded_contract or not requested_role:
+            raise ValueError("research contract and role must be supplied together")
+        _validate_identity("research_role", requested_role)
+        try:
+            decoded = base64.urlsafe_b64decode(
+                encoded_contract.encode("ascii")
+            ).decode("utf-8")
+            research_contract = json.loads(decoded)
+        except (UnicodeError, ValueError, json.JSONDecodeError) as error:
+            raise ValueError("research contract payload is not valid base64 JSON") from error
+        if not isinstance(research_contract, dict) or research_contract.get("schema_version") != 1:
+            raise ValueError("research contract payload must be a schema-version-1 mapping")
+        research_role = requested_role
+    elif manifest_path.is_file():
+        existing = store.load_manifest()
+        if existing.get("research_contract") is not None:
+            research_contract = existing["research_contract"]
+            research_role = existing.get("research_role")
+
     from experiment_projects import build_project_registry
 
     project = build_project_registry().get(args.project)
@@ -664,6 +788,7 @@ def prepare(args: argparse.Namespace) -> dict[str, Any]:
         git_commit=args.git_commit or None, campaign_id=args.campaign_id or None,
         campaign=args.campaign or None, image_id=args.image_id,
         run_dir=str(run_dir), max_infra_retries=args.max_infra_retries,
+        research_contract=research_contract, research_role=research_role,
     )
 
     manifest = store.ensure_manifest(manifest)
@@ -686,6 +811,7 @@ def prepare(args: argparse.Namespace) -> dict[str, Any]:
             "resource_spec": args.resource_spec or None,
         },
         "resume_from": config.get("resume"),
+        "research_role": research_role,
     }
     store.create_attempt(attempt)
     store.initialize_attempt_records(args.attempt_id)
@@ -751,6 +877,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--quota", default="")
     parser.add_argument("--resource-spec", default="")
     parser.add_argument("--max-infra-retries", type=int, default=2)
+    parser.add_argument("--research-contract-b64", default="")
+    parser.add_argument("--research-role", default="")
     parser.add_argument("--require-immutable-identities", action="store_true")
     parser.add_argument("command", nargs=argparse.REMAINDER)
     return parser.parse_args(argv)

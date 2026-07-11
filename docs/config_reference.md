@@ -249,6 +249,9 @@ Execution controls:
 
 - `NGPU`, `NNODES`, `NODE_RANK`, `MASTER_ADDR`, and `MASTER_PORT` control
   distributed execution.
+- `RESEARCH_CONTRACT_B64` and `RESEARCH_ROLE` are controller-generated values
+  that carry the reviewed campaign contract into the runtime manifest. Do not
+  author or override them as ad-hoc launcher settings.
 - `DRY_RUN` set to `1` prints the resolved command without filesystem mutation.
 - `HYDRATE_ONLY` set to `1` hydrates baked assets and exits.
 - `PREPARE_ONLY` set to `1` writes/validates manifest records and exits before training.

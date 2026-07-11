@@ -14,7 +14,16 @@ SCRIPT = REPO_ROOT / "scripts" / "experiment_manifest.py"
 CONFIG = REPO_ROOT / "src/configs/training_configs/ablations/owt_elfb/tier0_0_pure_elf_len256.yml"
 
 
-def prepare(run_dir: Path) -> ExperimentStateStore:
+def prepare(
+    run_dir: Path,
+    *,
+    attempt_id: str = "attempt-001",
+    resume_from: str | None = None,
+) -> ExperimentStateStore:
+    overrides = [f"output_dir={run_dir}"]
+    if resume_from:
+        overrides.append(f"resume={resume_from}")
+    override_args = [item for override in overrides for item in ("--config-override", override)]
     subprocess.run(
         [
             sys.executable,
@@ -24,13 +33,12 @@ def prepare(run_dir: Path) -> ExperimentStateStore:
             "--run-id",
             "store-test-s0",
             "--attempt-id",
-            "attempt-001",
+            attempt_id,
             "--backend",
             "slurm",
             "--config",
             str(CONFIG),
-            "--config-override",
-            f"output_dir={run_dir}",
+            *override_args,
             "--output-dir",
             str(run_dir),
             "--source-id",
@@ -175,3 +183,59 @@ def test_transition_supports_event_idempotency(tmp_path):
     store.transition(**kwargs)
     assert store.read_status().state == RunState.RUNNING
     assert [event["event"] for event in events(store)].count("worker_observed") == 1
+
+
+def test_attempt_records_are_canonical_and_root_is_only_current_mirror(tmp_path):
+    run_dir = tmp_path / "run"
+    store = prepare(run_dir)
+    store.begin_submission(
+        project="elf", run_id="store-test-s0", attempt_id="attempt-001",
+        backend="slurm", request={"argv": ["sbatch", "first.sbatch"]},
+    )
+    store.reconcile_submission(
+        project="elf", run_id="store-test-s0", attempt_id="attempt-001",
+        backend_job_id="12345",
+    )
+
+    checkpoint = str(run_dir / "checkpoint_10")
+    prepare(run_dir, attempt_id="attempt-002", resume_from=checkpoint)
+
+    first_backend = json.loads(store.attempt_backend_path("attempt-001").read_text())
+    first_status = json.loads(store.attempt_status_path("attempt-001").read_text())
+    current_backend = json.loads(store.backend_path.read_text())
+    current_status = json.loads(store.status_path.read_text())
+    second_attempt = store.load_attempt("attempt-002")
+
+    assert first_backend["backend_job_id"] == "12345"
+    assert first_status["state"] == "QUEUED"
+    assert current_backend == json.loads(
+        store.attempt_backend_path("attempt-002").read_text()
+    )
+    assert current_backend["attempt_id"] == "attempt-002"
+    assert current_backend["backend_job_id"] is None
+    assert current_status["attempt_id"] == "attempt-002"
+    assert current_status["state"] == "CREATED"
+    assert second_attempt["resume_from"] == checkpoint
+    assert "resume" not in store.load_manifest()["resolved_config"]
+
+    # A late observation for an older attempt updates its canonical record but
+    # cannot move the run-level current-attempt mirror backwards.
+    store.transition(
+        project="elf", run_id="store-test-s0", attempt_id="attempt-001",
+        state=RunState.FAILED, event="late_terminal_observation",
+    )
+    assert store.read_status("attempt-001").state == RunState.FAILED
+    assert store.read_status("attempt-002").state == RunState.CREATED
+    assert json.loads(store.status_path.read_text())["attempt_id"] == "attempt-002"
+
+
+def test_new_attempt_fails_closed_when_root_mirror_drifted(tmp_path):
+    run_dir = tmp_path / "run"
+    prepare(run_dir, attempt_id="attempt-001")
+    store = ExperimentStateStore(run_dir)
+    drifted = json.loads(store.status_path.read_text())
+    drifted["state"] = "RUNNING"
+    store.status_path.write_text(json.dumps(drifted), encoding="utf-8")
+    with pytest.raises(subprocess.CalledProcessError) as captured:
+        prepare(run_dir, attempt_id="attempt-002")
+    assert b"root mirror conflicts" in captured.value.stderr

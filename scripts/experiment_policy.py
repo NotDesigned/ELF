@@ -32,7 +32,7 @@ def decide_next_action(
     if state in {"QUEUED", "STARTING", "RUNNING", "EVALUATING", "SUBMITTING"}:
         return Decision("OBSERVE", FailureClass.UNKNOWN.value, "run is nonterminal", retries_used, max_infra_retries)
     if state == "SUCCEEDED":
-        return Decision("VERIFY_RESULTS", FailureClass.UNKNOWN.value, "scheduler succeeded; verify required metrics", retries_used, max_infra_retries)
+        return Decision("VERIFY_RESULTS", FailureClass.NONE.value, "scheduler succeeded; verify required metrics", retries_used, max_infra_retries)
     declared = str(status.get("failure_class") or "")
     try:
         failure = FailureClass(declared) if declared else classify_failure(diagnostic_text)

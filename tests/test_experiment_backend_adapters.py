@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -7,7 +8,12 @@ import pytest
 from experiment_control.runner import CommandResult, SubprocessRunner
 from experiment_control.backends.wyd import WydSlurmBackend
 from experiment_projects.elf import ElfProjectAdapter
-from experiment_control.backends.sensecore import SenseCoreBackend
+from experiment_control.backends.sensecore import (
+    SenseCoreBackend,
+    digest_pinned_image,
+    scheduler_job_name as sensecore_scheduler_job_name,
+)
+from experiment_control.project import AssetProbe, AssetRequirement
 from experimentctl import (
     backend_services,
     materialize_run,
@@ -62,6 +68,7 @@ def test_sensecore_preflight_fails_closed_on_malformed_sanitized_response():
     fake = QueueRunner([
         CommandResult(("sco-version",), 0, "v1.2.0\n"),
         CommandResult(("safe-list",), 1, "", "safe_sco: input was not valid JSON; raw response suppressed"),
+        CommandResult(("redact",), 0, "safe_sco: input was not valid JSON; raw response suppressed"),
     ])
     set_command_runner(fake)
     try:
@@ -82,7 +89,7 @@ def test_sensecore_identity_probe_reports_consumed_exact_name():
     fake = QueueRunner([
         CommandResult(
             ("safe-list",), 0,
-            '[{"name":"sensecore-identity","state":"RUNNING"}]\n',
+            '[{"name":"sensecore-identity--attempt-001","state":"RUNNING"}]\n',
         ),
     ])
     services = backend_services()
@@ -97,9 +104,92 @@ def test_sensecore_identity_probe_reports_consumed_exact_name():
     assert report == {
         "available": False,
         "ambiguous": False,
-        "scheduler_job_ids": ["sensecore-identity"],
+        "scheduler_job_ids": ["sensecore-identity--attempt-001"],
         "remote_manifest_exists": None,
+        "remote_manifest_matches": None,
     }
+
+
+def test_sensecore_attempt_identity_and_render_pin_the_recorded_digest():
+    digest = "sha256:" + "b" * 64
+    run = {
+        "run_id": "sensecore-render",
+        "image_id": digest,
+        "backend": {
+            "kind": "sensecore", "workspace": "workspace", "aec2": "cluster",
+            "job_name": "sensecore-render", "display_name": "render test",
+            "image": "registry.example/project/image:runtime-source-fixed",
+            "worker_spec": "gpu.4", "quota_type": "spot",
+            "storage_mount": "volume/subdir:/data",
+        },
+    }
+    manifest = {
+        **run, "attempt_id": "attempt-002",
+        "command": ["python", "train.py"],
+    }
+    fake = QueueRunner([])
+    services = backend_services()
+    backend = SenseCoreBackend(type(services)(
+        fake.run, services.local_run_dir, services.backend_record,
+        services.summarize_run, services.parse_metric, services.parse_checkpoint,
+        services.atomic_write, services.utc_now,
+    ))
+
+    request = backend.submission_request({}, run, "attempt-002")
+    assert request == {
+        "scheduler_name": "sensecore-render--attempt-002",
+        "image_tag": "registry.example/project/image:runtime-source-fixed",
+        "image_digest": digest,
+        "image_reference": f"registry.example/project/image@{digest}",
+    }
+    rendered = backend.render(manifest)
+    assert "--name sensecore-render--attempt-002" in rendered
+    assert f"--container-image-url registry.example/project/image@{digest}" in rendered
+    assert "image:runtime-source-fixed" not in rendered
+    assert backend.submit({}, run, manifest, dry_run=True) == "DRY_RUN"
+    assert fake.commands == []
+
+    conflicting = {**manifest, "image_id": "sha256:" + "e" * 64}
+    with pytest.raises(ValueError, match="image_id conflicts"):
+        backend.submit({}, run, conflicting, dry_run=True)
+
+
+def test_sensecore_attempt_resource_names_are_distinct_and_bounded():
+    first = sensecore_scheduler_job_name("run", "attempt-001")
+    second = sensecore_scheduler_job_name("run", "attempt-002")
+    assert first == "run--attempt-001"
+    assert first != second
+    assert len(sensecore_scheduler_job_name("r" * 80, "attempt-001")) <= 63
+    assert digest_pinned_image(
+        "registry.example:5000/ns/image:source-abc", "sha256:" + "c" * 64
+    ) == "registry.example:5000/ns/image@sha256:" + "c" * 64
+
+
+@pytest.mark.parametrize("method_name", ["find", "describe"])
+def test_sensecore_query_errors_are_redacted_before_exception(method_name: str):
+    secret = "credential-value-that-must-not-escape"
+    run = {
+        "run_id": "sensecore-secret",
+        "backend": {
+            "kind": "sensecore", "workspace": "workspace", "job_name": "job",
+        },
+    }
+    fake = QueueRunner([
+        CommandResult(("safe-query",), 1, stderr=f"access_key_secret={secret}\n"),
+        CommandResult(("redact",), 0, stdout="access_key_secret=<redacted>\n"),
+    ])
+    services = backend_services()
+    backend = SenseCoreBackend(type(services)(
+        fake.run, services.local_run_dir, services.backend_record,
+        services.summarize_run, services.parse_metric, services.parse_checkpoint,
+        services.atomic_write, services.utc_now,
+    ))
+
+    with pytest.raises(RuntimeError) as captured:
+        getattr(backend, method_name)(run, "job--attempt-001")
+    assert secret not in str(captured.value)
+    assert "<redacted>" in str(captured.value)
+    assert "2>&1" in fake.commands[0][-1]
 
 
 def test_slurm_preflight_checks_tools_live_resources_and_storage(tmp_path: Path):
@@ -320,8 +410,135 @@ def test_slurm_identity_probe_is_read_only_and_reports_availability(tmp_path: Pa
         "ambiguous": False,
         "scheduler_job_ids": [],
         "remote_manifest_exists": False,
+        "remote_manifest_matches": None,
     }
     assert len(fake.commands) == 3
+
+
+def test_slurm_remote_manifest_is_owned_only_when_digest_matches(
+    tmp_path: Path, monkeypatch
+):
+    campaign = slurm_campaign(tmp_path)
+    run = materialize_run(campaign, campaign["runs"][0], "source-fixed")
+    prepare_run(campaign, run, "source-fixed", attempt_id="attempt-001")
+    local_manifest = (
+        tmp_path / "local" / "controller-test" / "smoke-h100" / "manifest.yaml"
+    )
+    digest = hashlib.sha256(local_manifest.read_bytes()).hexdigest()
+    fake = QueueRunner([
+        CommandResult(("squeue",), 0, ""),
+        CommandResult(("sacct",), 0, ""),
+        CommandResult(("manifest",), 0, ""),
+        CommandResult(("sha256sum",), 0, f"{digest}\n"),
+    ])
+    services = backend_services()
+    backend = WydSlurmBackend(type(services)(
+        fake.run, services.local_run_dir, services.backend_record,
+        services.summarize_run, services.parse_metric, services.parse_checkpoint,
+        services.atomic_write, services.utc_now,
+    ))
+    report = backend.identity(campaign, run, "attempt-002").to_dict()
+    assert report["available"] is False
+    assert report["remote_manifest_exists"] is True
+    assert report["remote_manifest_matches"] is True
+
+
+def test_slurm_remote_manifest_digest_mismatch_is_not_owned(
+    tmp_path: Path, monkeypatch
+):
+    campaign = slurm_campaign(tmp_path)
+    run = materialize_run(campaign, campaign["runs"][0], "source-fixed")
+    prepare_run(campaign, run, "source-fixed", attempt_id="attempt-001")
+    fake = QueueRunner([
+        CommandResult(("squeue",), 0, ""),
+        CommandResult(("sacct",), 0, ""),
+        CommandResult(("manifest",), 0, ""),
+        CommandResult(("sha256sum",), 0, f"{'0' * 64}\n"),
+    ])
+    services = backend_services()
+    backend = WydSlurmBackend(type(services)(
+        fake.run, services.local_run_dir, services.backend_record,
+        services.summarize_run, services.parse_metric, services.parse_checkpoint,
+        services.atomic_write, services.utc_now,
+    ))
+    assert backend.identity(campaign, run, "attempt-002").remote_manifest_matches is False
+
+
+@pytest.mark.parametrize(
+    "results",
+    [
+        [CommandResult(("squeue",), 255, stderr="ssh unavailable")],
+        [
+            CommandResult(("squeue",), 0, ""),
+            CommandResult(("sacct",), 255, stderr="ssh unavailable"),
+        ],
+        [
+            CommandResult(("squeue",), 0, ""),
+            CommandResult(("sacct",), 0, ""),
+            CommandResult(("manifest",), 255, stderr="ssh unavailable"),
+        ],
+    ],
+)
+def test_slurm_identity_fails_closed_when_remote_evidence_is_unavailable(
+    tmp_path: Path, results,
+):
+    campaign = slurm_campaign(tmp_path)
+    run = materialize_run(campaign, campaign["runs"][0], "source-fixed")
+    fake = QueueRunner(results)
+    services = backend_services()
+    backend = WydSlurmBackend(type(services)(
+        fake.run, services.local_run_dir, services.backend_record,
+        services.summarize_run, services.parse_metric, services.parse_checkpoint,
+        services.atomic_write, services.utc_now,
+    ))
+    with pytest.raises(RuntimeError, match="evidence is unavailable"):
+        backend.identity(campaign, run, "attempt-001")
+
+
+def test_slurm_status_does_not_treat_transport_failure_as_missing_job(tmp_path: Path):
+    campaign = slurm_campaign(tmp_path)
+    run = materialize_run(campaign, campaign["runs"][0], "source-fixed")
+    fake = QueueRunner([
+        CommandResult(("sacct",), 255, stderr="connection timed out"),
+    ])
+    services = backend_services()
+    services = type(services)(
+        fake.run, services.local_run_dir,
+        lambda campaign, run: {
+            "attempt_id": "attempt-001", "backend_job_id": "1234",
+        },
+        services.summarize_run, services.parse_metric, services.parse_checkpoint,
+        services.atomic_write, services.utc_now,
+    )
+    with pytest.raises(RuntimeError, match="accounting status query"):
+        WydSlurmBackend(services).status(campaign, run)
+    assert len(fake.commands) == 1
+
+
+def test_slurm_asset_probe_distinguishes_missing_from_transport_failure(tmp_path: Path):
+    campaign = slurm_campaign(tmp_path)
+    run = materialize_run(campaign, campaign["runs"][0], "source-fixed")
+    requirement = AssetRequirement("dataset", "dataset-id", "training")
+    probe = AssetProbe(requirement, "/data/dataset", file=False)
+    services = backend_services()
+
+    missing_runner = QueueRunner([CommandResult(("test",), 1)])
+    missing_services = type(services)(
+        missing_runner.run, services.local_run_dir, services.backend_record,
+        services.summarize_run, services.parse_metric, services.parse_checkpoint,
+        services.atomic_write, services.utc_now,
+    )
+    report = WydSlurmBackend(missing_services).verify_assets(run, [probe])
+    assert report["missing"][0]["identity"] == "dataset-id"
+
+    failed_runner = QueueRunner([CommandResult(("test",), 255, stderr="ssh failed")])
+    failed_services = type(services)(
+        failed_runner.run, services.local_run_dir, services.backend_record,
+        services.summarize_run, services.parse_metric, services.parse_checkpoint,
+        services.atomic_write, services.utc_now,
+    )
+    with pytest.raises(RuntimeError, match="evidence is unavailable"):
+        WydSlurmBackend(failed_services).verify_assets(run, [probe])
 
 
 def test_slurm_submission_intent_recovers_terminal_job_by_attempt_name(tmp_path: Path, monkeypatch):
@@ -350,9 +567,10 @@ def test_sensecore_submit_contract_checks_exact_job_after_create(tmp_path: Path)
         "backend": {
             "kind": "sensecore", "workspace": "workspace", "aec2": "cluster",
             "job_name": "elf-sensecore-a0", "display_name": "ELF A0",
-            "image": "registry/elf@sha256:" + "a" * 64,
+            "image": "registry/elf:runtime-source-fixed",
             "worker_spec": "gpu.4", "quota_type": "spot", "storage_mount": "volume:/data",
         },
+        "image_id": "sha256:" + "a" * 64,
     }
     fake = QueueRunner(
         [
@@ -360,22 +578,30 @@ def test_sensecore_submit_contract_checks_exact_job_after_create(tmp_path: Path)
             CommandResult(("sco-create",), 0, ""),
             CommandResult(
                 ("safe-describe",), 0,
-                json.dumps({"name": "elf-sensecore-a0", "state": "WAITING", "normalized_state": "QUEUED"}),
+                json.dumps({
+                    "name": "elf-sensecore-a0--attempt-001",
+                    "state": "WAITING", "normalized_state": "QUEUED",
+                }),
             ),
         ]
     )
     set_command_runner(fake)
     try:
         job_id = SenseCoreBackend(backend_services()).submit(
-            campaign, run, {"command": ["bash", "scripts/cloud_train.sh", "config.yml"]},
+            campaign, run, {
+                **run, "attempt_id": "attempt-001",
+                "command": ["bash", "scripts/cloud_train.sh", "config.yml"],
+            },
             dry_run=False,
         )
     finally:
         set_command_runner(SubprocessRunner())
-    assert job_id == "elf-sensecore-a0"
+    assert job_id == "elf-sensecore-a0--attempt-001"
     create = fake.commands[1]
     assert "--quota-type" in create and "spot" in create
     assert "--wait" in create
+    image_index = create.index("--container-image-url") + 1
+    assert create[image_index] == "registry/elf@sha256:" + "a" * 64
 
 
 def test_slurm_stage_reuses_remote_source_and_sif_markers(tmp_path: Path, monkeypatch):
@@ -426,6 +652,44 @@ def test_slurm_stage_fails_when_required_source_path_is_missing(tmp_path: Path):
     bundle = ElfProjectAdapter().source_bundle(Path(__file__).resolve().parents[1])
     with pytest.raises(RuntimeError, match="missing required project path"):
         WydSlurmBackend(services).stage(campaign, run, "source-fixed", bundle)
+
+
+def test_slurm_stage_required_path_probe_fails_closed_on_transport(tmp_path: Path):
+    campaign = slurm_campaign(tmp_path)
+    run = materialize_run(campaign, campaign["runs"][0], "source-fixed")
+    fake = QueueRunner([
+        CommandResult(("mkdir",), 0),
+        CommandResult(("source-marker",), 0),
+        CommandResult(("sif-marker",), 0),
+        CommandResult(("required-path",), 255, stderr="ssh unavailable"),
+    ])
+    services = backend_services()
+    services = type(services)(
+        fake.run, services.local_run_dir, services.backend_record,
+        services.summarize_run, services.parse_metric, services.parse_checkpoint,
+        services.atomic_write, services.utc_now,
+    )
+    bundle = ElfProjectAdapter().source_bundle(Path(__file__).resolve().parents[1])
+    with pytest.raises(RuntimeError, match="evidence is unavailable"):
+        WydSlurmBackend(services).stage(campaign, run, "source-fixed", bundle)
+
+
+@pytest.mark.parametrize(
+    "resources,gres,error",
+    [
+        ({"gpus": 2}, "gpu:h100:1", "does not match"),
+        ({"gpus": 1, "nodes": 2}, "gpu:h100:1", "resources.nodes=1"),
+    ],
+)
+def test_slurm_validation_rejects_resource_request_drift(
+    tmp_path: Path, resources, gres: str, error: str,
+):
+    campaign = slurm_campaign(tmp_path)
+    authored = campaign["runs"][0]
+    authored["resources"] = resources
+    authored["backend"]["gres"] = gres
+    with pytest.raises(ValueError, match=error):
+        materialize_run(campaign, authored, "source-fixed")
 
 
 def test_slurm_logs_bound_carriage_return_progress(tmp_path: Path, monkeypatch):
@@ -564,13 +828,21 @@ def test_sensecore_logs_classify_expired_stream(tmp_path: Path):
     fake = QueueRunner(
         [CommandResult(("stream",), 1, stderr=raw), CommandResult(("redact",), 0, stdout="real-time job logs have expired (403); token=<redacted>\n")]
     )
-    set_command_runner(fake)
-    try:
-        logs = SenseCoreBackend(backend_services()).logs({}, run, tail=5)
-    finally:
-        set_command_runner(SubprocessRunner())
+    services = backend_services()
+    services = type(services)(
+        fake.run, services.local_run_dir,
+        lambda campaign, run: {
+            "attempt_id": "attempt-002",
+            "backend_job_id": "sensecore-expired--attempt-002",
+        },
+        services.summarize_run, services.parse_metric, services.parse_checkpoint,
+        services.atomic_write, services.utc_now,
+    )
+    logs = SenseCoreBackend(services).logs({}, run, tail=5)
     assert logs["expired"] is True
     assert "secret" not in "\n".join(logs["lines"])
+    assert logs["backend_job_id"] == "sensecore-expired--attempt-002"
+    assert "sensecore-expired--attempt-002" in fake.commands[0]
 
 
 def test_sensecore_cancel_preserves_terminal_preemption(tmp_path, monkeypatch):
@@ -589,6 +861,67 @@ def test_sensecore_cancel_preserves_terminal_preemption(tmp_path, monkeypatch):
     result = backend.cancel({}, {"run_id": "run", "backend": {}})
     assert result["state"] == "PREEMPTED"
     assert writes == []
+
+
+def test_sensecore_status_and_cancel_use_recorded_attempt_resource(tmp_path: Path):
+    resource_name = "sensecore-run--attempt-002"
+    run = {
+        "run_id": "sensecore-run",
+        "backend": {
+            "kind": "sensecore", "workspace": "workspace", "job_name": "sensecore-run",
+        },
+    }
+    fake = QueueRunner([
+        CommandResult(("describe-running",), 0, json.dumps({
+            "name": resource_name, "state": "RUNNING",
+        })),
+        CommandResult(("stop",), 0),
+        CommandResult(("describe-deleted",), 0, json.dumps({
+            "name": resource_name, "state": "DELETED",
+        })),
+    ])
+    services = backend_services()
+    services = type(services)(
+        fake.run, lambda campaign, run: tmp_path,
+        lambda campaign, run: {
+            "attempt_id": "attempt-002", "backend_job_id": resource_name,
+        },
+        services.summarize_run, services.parse_metric, services.parse_checkpoint,
+        services.atomic_write, services.utc_now,
+    )
+    status = SenseCoreBackend(services).cancel({}, run)
+    assert status["state"] == "CANCELLED"
+    assert resource_name in fake.commands[0][-1]
+    assert resource_name in fake.commands[1]
+    assert resource_name in fake.commands[2][-1]
+
+
+def test_sensecore_status_honors_matching_legacy_run_cancel_marker(tmp_path: Path):
+    resource_name = "sensecore-run--attempt-001"
+    attempt_dir = tmp_path / "attempts" / "attempt-001"
+    attempt_dir.mkdir(parents=True)
+    (tmp_path / "cancel_requested.json").write_text(
+        json.dumps({"backend_job_id": resource_name}), encoding="utf-8"
+    )
+    run = {
+        "run_id": "sensecore-run",
+        "backend": {"kind": "sensecore", "workspace": "workspace"},
+    }
+    fake = QueueRunner([
+        CommandResult(("describe",), 0, json.dumps({
+            "name": resource_name, "state": "SUSPENDED",
+        })),
+    ])
+    services = backend_services()
+    services = type(services)(
+        fake.run, lambda campaign, run: attempt_dir,
+        lambda campaign, run: {
+            "attempt_id": "attempt-001", "backend_job_id": resource_name,
+        },
+        services.summarize_run, services.parse_metric, services.parse_checkpoint,
+        services.atomic_write, services.utc_now,
+    )
+    assert SenseCoreBackend(services).status({}, run)["state"] == "CANCELLED"
 
 
 def test_sensecore_collection_extracts_committed_checkpoint_from_logs(monkeypatch):
