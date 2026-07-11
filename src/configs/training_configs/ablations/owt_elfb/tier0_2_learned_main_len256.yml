@@ -1,0 +1,12 @@
+base_config: tier0_2_learned_main.yml
+
+# Main learned-plan run under the same length-aligned setting as the frozen
+# Sentence-T5 teacher.
+max_length: 256
+eval_ppl_max_length: 256
+
+output_dir: outputs/ablations/owt_elfb/tier0_2_learned_main_len256
+resume: null
+warm_start: null
+wandb_run_name: tier0_2_owt_elfb_learned_main_len256
+wandb_tag: tier0,owt,elfb,learned,main,len256

@@ -11,17 +11,37 @@ python src/train.py --config src/configs/training_configs/ablations/owt_elfb/tie
 
 ## Required Anchors
 
-Run these first. They are also the Tier 1 learned-vs-frozen comparison.
+Run the length-aligned anchors first. They are the cleanest Tier 1
+learned-vs-frozen comparison because Sentence-T5 itself truncates at 256 tokens.
+
+| Config | Purpose |
+|---|---|
+| `tier0_0_pure_elf_len256.yml` | Pure ELF baseline with `max_length=256`. |
+| `tier0_1_sentence_t5_len256.yml` | Frozen Sentence-T5 teacher with token block length aligned to Sentence-T5. |
+| `tier0_2_learned_main_len256.yml` | Learned-plan main hypothesis under the same length-aligned setting. |
+
+### Full-Length Tier 0
+
+The default OWT configs inherit `max_length=1024`, while the frozen
+`sentence-transformers/sentence-t5-xl` plan encoder has `max_seq_length=256`.
+That means the frozen sentence plan can be a truncated summary of the token
+continuation. The 1024-token variants are still useful for full-length ELF
+comparisons after the length-aligned sanity pass:
 
 | Config | Purpose |
 |---|---|
 | `tier0_0_pure_elf.yml` | Original ELF baseline, `use_sentence_plan=false`. |
-| `tier0_1_sentence_t5.yml` | Frozen Sentence-T5 plan sanity / teacher baseline. |
-| `tier0_2_learned_main.yml` | Main hypothesis: learned sentence plan with `sentence_encoder_grad=none` and `plan_aux_passes=1`. |
+| `tier0_1_sentence_t5.yml` | Frozen Sentence-T5 plan sanity / teacher baseline; truncated teacher at 1024-token blocks. |
+| `tier0_2_learned_main.yml` | Main hypothesis at 1024-token blocks: learned sentence plan with `sentence_encoder_grad=none` and `plan_aux_passes=1`. |
 
-Core question: compare `tier0_1_sentence_t5.yml` against
-`tier0_2_learned_main.yml` to test whether the sentence embedding can be
-learned while the word/token T5 field stays fixed.
+The `*_len256.yml` configs set both `max_length=256` and
+`eval_ppl_max_length=256`, so generation / reconstruction and sliding-window PPL
+are evaluated at the same span.
+
+Core question: compare `tier0_1_sentence_t5_len256.yml` against
+`tier0_2_learned_main_len256.yml` to test whether the sentence embedding can be
+learned while the word/token T5 field stays fixed, with
+`tier0_0_pure_elf_len256.yml` as the no-plan control.
 
 Primary metrics:
 

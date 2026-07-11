@@ -121,8 +121,11 @@ def test_owt_elfb_ablation_configs_are_unique_and_expected():
     root = Path("src/configs/training_configs/ablations/owt_elfb")
     expected = {
         "tier0_0_pure_elf.yml",
+        "tier0_0_pure_elf_len256.yml",
         "tier0_1_sentence_t5.yml",
+        "tier0_1_sentence_t5_len256.yml",
         "tier0_2_learned_main.yml",
+        "tier0_2_learned_main_len256.yml",
         "tier2_grad_detached_target.yml",
         "tier2_grad_full.yml",
         "tier3_aux0.yml",
@@ -146,6 +149,8 @@ def test_owt_elfb_ablation_configs_are_unique_and_expected():
             bool(cfg.plan_learned_encoder_norm),
             float(cfg.plan_loss_weight),
             float(cfg.plan_noise_scale),
+            int(cfg.max_length),
+            int(cfg.eval_ppl_max_length),
         )
         assert key not in seen, f"{path.name} duplicates {seen.get(key)}"
         seen[key] = path.name

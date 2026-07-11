@@ -1,0 +1,13 @@
+base_config: tier0_1_sentence_t5.yml
+
+# Sentence-T5 truncates at 256 sentence-transformer tokens. This run makes the
+# token continuation block match that span as closely as the current pipeline
+# allows.
+max_length: 256
+eval_ppl_max_length: 256
+
+output_dir: outputs/ablations/owt_elfb/tier0_1_sentence_t5_len256
+resume: null
+warm_start: null
+wandb_run_name: tier0_1_owt_elfb_sentence_t5_len256
+wandb_tag: tier0,owt,elfb,sentence_t5,len256

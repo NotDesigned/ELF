@@ -281,7 +281,18 @@ inheritance, so each file only records the experimental delta.
 
 ### Tier 0: Sanity
 
-These three runs must pass before narrower ablations are meaningful:
+The cleanest first pass is the length-aligned Tier 0 set. These configs keep the
+token block at 256 so the frozen Sentence-T5 teacher and token continuation span
+match as closely as the current tokenizer pipeline allows:
+
+| Config | Purpose |
+|---|---|
+| `tier0_0_pure_elf_len256.yml` | pure ELF baseline at `max_length=256` |
+| `tier0_1_sentence_t5_len256.yml` | frozen Sentence-T5 teacher with aligned token block length |
+| `tier0_2_learned_main_len256.yml` | learned plan main hypothesis under the same length setting |
+
+The 1024-token Tier 0 runs remain useful, but they answer a slightly different
+question because frozen Sentence-T5 still truncates at 256 tokens:
 
 | Config | Purpose |
 |---|---|
@@ -292,13 +303,13 @@ These three runs must pass before narrower ablations are meaningful:
 ### Tier 1: Core Scientific Question
 
 Test whether the sentence embedding can be learned while the word/token field
-stays fixed T5. This does not need additional alias configs; compare the Tier 0
+stays fixed T5. For the first controlled test, compare the length-aligned Tier 0
 anchors directly:
 
 | Config | Key setting |
 |---|---|
-| `tier0_1_sentence_t5.yml` | `sentence_encoder_type=sentence_t5` |
-| `tier0_2_learned_main.yml` | `sentence_encoder_type=learned` |
+| `tier0_1_sentence_t5_len256.yml` | `sentence_encoder_type=sentence_t5` |
+| `tier0_2_learned_main_len256.yml` | `sentence_encoder_type=learned` |
 
 The learned default is `sentence_encoder_grad=none`, `plan_aux_passes=1`,
 `plan_aux_token_context=denoiser_z`, `plan_learned_encoder_norm=true`, and

@@ -1,0 +1,12 @@
+base_config: tier0_0_pure_elf.yml
+
+# Length-aligned control: keep token generation/reconstruction at the
+# Sentence-T5 max sequence length used by the plan runs.
+max_length: 256
+eval_ppl_max_length: 256
+
+output_dir: outputs/ablations/owt_elfb/tier0_0_pure_elf_len256
+resume: null
+warm_start: null
+wandb_run_name: tier0_0_owt_elfb_pure_elf_len256
+wandb_tag: tier0,owt,elfb,pure_elf,len256
