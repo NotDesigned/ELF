@@ -51,6 +51,23 @@ def test_sensecore_preflight_checks_cli_and_sanitized_workspace_access():
     assert [check.name for check in report.checks] == ["sco-cli", "workspace-access"]
 
 
+def test_sensecore_preflight_fails_closed_on_malformed_sanitized_response():
+    run = {
+        "run_id": "sensecore-preflight",
+        "backend": {"kind": "sensecore", "workspace": "workspace", "job_name": "job"},
+    }
+    fake = QueueRunner([
+        CommandResult(("sco-version",), 0, "v1.2.0\n"),
+        CommandResult(("safe-list",), 1, "", "safe_sco: input was not valid JSON; raw response suppressed"),
+    ])
+    set_command_runner(fake)
+    try:
+        report = SenseCoreBackend(backend_services()).preflight(run, scope="submit")
+    finally:
+        set_command_runner(SubprocessRunner())
+    assert report.ready is False
+
+
 def test_slurm_preflight_checks_tools_live_resources_and_storage(tmp_path: Path):
     campaign = slurm_campaign(tmp_path)
     run = materialize_run(campaign, campaign["runs"][0], "source-fixed")
@@ -74,6 +91,22 @@ def test_slurm_preflight_checks_tools_live_resources_and_storage(tmp_path: Path)
     ]
 
 
+def test_slurm_observe_preflight_only_requires_control_access(tmp_path: Path):
+    campaign = slurm_campaign(tmp_path)
+    run = materialize_run(campaign, campaign["runs"][0], "source-fixed")
+    fake = QueueRunner([
+        CommandResult(("ssh-version",), 0),
+        CommandResult(("squeue",), 0, ""),
+    ])
+    set_command_runner(fake)
+    try:
+        report = WydSlurmBackend(backend_services()).preflight(run, scope="observe")
+    finally:
+        set_command_runner(SubprocessRunner())
+    assert report.ready is True
+    assert [check.name for check in report.checks] == ["ssh-cli", "slurm-access"]
+
+
 def test_slurm_preflight_fails_closed_before_remote_access(tmp_path: Path):
     campaign = slurm_campaign(tmp_path)
     run = materialize_run(campaign, campaign["runs"][0], "source-fixed")
@@ -87,7 +120,7 @@ def test_slurm_preflight_fails_closed_before_remote_access(tmp_path: Path):
     finally:
         set_command_runner(SubprocessRunner())
     assert report.ready is False
-    assert len(fake.commands) == 2
+    assert len(fake.commands) == 1
 
 
 def test_slurm_status_contract_uses_injected_runner(tmp_path: Path, monkeypatch):
@@ -105,6 +138,48 @@ def test_slurm_status_contract_uses_injected_runner(tmp_path: Path, monkeypatch)
         set_command_runner(SubprocessRunner())
     assert status["state"] == "SUCCEEDED"
     assert any("sacct -j 1234" in argument for argument in fake.commands[0])
+
+
+def test_slurm_submit_stages_canonical_manifest_before_job_script(tmp_path, monkeypatch):
+    monkeypatch.chdir(Path(__file__).resolve().parents[1])
+    campaign = slurm_campaign(tmp_path)
+    run = materialize_run(campaign, campaign["runs"][0], "source-fixed")
+    manifest = prepare_run(campaign, run, "source-fixed", attempt_id="attempt-001")
+    fake = QueueRunner([
+        CommandResult(("validate-live",), 0, "h100|up|3-00:00:00|gpu:h100:8\nuser|lab||normal|normal\n"),
+        CommandResult(("mkdir",), 0),
+        CommandResult(("manifest-rsync",), 0),
+        CommandResult(("script-rsync",), 0),
+        CommandResult(("sbatch",), 0, "4321\n"),
+    ])
+    set_command_runner(fake)
+    try:
+        job_id = WydSlurmBackend(backend_services()).submit(
+            campaign, run, manifest, dry_run=False
+        )
+    finally:
+        set_command_runner(SubprocessRunner())
+    assert job_id == "4321"
+    assert fake.commands[2][-1].endswith("/manifest.yaml")
+    assert "controller-attempt-001.sbatch" in fake.commands[3][-1]
+
+
+def test_slurm_collection_reports_latest_remote_completed_checkpoint(tmp_path):
+    campaign = slurm_campaign(tmp_path)
+    run = materialize_run(campaign, campaign["runs"][0], "source-fixed")
+    fake = QueueRunner([
+        CommandResult(("collect-rsync",), 0),
+        CommandResult(("checkpoint-probe",), 0, "checkpoint_8\ncheckpoint_21\n"),
+    ])
+    services = backend_services()
+    services = type(services)(
+        fake.run, services.local_run_dir, services.backend_record,
+        lambda campaign, path: {"run_id": run["run_id"]}, services.parse_metric,
+        services.parse_checkpoint, services.atomic_write, services.utc_now,
+    )
+    summary = WydSlurmBackend(services).collect(campaign, run)
+    assert summary["latest_completed_checkpoint"].endswith("/checkpoint_21")
+    assert summary["latest_completed_checkpoint_step"] == 21
 
 
 def test_slurm_submission_intent_recovers_job_by_unique_comment(tmp_path: Path, monkeypatch):
@@ -239,3 +314,37 @@ def test_sensecore_logs_classify_expired_stream(tmp_path: Path):
         set_command_runner(SubprocessRunner())
     assert logs["expired"] is True
     assert "secret" not in "\n".join(logs["lines"])
+
+
+def test_sensecore_cancel_preserves_terminal_preemption(tmp_path, monkeypatch):
+    writes = []
+    services = backend_services()
+    services = type(services)(
+        services.run_command, lambda campaign, run: tmp_path,
+        services.backend_record, services.summarize_run, services.parse_metric,
+        services.parse_checkpoint,
+        lambda *args, **kwargs: writes.append((args, kwargs)), services.utc_now,
+    )
+    backend = SenseCoreBackend(services)
+    monkeypatch.setattr(backend, "status", lambda campaign, run: {
+        "state": "PREEMPTED", "raw_state": "SUSPENDED", "backend_job_id": "job",
+    })
+    result = backend.cancel({}, {"run_id": "run", "backend": {}})
+    assert result["state"] == "PREEMPTED"
+    assert writes == []
+
+
+def test_sensecore_collection_extracts_committed_checkpoint_from_logs(monkeypatch):
+    backend = SenseCoreBackend(backend_services())
+    monkeypatch.setattr(backend, "logs", lambda campaign, run, tail: {
+        "lines": [
+            "Checkpoint committed to /data/elf/runs/run/checkpoint_8 (120 bytes)",
+            "Checkpoint committed to /data/elf/runs/run/checkpoint_21 (240 bytes)",
+        ],
+        "expired": False,
+    })
+    summary = backend.collect(
+        {"project": "elf"}, {"run_id": "run", "backend": {}}
+    )
+    assert summary["latest_completed_checkpoint"].endswith("checkpoint_21")
+    assert summary["latest_completed_checkpoint_step"] == 21

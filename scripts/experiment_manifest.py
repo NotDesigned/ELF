@@ -17,10 +17,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 import yaml
-
-PACKAGE_SRC = Path(__file__).resolve().parents[1] / "packages" / "experiment-control" / "src"
-if str(PACKAGE_SRC) not in sys.path:
-    sys.path.insert(0, str(PACKAGE_SRC))
+from experiment_run_manifest import build_run_manifest, comparable_manifest
 
 IDENTITY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 SECRET_KEY_RE = re.compile(
@@ -298,8 +295,8 @@ class ExperimentStateStore:
         atomic_create(path, dict(attempt), yaml_format=True)
         return path
 
-    def initialize_attempt_state(self, attempt_id: str) -> LifecycleStatus:
-        """Idempotently repair compatibility state/event files for an attempt."""
+    def initialize_attempt_records(self, attempt_id: str) -> LifecycleStatus:
+        """Idempotently initialize derived status, backend, and event records."""
         attempt = self.load_attempt(attempt_id)
         timestamp = attempt["created_at"]
         backend = (
@@ -640,54 +637,26 @@ def prepare(args: argparse.Namespace) -> dict[str, Any]:
         raise ValueError("resolved training command must not be empty")
     command = sanitize_command(command)
 
-    manifest = {
-        "schema_version": 1,
-        "project": args.project,
-        "run_id": args.run_id,
-        "created_at": utc_now(),
-        "config_path": args.config,
-        "resolved_config": config,
-        "source_id": args.source_id,
-        "runtime_tree_id": args.runtime_tree_id or args.source_id,
-        "git_commit": args.git_commit or None,
-        "campaign_id": args.campaign_id or None,
-        "campaign": args.campaign or None,
-        "image_id": args.image_id,
-        "seed": config.get("seed"),
-        "storage": {
-            "run_dir": str(run_dir),
-            "checkpoint_dir": str(run_dir),
-        },
-        "resume_policy": {
-            "enabled": True,
-            "max_infra_retries": args.max_infra_retries,
-        },
-    }
+    manifest = build_run_manifest(
+        project=args.project, run_id=args.run_id, created_at=utc_now(),
+        config_path=args.config, resolved_config=config, source_id=args.source_id,
+        runtime_tree_id=args.runtime_tree_id or args.source_id,
+        git_commit=args.git_commit or None, campaign_id=args.campaign_id or None,
+        campaign=args.campaign or None, image_id=args.image_id,
+        run_dir=str(run_dir), max_infra_retries=args.max_infra_retries,
+    )
 
     if manifest_path.exists():
         existing = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
-        immutable_pairs = {
-            "project": (existing.get("project"), manifest["project"]),
-            "run_id": (existing.get("run_id"), manifest["run_id"]),
-            "source_id": (existing.get("source_id"), manifest["source_id"]),
-            "image_id": (existing.get("image_id"), manifest["image_id"]),
-            "scientific config": (
-                project.scientific_config(existing.get("resolved_config", {})),
-                project.scientific_config(manifest["resolved_config"]),
-            ),
-        }
-        conflicts = [label for label, (old, new) in immutable_pairs.items() if old != new]
-        if conflicts:
-            raise ValueError(
-                "existing run manifest conflicts in " + ", ".join(conflicts)
-            )
+        if comparable_manifest(existing) != comparable_manifest(manifest):
+            raise ValueError("existing run manifest conflicts")
         manifest = existing
     else:
         try:
             atomic_create(manifest_path, manifest, yaml_format=True)
         except FileExistsError:
             # A concurrent prepare published the run identity. Re-enter the
-            # normal compatibility path before creating this attempt.
+            # normal immutable-manifest validation path before creating this attempt.
             return prepare(args)
 
     attempt = {
@@ -710,7 +679,7 @@ def prepare(args: argparse.Namespace) -> dict[str, Any]:
         "resume_from": config.get("resume"),
     }
     store.create_attempt(attempt)
-    store.initialize_attempt_state(args.attempt_id)
+    store.initialize_attempt_records(args.attempt_id)
     return {"manifest": str(manifest_path), "attempt": str(attempt_path)}
 
 

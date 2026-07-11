@@ -109,7 +109,7 @@ def test_repeating_intent_repairs_derived_state_after_crash(tmp_path):
     store.begin_submission(**kwargs)
 
     # Simulate a process dying after the durable intent write but before all
-    # compatibility/read-model files were updated.
+    # Derived read-model files were updated idempotently.
     store.status_path.unlink()
     store.backend_path.unlink()
     store.events_path.write_text(
@@ -145,7 +145,7 @@ def test_reconcile_is_idempotent_and_rejects_a_different_job(tmp_path):
     first = store.reconcile_submission(**kwargs)
 
     # Runtime initialization recovery must not regress a submitted attempt.
-    store.initialize_attempt_state("attempt-001")
+    store.initialize_attempt_records("attempt-001")
     assert store.read_status().state == RunState.QUEUED
 
     # Repeating this also repairs files lost after scheduler acceptance.

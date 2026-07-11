@@ -16,9 +16,6 @@ import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPT_DIR = Path(__file__).resolve().parent
-PACKAGE_SRC = REPO_ROOT / "packages" / "experiment-control" / "src"
-if str(PACKAGE_SRC) not in sys.path:
-    sys.path.insert(0, str(PACKAGE_SRC))
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
@@ -34,6 +31,7 @@ from experiment_manifest import (  # noqa: E402
 )
 from experiment_campaign import load_and_resolve_campaign  # noqa: E402
 from experiment_policy import decide_next_action  # noqa: E402
+from experiment_run_manifest import build_run_manifest, comparable_manifest  # noqa: E402
 from experiment_control.backends import build_registry  # noqa: E402
 from experiment_control.backends.services import BackendServices  # noqa: E402
 from experiment_projects import build_project_registry  # noqa: E402
@@ -245,6 +243,7 @@ def command_environment(
             "IMAGE_ID": str(run["image_id"]),
             "OUTPUT_DIR": str(run["storage"]["run_dir"]),
             "NGPU": str(run.get("resources", {}).get("gpus", 1)),
+            "MAX_INFRA_RETRIES": str(run.get("retry", {}).get("max_infra_retries", 0)),
             "DATA_ROOT": str(storage["data_root"]),
             "PROJECT_DATA_ROOT": str(storage["project_data_root"]),
             "HF_HOME": str(storage["hf_home"]),
@@ -292,56 +291,37 @@ def prepare_run(
     resolved = project.resolve_config(str(run["config"]), overrides)
     command = launcher_command(campaign, run, source_id, attempt_id)
     bundle = project.source_bundle(REPO_ROOT)
-    manifest = {
-        "schema_version": 1,
-        "campaign": campaign["campaign"],
-        "project": campaign["project"],
-        "run_id": run["run_id"],
-        "attempt_id": attempt_id,
-        "created_at": utc_now(),
-        "source_id": source_id,
-        "runtime_tree_id": source_id,
-        "git_commit": campaign.get("git_commit"),
-        "campaign_id": campaign.get("campaign_id"),
-        "image_id": run["image_id"],
-        "config_path": run["config"],
-        "config_overrides": list(run.get("config_overrides", [])),
-        "resolved_config": resolved,
-        "backend": run["backend"],
-        "resources": run.get("resources", {}),
-        "storage": run["storage"],
-        "command": sanitize_command(command),
-        "execution": {
-            "source_mount": bundle.container_path,
-            "workdir": bundle.container_path,
-        },
-        "retry": run.get("retry", {"max_infra_retries": 0}),
-    }
+    retry = run.get("retry", {"max_infra_retries": 0})
+    manifest = build_run_manifest(
+        project=str(campaign["project"]), run_id=str(run["run_id"]),
+        created_at=utc_now(), config_path=str(run["config"]), resolved_config=resolved,
+        source_id=source_id, runtime_tree_id=source_id,
+        git_commit=campaign.get("git_commit"), campaign_id=campaign.get("campaign_id"),
+        campaign=str(campaign["campaign"]), image_id=str(run["image_id"]),
+        run_dir=remote_run_dir,
+        max_infra_retries=int(retry.get("max_infra_retries", 0)),
+    )
     if manifest_path.exists():
         existing = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
-        immutable_keys = (
-            "campaign", "project", "run_id", "source_id", "image_id", "resolved_config",
-            "backend",
-        )
-        conflicts = [key for key in immutable_keys if existing.get(key) != manifest.get(key)]
-        if existing.get("execution") not in (None, manifest["execution"]):
-            conflicts.append("execution")
-        if conflicts:
-            raise ValueError(f"existing control manifest conflicts in {conflicts}: {manifest_path}")
+        if comparable_manifest(existing) != comparable_manifest(manifest):
+            raise ValueError(f"existing control manifest conflicts: {manifest_path}")
         base_manifest = existing
     else:
         atomic_write(manifest_path, manifest, yaml_format=True)
         base_manifest = manifest
     effective = dict(base_manifest)
     effective["attempt_id"] = attempt_id
+    effective["backend"] = run["backend"]
+    effective["resources"] = run.get("resources", {})
+    effective["storage"] = run["storage"]
+    effective["config_overrides"] = list(run.get("config_overrides", []))
+    effective["retry"] = retry
     effective["command"] = sanitize_command(command)
-    effective["execution"] = manifest["execution"]
+    effective["execution"] = {"source_mount": bundle.container_path, "workdir": bundle.container_path}
     attempt_path = local_dir / "attempts" / attempt_id / "attempt.yaml"
     if attempt_path.exists():
         previous_attempt = yaml.safe_load(attempt_path.read_text(encoding="utf-8"))
-        comparable_attempt = dict(previous_attempt)
-        comparable_attempt.setdefault("execution", effective["execution"])
-        if comparable_attempt != effective:
+        if previous_attempt != effective:
             raise ValueError(f"existing control attempt conflicts: {attempt_path}")
     else:
         atomic_write(attempt_path, effective, yaml_format=True)
@@ -437,7 +417,7 @@ def backend_services() -> BackendServices:
     return BackendServices(
         run_command=run_command, local_run_dir=local_run_dir,
         backend_record=backend_record, summarize_run=summarize_project_run,
-        parse_metric=parse_project_metric,
+        parse_metric=parse_project_metric, parse_checkpoint=parse_project_checkpoint,
         atomic_write=atomic_write, utc_now=utc_now,
     )
 
@@ -450,6 +430,11 @@ def summarize_project_run(campaign: dict[str, Any], run_dir: Path) -> dict[str, 
 def parse_project_metric(campaign: dict[str, Any], line: str) -> dict[str, Any] | None:
     """Dispatch training-log interpretation without teaching a backend project syntax."""
     return PROJECTS.get(str(campaign["project"])).parse_metric(line)
+
+
+def parse_project_checkpoint(campaign: dict[str, Any], line: str) -> dict[str, Any] | None:
+    """Dispatch project checkpoint log parsing without backend format knowledge."""
+    return PROJECTS.get(str(campaign["project"])).parse_checkpoint(line)
 
 
 def backend_record(campaign: dict[str, Any], run: dict[str, Any]) -> dict[str, Any]:

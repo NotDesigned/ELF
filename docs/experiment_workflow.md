@@ -137,7 +137,7 @@ material must never be copied into campaign environment fields.
 | --- | --- |
 | `load_campaign` / `validate_run` | Validate schema, backend fields, safe environment allowlist, explicit Slurm GRES, and SenseCore spot policy. |
 | `source_identity` / `materialize_run` | Compute runtime-tree identity and expand immutable path placeholders. |
-| `prepare_run` | Resolve config/overrides and atomically freeze the canonical local run/attempt manifests before submission. |
+| `prepare_run` | Resolve config/overrides and atomically freeze the canonical run manifest and local attempt before submission. |
 | `ProjectAdapter` | Own project config semantics, launcher command, runtime environment, assets, metrics, summary, and source-bundle policy. |
 | `WydSlurmBackend` | Stage immutable source/SIF artifacts and implement Slurm render, submit, status, collect, and cancel. |
 | `SenseCoreBackend` | Implement exact-name SCO submit/status/log collection/cancel through immediate sanitization. |
@@ -327,10 +327,10 @@ environment fields use a strict non-secret allowlist; credentials must not be
 placed in YAML or startup commands.
 
 SenseCore preflight checks the SCO executable and an exact-name workspace query
-through `safe_sco.py`; it never reads or prints SCO profiles. WYD preflight
-checks SSH/rsync, live partition/GRES and account/QOS association, plus
-Apptainer and the declared mount root. Reports contain fixed messages rather
-than raw platform responses.
+through `safe_sco.py`; malformed/non-JSON responses fail closed. WYD observe
+preflight checks only SSH and Slurm control access; stage adds rsync/storage;
+submit adds live partition/GRES, account/QOS, Apptainer, and mount checks.
+Reports contain fixed messages rather than raw platform responses.
 
 ### State ownership
 
@@ -340,6 +340,14 @@ storage. A scheduler `RUNNING` state and a first `train_metrics.jsonl` record
 remain separate gates. SenseCore abrupt eviction may prevent the process from
 updating its own status, so external scheduler observation takes precedence
 for `PREEMPTED` classification.
+
+Controller and runtime use `experiment_run_manifest.build_run_manifest` for
+the same canonical `manifest.yaml` schema. Slurm stages that manifest before
+the job script; the runtime validates it before creating attempt/process
+records. Checkpoint collection accepts only `checkpoint_<step>` payloads whose
+`.complete` JSON marker has the same step and byte count. WYD probes those
+markers remotely without copying checkpoint payloads; SenseCore extracts the
+same committed path from sanitized launcher logs while they remain available.
 
 ### WYD site-specific execution notes
 

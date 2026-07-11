@@ -12,6 +12,8 @@ from typing import Any, Iterable, TextIO
 
 import yaml
 
+from experiment_control.checkpoints import discover_latest_completed_checkpoint
+
 
 TRAIN_KEYS = (
     "epoch",
@@ -203,34 +205,28 @@ def summarize_run(run_dir: Path) -> dict[str, Any]:
         oracle_plan_ppl`` so positive values mean the correct plan helped.
     """
     manifest = load_mapping(run_dir / "manifest.yaml")
+    if manifest.get("schema_version") != 1:
+        raise ValueError(f"unsupported manifest schema in {run_dir / 'manifest.yaml'}")
+    required = {"project", "run_id", "resolved_config", "source_id", "image_id"}
+    missing = sorted(key for key in required if key not in manifest)
+    if missing:
+        raise ValueError(f"manifest is missing {missing} in {run_dir / 'manifest.yaml'}")
     status_path = run_dir / "status.json"
     status = load_mapping(status_path) if status_path.is_file() else {}
     backend_path = run_dir / "backend.json"
     runtime_backend = load_mapping(backend_path) if backend_path.is_file() else {}
-    config = manifest.get("resolved_config", manifest.get("scientific_parameters", {}))
+    config = manifest["resolved_config"]
     if not isinstance(config, dict):
         raise ValueError(f"resolved_config must be a mapping in {run_dir / 'manifest.yaml'}")
 
-    legacy_source = manifest.get("source", {})
-    legacy_image = manifest.get("image", {})
-    legacy_backend = manifest.get("backend", {})
-    if not isinstance(legacy_source, dict):
-        legacy_source = {}
-    if not isinstance(legacy_image, dict):
-        legacy_image = {}
-    if not isinstance(legacy_backend, dict):
-        legacy_backend = {}
-
     row: dict[str, Any] = {
-        "project": manifest.get("project", "elf"),
-        "run_id": manifest.get("run_id", manifest.get("experiment_id")),
-        "state": status.get("state", manifest.get("status", "UNKNOWN")),
+        "project": manifest["project"],
+        "run_id": manifest["run_id"],
+        "state": status.get("state", "UNKNOWN"),
         "attempt_id": status.get("attempt_id"),
-        "backend": runtime_backend.get("backend", legacy_backend.get("kind")),
-        "source_id": manifest.get(
-            "source_id", legacy_source.get("source_tree_sha256", legacy_source.get("git_commit"))
-        ),
-        "image_id": manifest.get("image_id", legacy_image.get("digest", legacy_image.get("uri"))),
+        "backend": runtime_backend.get("backend"),
+        "source_id": manifest["source_id"],
+        "image_id": manifest["image_id"],
         "run_dir": str(run_dir),
     }
     for key in SCIENTIFIC_CONFIG_KEYS:
@@ -243,6 +239,10 @@ def summarize_run(run_dir: Path) -> dict[str, Any]:
 
     eval_metrics, warnings = collect_eval_metrics(run_dir)
     row.update(eval_metrics)
+    checkpoint = discover_latest_completed_checkpoint(run_dir)
+    if checkpoint:
+        row["latest_completed_checkpoint"] = checkpoint["path"]
+        row["latest_completed_checkpoint_step"] = checkpoint["step"]
     if "oracle_plan_ppl" in row and "shuffled_plan_ppl" in row:
         row["plan_ppl_gap"] = row["shuffled_plan_ppl"] - row["oracle_plan_ppl"]
     if warnings:

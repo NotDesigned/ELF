@@ -64,6 +64,7 @@ exit 2
         "DOCKER_SAVE_TIMEOUT_SECONDS": "5",
         "REGISTRY_OPERATION_TIMEOUT_SECONDS": "5",
         "DOCKER_CONFIG": str(docker_config),
+        "PYTHONPATH": str(ROOT / "packages/experiment-control/src"),
     })
     return env
 

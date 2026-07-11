@@ -7,13 +7,10 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SCRIPT = ROOT / "packages/experiment-control/src/experiment_control/safe_sco.py"
-
-
 def run_safe(
     mode: str, payload: str = "", value: str | None = None
 ) -> subprocess.CompletedProcess[str]:
-    command = [sys.executable, str(SCRIPT), mode]
+    command = [sys.executable, "-m", "experiment_control.safe_sco", mode]
     if value is not None:
         command.append(value)
     return subprocess.run(command, input=payload, text=True, capture_output=True, check=False)
@@ -49,6 +46,12 @@ def test_job_list_ignores_non_objects() -> None:
     result = run_safe("job-list", json.dumps([{"name": "one", "state": "RUNNING"}, "bad"]))
     assert result.returncode == 0
     assert json.loads(result.stdout)[0]["normalized_state"] == "RUNNING"
+
+
+def test_job_summary_tolerates_missing_external_state() -> None:
+    result = run_safe("job-summary", json.dumps({"name": "job-without-state"}))
+    assert result.returncode == 0
+    assert json.loads(result.stdout)["normalized_state"] == "UNKNOWN"
 
 
 def test_malformed_json_is_not_echoed() -> None:

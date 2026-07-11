@@ -2,6 +2,8 @@ import json
 import os
 import subprocess
 import sys
+import shutil
+from argparse import Namespace
 from pathlib import Path
 
 import pytest
@@ -17,7 +19,9 @@ from experimentctl import (
     prepare_run,
     record_submission,
     record_submission_intent,
+    resolved_run_overrides,
 )
+from experiment_manifest import prepare as runtime_prepare
 from experiment_control.backends.wyd import render_job
 from experiment_projects.elf import parse_training_metric_line
 
@@ -102,6 +106,30 @@ def test_prepare_and_render_preserve_explicit_partition(tmp_path, monkeypatch):
     assert manifest["resolved_config"]["global_batch_size"] is None
     assert manifest["resolved_config"]["batch_size"] == 4
     assert manifest["resolved_config"]["log_freq"] == 10
+
+
+def test_controller_manifest_is_accepted_unchanged_by_runtime(tmp_path, monkeypatch):
+    monkeypatch.chdir(REPO_ROOT)
+    campaign = slurm_campaign(tmp_path)
+    campaign.update({"git_commit": "commit", "campaign_id": "campaign-id"})
+    run = materialize_run(campaign, campaign["runs"][0], "source-fixed")
+    remote_dir = tmp_path / "remote-run"
+    run["storage"]["run_dir"] = str(remote_dir)
+    prepare_run(campaign, run, "source-fixed", attempt_id="attempt-001")
+    local_manifest = tmp_path / "local/controller-test/smoke-h100/manifest.yaml"
+    remote_dir.mkdir()
+    shutil.copy2(local_manifest, remote_dir / "manifest.yaml")
+    runtime_prepare(Namespace(
+        project="elf", run_id="smoke-h100", attempt_id="attempt-001",
+        backend="slurm", backend_job_id="123", config=CONFIG,
+        config_override=resolved_run_overrides(campaign, run, str(remote_dir)),
+        output_dir=str(remote_dir), source_id="source-fixed", runtime_tree_id="source-fixed",
+        git_commit="commit", campaign_id="campaign-id", campaign="controller-test",
+        image_id=run["image_id"], gpus=1, nodes=1, quota="normal",
+        resource_spec="", max_infra_retries=0, require_immutable_identities=True,
+        command=["true"],
+    ))
+    assert (remote_dir / "attempts/attempt-001/attempt.yaml").is_file()
 
 
 def test_render_supports_datapool_storage_mount(tmp_path, monkeypatch):

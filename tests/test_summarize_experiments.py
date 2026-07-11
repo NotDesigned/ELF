@@ -19,6 +19,7 @@ def make_run(tmp_path: Path) -> Path:
     run_dir = tmp_path / "campaign" / "run-a"
     run_dir.mkdir(parents=True)
     manifest = {
+        "schema_version": 1,
         "project": "elf",
         "run_id": "run-a",
         "source_id": "source-abc",
@@ -86,7 +87,7 @@ def test_malformed_jsonl_reports_path_and_line(tmp_path):
         read_jsonl(path)
 
 
-def test_legacy_manifest_fields_remain_summarizable(tmp_path):
+def test_legacy_manifest_schema_is_rejected(tmp_path):
     run_dir = tmp_path / "legacy"
     run_dir.mkdir()
     (run_dir / "manifest.yaml").write_text(
@@ -107,9 +108,5 @@ def test_legacy_manifest_fields_remain_summarizable(tmp_path):
         encoding="utf-8",
     )
 
-    row = summarize_run(run_dir)
-    assert row["run_id"] == "legacy-run"
-    assert row["state"] == "waiting_for_spot_capacity"
-    assert row["backend"] == "sensecore"
-    assert row["source_id"] == "deadbeef"
-    assert row["global_batch_size"] == 512
+    with pytest.raises(ValueError, match="unsupported manifest schema"):
+        summarize_run(run_dir)

@@ -22,11 +22,6 @@ if str(SRC_ROOT) not in sys.path:
 from configs.config import Config, apply_config_overrides, load_config_from_yaml  # noqa: E402
 
 
-OPERATIONAL_CONFIG_FIELDS = {
-    "output_dir", "resume", "wandb_run_name", "wandb_run_id", "wandb_resume",
-}
-
-
 def parse_training_metric_line(line: str) -> dict[str, Any] | None:
     """Parse the human-readable metric record emitted by ELF training."""
     match = re.search(r"Step\s+(\d+):\s+(.*)$", line)
@@ -44,6 +39,13 @@ def parse_training_metric_line(line: str) -> dict[str, Any] | None:
         if key in key_map:
             record[key_map[key]] = float(value)
     return record
+
+
+def parse_checkpoint_line(line: str) -> dict[str, Any] | None:
+    match = re.search(r"Checkpoint committed to (\S*/checkpoint_(\d+)) \((\d+) bytes\)", line)
+    if not match:
+        return None
+    return {"path": match.group(1), "step": int(match.group(2)), "bytes": int(match.group(3))}
 
 
 def _plain(value: Any) -> Any:
@@ -82,12 +84,6 @@ class ElfProjectAdapter:
     def resolve_config(self, config_path: str, overrides: list[str]) -> dict[str, Any]:
         config = apply_config_overrides(load_config_from_yaml(config_path), overrides)
         return {name: _plain(getattr(config, name)) for name in Config.__annotations__}
-
-    def scientific_config(self, config: dict[str, Any]) -> dict[str, Any]:
-        return {
-            key: value for key, value in config.items()
-            if key not in OPERATIONAL_CONFIG_FIELDS
-        }
 
     def environment(self, campaign: dict[str, Any], run: dict[str, Any]) -> dict[str, str]:
         project_root = str(run["storage"]["project_data_root"])
@@ -128,6 +124,9 @@ class ElfProjectAdapter:
 
     def parse_metric(self, line: str) -> dict[str, Any] | None:
         return parse_training_metric_line(line)
+
+    def parse_checkpoint(self, line: str) -> dict[str, Any] | None:
+        return parse_checkpoint_line(line)
 
     def summarize(self, run_dir: Path) -> dict[str, Any]:
         return summarize_run(run_dir)

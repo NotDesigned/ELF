@@ -11,11 +11,8 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SRC_ROOT = REPO_ROOT / "src"
-PACKAGE_SRC = REPO_ROOT / "packages" / "experiment-control" / "src"
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
-if str(PACKAGE_SRC) not in sys.path:
-    sys.path.insert(0, str(PACKAGE_SRC))
 
 from configs.config import apply_config_overrides, load_config_from_yaml  # noqa: E402
 from experiment_control.project import AssetRequirement  # noqa: E402

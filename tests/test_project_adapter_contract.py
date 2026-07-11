@@ -34,9 +34,6 @@ class DummyProject:
         payload = yaml.safe_load(Path(config_path).read_text(encoding="utf-8"))
         return {**payload, "applied": list(overrides)}
 
-    def scientific_config(self, config):
-        return {key: value for key, value in config.items() if key != "output"}
-
     def environment(self, campaign, run):
         return {"DUMMY_OUTPUT": run["storage"]["run_dir"]}
 
@@ -52,6 +49,9 @@ class DummyProject:
     def parse_metric(self, line):
         if line.startswith("metric="):
             return {"score": float(line.split("=", 1)[1])}
+        return None
+
+    def parse_checkpoint(self, line):
         return None
 
     def summarize(self, run_dir):
