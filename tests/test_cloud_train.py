@@ -107,7 +107,7 @@ def test_local_dataset_override_is_validated_as_a_directory(tmp_path):
     assert result.returncode == 0, result.stderr
 
 
-def test_launcher_bootstraps_staged_experiment_control_source(tmp_path):
+def test_launcher_uses_installed_experiment_control_dependency(tmp_path):
     env = offline_env(tmp_path)
     env.update({
         "PYTHONPATH": "/path/that/does/not/exist",
@@ -123,4 +123,4 @@ def test_launcher_bootstraps_staged_experiment_control_source(tmp_path):
     )
     assert result.returncode == 0, result.stderr
     assert "experiment_control=" in result.stdout
-    assert "packages/experiment-control/src/experiment_control" in result.stdout
+    assert "/packages/experiment-control/" not in result.stdout

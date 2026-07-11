@@ -640,6 +640,7 @@ def test_slurm_stage_reuses_remote_source_and_sif_markers(tmp_path: Path, monkey
             CommandResult(("source-marker",), 0),
             CommandResult(("sif-marker",), 0),
             CommandResult(("required-path",), 0),
+            CommandResult(("required-path",), 0),
         ]
     )
     set_command_runner(fake)
@@ -648,10 +649,12 @@ def test_slurm_stage_reuses_remote_source_and_sif_markers(tmp_path: Path, monkey
         WydSlurmBackend(backend_services()).stage(campaign, run, "source-fixed", bundle)
     finally:
         set_command_runner(SubprocessRunner())
-    assert len(fake.commands) == 4
+    assert len(fake.commands) == 5
     assert not any(command and command[0] == "rsync" for command in fake.commands)
-    assert "test -s" in " ".join(fake.commands[-1])
-    assert "experiment_control/__init__.py" in " ".join(fake.commands[-1])
+    required_path_commands = [" ".join(command) for command in fake.commands[-2:]]
+    assert all("test -s" in command for command in required_path_commands)
+    assert "scripts/cloud_train.sh" in required_path_commands[0]
+    assert "src/train.py" in required_path_commands[1]
 
 
 def test_slurm_ssh_control_socket_is_scoped_to_current_process():

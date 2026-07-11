@@ -139,12 +139,12 @@ without network access:
 | `experiment_assets.py` | ELF asset discovery and Hugging Face cache layout used by the ELF project adapter. |
 | `experiment_overrides.py` | ELF's ordered environment-to-config override sequence. |
 | `experiment_policy.py` | Classify failures and recommend bounded next actions without mutating a scheduler. |
-| `packages/experiment-control/.../runner.py` | Injectable command boundary for production subprocesses and hermetic fakes. |
-| `packages/experiment-control/.../preflight.py` | Sanitized backend readiness checks and fail-closed reports. |
-| `packages/experiment-control` | Independently installable backend, preflight, runner, state, sanitizer, and project-protocol package. |
+| `experiment_control/runner.py` | Independently versioned injectable command boundary for production subprocesses and hermetic fakes. |
+| `experiment_control/preflight.py` | Independently versioned sanitized readiness checks and fail-closed reports. |
+| [`ml-experiment-control`](https://github.com/NotDesigned/ml-experiment-control) | Commit-pinned backend, preflight, runner, state, sanitizer, project protocol, and adapter template package. |
 | `scripts/experiment_projects/elf.py` | The only adapter that knows ELF Config, `cloud_train.sh`, ELF checkpoints, metrics, and summaries. |
-| `packages/experiment-control/.../backends/wyd.py` | SSH, rsync, Slurm, identity probes, Apptainer staging/status/collection/cancellation. |
-| `packages/experiment-control/.../backends/sensecore.py` | Sanitized SCO identity/submission/status/logging/cancellation. |
+| `experiment_control/backends/wyd.py` | SSH, rsync, Slurm, identity probes, Apptainer staging/status/collection/cancellation. |
+| `experiment_control/backends/sensecore.py` | Sanitized SCO identity/submission/status/logging/cancellation. |
 
 The backend registry dispatches validation, platform environment resolution,
 identity and asset verification, submission recovery, `stage`, `render`, `submit`,
@@ -216,12 +216,12 @@ worker; it never treats the controller's local `/data` as SenseCore AFS. Asset
 transfer/hydration is a separate future transport interface; verification
 never downloads implicitly inside a GPU job.
 
-ELF declares the `experiment_control` package entry point as a required staged
-source path, which WYD verifies before submission. The container launcher then
-bootstraps the staged package source on `PYTHONPATH`, imports it before any
-training work, and prints its resolved module path. This split is intentional:
-login nodes may not have `/dev/fuse` permission to mount the SIF for a true
-container-side preflight.
+ELF pins `ml-experiment-control` by commit in `requirements.txt`; the pin is
+part of runtime source identity and the package is installed in the image/SIF.
+WYD verifies ELF's project entrypoint and training module in the staged source,
+while the container launcher imports the installed scheduler package before
+any training work and prints its resolved module path. Login nodes may not have
+`/dev/fuse` permission to mount the SIF for a true container-side preflight.
 
 `observe` records scheduler evidence and collects process/model evidence as
 separate objects. `decide` writes `decision.json`. It permits a retry only for

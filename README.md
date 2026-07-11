@@ -10,11 +10,13 @@ Create a conda environment named `elf` and install the dependencies:
 conda create -n elf python=3.10 -y
 conda activate elf
 pip install -r requirements.txt
-pip install -e packages/experiment-control
 ```
 
-The experiment backend package has its own API and integration guide in
-[`packages/experiment-control/README.md`](packages/experiment-control/README.md).
+The independently versioned experiment backend package has its API and project
+adapter guide in
+[`NotDesigned/ml-experiment-control`](https://github.com/NotDesigned/ml-experiment-control).
+`requirements.txt` pins its exact commit so container and source identities
+remain reproducible.
 
 An automated research agent should start with
 [`docs/agent_research_guide.md`](docs/agent_research_guide.md). It gives the

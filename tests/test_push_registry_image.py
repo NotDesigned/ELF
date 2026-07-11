@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 
@@ -58,13 +59,12 @@ exit 2
     )
     env = os.environ.copy()
     env.update({
-        "PATH": f"{bin_dir}:/usr/bin:/bin",
+        "PATH": f"{bin_dir}:{Path(sys.executable).parent}:/usr/bin:/bin",
         "TMPDIR": str(tmp_path),
         "DOCKER_PUSH_TIMEOUT_SECONDS": "5",
         "DOCKER_SAVE_TIMEOUT_SECONDS": "5",
         "REGISTRY_OPERATION_TIMEOUT_SECONDS": "5",
         "DOCKER_CONFIG": str(docker_config),
-        "PYTHONPATH": str(ROOT / "packages/experiment-control/src"),
     })
     return env
 

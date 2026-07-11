@@ -12,10 +12,9 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
 DEFAULT_CONFIG="src/configs/training_configs/ablations/owt_elfb/tier0_0_pure_elf.yml"
 
-# A staged source tree may be newer than the immutable runtime image. Prefer
-# its in-repository packages so controller/runtime schemas stay aligned even
-# when an older dependency SIF is reused.
-export PYTHONPATH="$REPO_ROOT/src:$REPO_ROOT/packages/experiment-control/src:/app/src:/app/packages/experiment-control/src:${PYTHONPATH:-}"
+# Project code may be mounted over the immutable image. The scheduler package
+# remains the independently installed, commit-pinned image dependency.
+export PYTHONPATH="$REPO_ROOT/src:/app/src:${PYTHONPATH:-}"
 export PYTHONUNBUFFERED=1
 
 python - <<'PY'

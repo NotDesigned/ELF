@@ -23,9 +23,6 @@ COPY requirements.txt .
 RUN python -m pip install --break-system-packages --upgrade pip setuptools wheel \
     && python -m pip install --break-system-packages -r requirements.txt
 
-COPY packages/experiment-control/ packages/experiment-control/
-RUN python -m pip install --break-system-packages --no-deps ./packages/experiment-control
-
 COPY src/ src/
 COPY scripts/ scripts/
 COPY tests/ tests/
@@ -39,7 +36,7 @@ ARG ELF_B_CHECKPOINT_FILE=checkpoint_95085
 ARG SOURCE_ID=unknown
 
 ENV PROJECT_NAME=${PROJECT_NAME} \
-    PYTHONPATH=/app/src:/app/packages/experiment-control/src \
+    PYTHONPATH=/app/src \
     HF_ENDPOINT=https://hf-mirror.com \
     HF_HOME=/data/.cache/huggingface \
     HF_DATASETS_CACHE=/data/.cache/huggingface/datasets \

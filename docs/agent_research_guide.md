@@ -17,8 +17,8 @@ contracts stay in the linked references.
    storage, and retry budget.
 4. [`experiment_workflow.md`](experiment_workflow.md): durable state, campaign
    schema, backend behavior, artifacts, and failure policy.
-5. [`packages/experiment-control/README.md`](../packages/experiment-control/README.md):
-   only when modifying or reusing the backend package.
+5. [`ml-experiment-control`](https://github.com/NotDesigned/ml-experiment-control):
+   only when modifying, upgrading, or reusing the backend package.
 
 Repository documents define stable project intent. Discover mutable platform
 facts through the current operator runbook. Under Codex, use

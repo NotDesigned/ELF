@@ -7,11 +7,11 @@ Two images are used on SenseCore:
 - `Dockerfile`: small runtime image. It never references large build contexts
   and reads cache/checkpoints from `/data`.
 
-Both images install `packages/experiment-control`. The launcher also prepends
-the mounted source tree's `packages/experiment-control/src` to `PYTHONPATH`, so
-a newer immutable source snapshot remains schema-compatible when reusing an
-older dependency SIF. Startup prints the resolved package path and fails before
-asset planning if the package cannot be imported.
+Both images install the exact `ml-experiment-control` commit pinned in
+`requirements.txt`. The reusable scheduler package is no longer copied from the
+ELF source tree. Startup prints the resolved installed package path and fails
+before asset planning if the package cannot be imported. Changing the package
+pin changes ELF's runtime source identity and requires a new image/SIF.
 
 Set the registry tag:
 
