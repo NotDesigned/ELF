@@ -481,25 +481,26 @@ def apply_config_overrides(config: Config, overrides: list) -> Config:
 
         original_value = getattr(config, field_name)
         original_type = type(original_value)
+        annotated_type = config.__annotations__.get(field_name)
 
         # Allow setting a field back to None
         if value_str.lower() in _NONE_STRINGS:
             setattr(config, field_name, None)
             continue
 
-        if original_value is None:
-            # Use type annotation to infer the intended type
-            annotated_type = config.__annotations__.get(field_name)
-            if annotated_type in (int, "int"):
-                converted_value = int(value_str)
-            elif annotated_type in (float, "float"):
-                converted_value = float(value_str)
-            elif annotated_type in (bool, "bool"):
-                converted_value = _parse_bool(value_str, field_name)
-            elif annotated_type in (str, "str"):
-                converted_value = value_str
-            else:
-                converted_value = value_str
+        # Prefer the declared field type over YAML's runtime scalar type. YAML
+        # parses ``save_freq: 1`` as int even though Config declares float, and
+        # an override such as ``save_freq=0.1`` must remain valid.
+        if annotated_type in (bool, "bool"):
+            converted_value = _parse_bool(value_str, field_name)
+        elif annotated_type in (int, "int"):
+            converted_value = int(value_str)
+        elif annotated_type in (float, "float"):
+            converted_value = float(value_str)
+        elif annotated_type in (str, "str"):
+            converted_value = value_str
+        elif original_value is None:
+            converted_value = value_str
         elif original_type == bool:
             converted_value = _parse_bool(value_str, field_name)
         elif original_type == int:

@@ -51,6 +51,14 @@ def test_overrides_accept_null_and_reject_bad_bool():
         apply_config_overrides(cfg, ["use_wandb=maybe"])
 
 
+def test_float_override_uses_declared_type_after_integer_yaml_value():
+    cfg = Config()
+    cfg.save_freq = 1  # Mirrors YAML parsing of ``save_freq: 1``.
+    cfg = apply_config_overrides(cfg, ["save_freq=0.1"])
+    assert cfg.save_freq == pytest.approx(0.1)
+    assert isinstance(cfg.save_freq, float)
+
+
 def test_wandb_run_name_does_not_imply_stable_run_id():
     cfg = Config()
     cfg.wandb_run_name = "shared-display-name"
@@ -149,10 +157,15 @@ def test_owt_elfb_ablation_configs_are_unique_and_expected():
         "tier0_2_learned_main.yml",
         "tier0_2_learned_main_len256.yml",
         "tier2_grad_detached_target.yml",
+        "tier2_grad_detached_target_len256.yml",
         "tier2_grad_full.yml",
+        "tier2_grad_full_len256.yml",
         "tier3_aux0.yml",
+        "tier3_aux0_len256.yml",
         "tier3_aux2.yml",
+        "tier3_aux2_len256.yml",
         "tier3_aux4.yml",
+        "tier3_aux4_len256.yml",
     }
     paths = sorted(root.glob("*.yml"))
     assert {p.name for p in paths} == expected
@@ -182,6 +195,11 @@ def test_owt_elfb_ablation_configs_are_unique_and_expected():
     assert detached.plan_aux_passes == 1
     assert full.plan_aux_passes == 1
 
+    for path in root.glob("tier[23]*_len256.yml"):
+        cfg = load_config_from_yaml(str(path))
+        assert cfg.max_length == 256
+        assert cfg.eval_ppl_max_length == 256
+
 
 def test_config_reference_covers_config_sampling_cli_and_launcher_flags():
     reference = Path("docs/config_reference.md").read_text(encoding="utf-8")
@@ -195,7 +213,7 @@ def test_config_reference_covers_config_sampling_cli_and_launcher_flags():
         for path in ("scripts/cloud_train.sh", "scripts/launch.sh")
     )
     env_names = set(re.findall(r"\$\{([A-Z][A-Z0-9_]*)", shell_sources))
-    env_names -= {"EXTRA", "PYTHONPATH"}  # Internal shell plumbing, not public controls.
+    env_names -= {"BASH_SOURCE", "EXTRA", "PYTHONPATH"}  # Internal shell plumbing.
     missing_env = sorted(name for name in env_names if f"`{name}`" not in reference)
     assert not missing_env, f"config reference is missing launcher variables: {missing_env}"
 

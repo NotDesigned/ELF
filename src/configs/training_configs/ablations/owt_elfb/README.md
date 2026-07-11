@@ -65,6 +65,12 @@ this axis only controls sentence-plan MSE gradients.
 | `tier2_grad_detached_target.yml` | `sentence_encoder_grad=detached_target` | Target detached, but the noised input path still leaks gradients to the encoder. |
 | `tier2_grad_full.yml` | `sentence_encoder_grad=full` | Strongest coupling; collapse / instability baseline. |
 
+For the primary length-aligned campaign, use
+`tier2_grad_detached_target_len256.yml` and `tier2_grad_full_len256.yml`.
+These inherit their corresponding topology configs and change only
+`max_length`, `eval_ppl_max_length`, and operational run metadata. Compare them
+against `tier0_2_learned_main_len256.yml`, not the 1024-token learned config.
+
 Compare both against `tier0_2_learned_main.yml`, whose `none` topology detaches
 main sentence-plan MSE and trains extra plan-denoiser passes against `sg(s0)`.
 
@@ -84,6 +90,10 @@ Compare these against `tier0_2_learned_main.yml`, which is the default
 `plan_aux_passes=1` run. Question: do extra detached plan-denoiser passes
 improve sampling / plan refinement without damaging the learned encoder
 representation?
+
+For the primary length-aligned campaign, use `tier3_aux0_len256.yml`,
+`tier3_aux2_len256.yml`, and `tier3_aux4_len256.yml`, with
+`tier0_2_learned_main_len256.yml` as the `plan_aux_passes=1` reference.
 
 ## Warm Start
 

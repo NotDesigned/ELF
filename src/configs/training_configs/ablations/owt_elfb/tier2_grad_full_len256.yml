@@ -1,0 +1,11 @@
+base_config: tier2_grad_full.yml
+
+# Length-aligned gradient-topology ablation.
+max_length: 256
+eval_ppl_max_length: 256
+
+output_dir: outputs/ablations/owt_elfb/tier2_grad_full_len256
+resume: null
+warm_start: null
+wandb_run_name: tier2_owt_elfb_grad_full_len256
+wandb_tag: tier2,owt,elfb,grad_full,len256

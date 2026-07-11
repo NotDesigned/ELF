@@ -1,0 +1,13 @@
+base_config: tier2_grad_detached_target.yml
+
+# Length-aligned gradient-topology ablation. This preserves every scientific
+# setting from tier2_grad_detached_target.yml and changes only the token/eval
+# span needed for comparison with the Tier-0 len256 anchors.
+max_length: 256
+eval_ppl_max_length: 256
+
+output_dir: outputs/ablations/owt_elfb/tier2_grad_detached_target_len256
+resume: null
+warm_start: null
+wandb_run_name: tier2_owt_elfb_grad_detached_target_len256
+wandb_tag: tier2,owt,elfb,grad_detached_target,len256
