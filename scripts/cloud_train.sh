@@ -35,7 +35,7 @@ for ((preflight_index = 0; preflight_index < ${#extra_args[@]}; preflight_index+
 done
 
 PROJECT_NAME="${PROJECT_NAME:-elf}"
-DATA_ROOT="${DATA_ROOT:-/data}"
+DATA_ROOT="${DATA_ROOT:-$REPO_ROOT/.runtime}"
 PROJECT_DATA_ROOT="${PROJECT_DATA_ROOT:-$DATA_ROOT/$PROJECT_NAME}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-$PROJECT_DATA_ROOT/runs}"
 CHECKPOINT_ROOT="${CHECKPOINT_ROOT:-$PROJECT_DATA_ROOT/checkpoints}"
@@ -49,13 +49,9 @@ if [[ -z "${RUN_ID:-}" ]]; then
     RUN_ID="${run_slug}-$(date -u +%Y%m%dT%H%M%SZ)-${run_nonce}"
 fi
 ATTEMPT_ID="${ATTEMPT_ID:-attempt-001}"
-BACKEND="${BACKEND:-sensecore}"
-BACKEND_JOB_ID="${BACKEND_JOB_ID:-${SENSECORE_JOB_ID:-}}"
-QUOTA_TYPE="${QUOTA_TYPE:-spot}"
-if [[ "$BACKEND" == "sensecore" && "$QUOTA_TYPE" != "spot" ]]; then
-    echo "[cloud_train] this account is configured for spot quota only, got QUOTA_TYPE=$QUOTA_TYPE" >&2
-    exit 1
-fi
+BACKEND="${BACKEND:-local}"
+BACKEND_JOB_ID="${BACKEND_JOB_ID:-}"
+QUOTA_TYPE="${QUOTA_TYPE:-unknown}"
 
 OUTPUT_DIR="${OUTPUT_DIR:-$OUTPUT_ROOT/$RUN_ID}"
 HF_ENDPOINT="${HF_ENDPOINT:-https://hf-mirror.com}"

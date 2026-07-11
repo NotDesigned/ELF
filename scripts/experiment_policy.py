@@ -33,7 +33,11 @@ def decide_next_action(
         return Decision("OBSERVE", FailureClass.UNKNOWN.value, "run is nonterminal", retries_used, max_infra_retries)
     if state == "SUCCEEDED":
         return Decision("VERIFY_RESULTS", FailureClass.UNKNOWN.value, "scheduler succeeded; verify required metrics", retries_used, max_infra_retries)
-    failure = classify_failure(str(status.get("raw_state", "")), diagnostic_text)
+    declared = str(status.get("failure_class") or "")
+    try:
+        failure = FailureClass(declared) if declared else classify_failure(diagnostic_text)
+    except ValueError:
+        failure = FailureClass.UNKNOWN
     retryable = failure in {FailureClass.TRANSPORT, FailureClass.SCHEDULER, FailureClass.PREEMPTION}
     if retryable and retries_used < max_infra_retries:
         return Decision(

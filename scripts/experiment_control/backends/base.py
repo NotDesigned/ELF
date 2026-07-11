@@ -8,6 +8,19 @@ from typing import Any, Protocol
 class Backend(Protocol):
     kind: str
 
+    def validate(self, run: dict[str, Any]) -> None: ...
+    def environment(
+        self, campaign: dict[str, Any], run: dict[str, Any], source_id: str, attempt_id: str
+    ) -> dict[str, str]: ...
+    def submission_request(
+        self, campaign: dict[str, Any], run: dict[str, Any], attempt_id: str
+    ) -> dict[str, Any]: ...
+    def recover_submission(
+        self, run: dict[str, Any], intent: dict[str, Any], attempt_id: str
+    ) -> str | None: ...
+    def verify_assets(
+        self, run: dict[str, Any], requirements: list[Any], environment: dict[str, str]
+    ) -> dict[str, Any]: ...
     def stage(self, campaign: dict[str, Any], run: dict[str, Any], source_id: str) -> bool: ...
     def render(self, manifest: dict[str, Any]) -> str: ...
     def submit(self, campaign: dict[str, Any], run: dict[str, Any], manifest: dict[str, Any], *, dry_run: bool) -> str: ...
@@ -28,3 +41,7 @@ class BackendRegistry:
             return self._backends[kind]
         except KeyError as error:
             raise ValueError(f"unsupported experiment backend: {kind}") from error
+
+    @property
+    def kinds(self) -> frozenset[str]:
+        return frozenset(self._backends)

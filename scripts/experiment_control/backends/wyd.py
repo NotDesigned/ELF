@@ -2,21 +2,193 @@
 
 from __future__ import annotations
 
+import hashlib
 import re
 import shlex
 from pathlib import Path
 from typing import Any
 
+from experiment_assets import cache_path
 from .services import BackendServices
-from .slurm import parse_accounting, render_job, shell_join
 from safe_sco import redact_line
+
+
+SLURM_STATES = {
+    "PENDING": "QUEUED", "CONFIGURING": "QUEUED", "REQUEUED": "QUEUED",
+    "REQUEUE_FED": "QUEUED", "RUNNING": "RUNNING", "COMPLETING": "RUNNING",
+    "COMPLETED": "SUCCEEDED", "PREEMPTED": "PREEMPTED",
+    "FAILED": "FAILED", "NODE_FAIL": "FAILED", "OUT_OF_MEMORY": "FAILED",
+    "TIMEOUT": "FAILED", "CANCELLED": "CANCELLED",
+}
+
+
+def normalize_state(raw_state: str, exit_code: str | None = None) -> str:
+    raw = raw_state.split()[0].rstrip("+").upper()
+    state = SLURM_STATES.get(raw, "UNKNOWN")
+    return "FAILED" if raw == "COMPLETED" and exit_code not in {None, "", "0:0"} else state
+
+
+def scheduler_job_name(run_id: str, attempt_id: str) -> str:
+    raw = f"{run_id}--{attempt_id}"
+    if len(raw) <= 128:
+        return raw
+    return f"{raw[:113]}--{hashlib.sha256(raw.encode()).hexdigest()[:12]}"
+
+
+def render_job(manifest: dict[str, Any]) -> str:
+    backend, resources = manifest["backend"], manifest.get("resources", {})
+    run_dir, source_dir, sif_path = (
+        manifest["storage"]["run_dir"], backend["source_dir"], backend["sif_path"]
+    )
+    mount_root = str(backend["mount_root"])
+    cache = str(backend.get("apptainer_cache_dir", f"{mount_root.rstrip('/')}/apptainer/cache/liangluocheng"))
+    temp = str(backend.get("apptainer_tmp_dir", f"{mount_root.rstrip('/')}/apptainer/tmp/liangluocheng"))
+    command = shlex.join(manifest["command"])
+    comment = shlex.quote(f"{manifest.get('campaign', 'campaign')}/{manifest['run_id']}/{manifest['attempt_id']}")
+    job_name = scheduler_job_name(str(manifest["run_id"]), str(manifest["attempt_id"]))
+    return f"""#!/usr/bin/env bash
+#SBATCH --partition={backend['partition']}
+#SBATCH --account={backend['account']}
+#SBATCH --qos={backend['qos']}
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task={int(resources.get('cpus', 8))}
+#SBATCH --gres={backend['gres']}
+#SBATCH --time={backend['time']}
+#SBATCH --job-name={job_name}
+#SBATCH --comment={comment}
+#SBATCH --output=/dev/null
+#SBATCH --error=/dev/null
+
+set -euo pipefail
+export APPTAINER_CACHEDIR={shlex.quote(cache)}
+export APPTAINER_TMPDIR={shlex.quote(temp)}
+export BACKEND_JOB_ID="$SLURM_JOB_ID"
+mkdir -p {shlex.quote(run_dir)}
+attempt_log_dir={shlex.quote(f"{run_dir}/attempts/{manifest['attempt_id']}")}
+mkdir -p "$attempt_log_dir"
+exec > >(tee -a "$attempt_log_dir/slurm-$SLURM_JOB_ID.out") \\
+     2> >(tee -a "$attempt_log_dir/slurm-$SLURM_JOB_ID.err" >&2)
+test -d {shlex.quote(source_dir)}
+test -s {shlex.quote(sif_path)}
+srun apptainer exec --nv \\
+  --bind {shlex.quote(mount_root)}:{shlex.quote(mount_root)} \\
+  --bind {shlex.quote(source_dir)}:/app \\
+  --pwd /app \\
+  {shlex.quote(sif_path)} \\
+  {command}
+"""
+
+
+def parse_accounting(output: str, *, job_id: str, run_id: str, partition: str) -> dict[str, Any]:
+    lines = [line for line in output.splitlines() if line.strip()]
+    if not lines:
+        return {
+            "run_id": run_id, "backend": "slurm", "backend_job_id": job_id,
+            "state": "UNKNOWN", "raw_state": "UNKNOWN", "partition": partition,
+            "elapsed": None, "exit_code": None,
+        }
+    fields = lines[0].split("|") + [""] * 6
+    raw = fields[3].split()[0].rstrip("+")
+    return {
+        "run_id": run_id, "backend": "slurm", "backend_job_id": job_id,
+        "state": normalize_state(raw, fields[5]), "raw_state": raw,
+        "partition": fields[2] or partition, "elapsed": fields[4] or None,
+        "exit_code": fields[5] or None,
+    }
 
 
 class WydSlurmBackend:
     kind = "slurm"
+    ssh_control_path = "/tmp/elf-experimentctl-%C"
 
     def __init__(self, services: BackendServices):
         self.s = services
+
+    def remote_exec(self, alias: str, command: str, *, check: bool = True):
+        return self.s.run_command(
+            [
+                "ssh", "-o", "BatchMode=yes", "-o", "ControlMaster=auto",
+                "-o", "ControlPersist=900", "-o", f"ControlPath={self.ssh_control_path}",
+                alias, command,
+            ],
+            check=check,
+        )
+
+    def validate(self, run: dict[str, Any]) -> None:
+        backend, storage = run["backend"], run["storage"]
+        required = {
+            "ssh_alias", "partition", "account", "qos", "gres", "time",
+            "source_dir", "sif_path", "mount_root",
+        }
+        missing = sorted(key for key in required if not backend.get(key))
+        if missing:
+            raise ValueError(f"run {run['run_id']} backend is missing: {missing}")
+        if not re.fullmatch(r"gpu:[A-Za-z0-9_-]+:[1-9][0-9]*", str(backend["gres"])):
+            raise ValueError(f"run {run['run_id']} has invalid Slurm gres: {backend['gres']!r}")
+        if not re.fullmatch(r"sha256:[0-9a-fA-F]{64}", str(run["image_id"])):
+            raise ValueError(f"run {run['run_id']} Slurm image_id must be a SIF sha256 digest")
+        for field in ("partition", "account", "qos"):
+            if not re.fullmatch(r"[A-Za-z0-9_.-]+", str(backend[field])):
+                raise ValueError(f"run {run['run_id']} has invalid Slurm {field}: {backend[field]!r}")
+        mount_root = Path(str(backend["mount_root"]))
+        if not mount_root.is_absolute():
+            raise ValueError(f"run {run['run_id']} backend.mount_root must be an absolute path")
+        for field in ("apptainer_cache_dir", "apptainer_tmp_dir"):
+            value = backend.get(field)
+            if value is not None and not Path(str(value)).is_absolute():
+                raise ValueError(f"run {run['run_id']} backend.{field} must be an absolute path")
+        for field, value in (
+            ("storage.run_dir", storage["run_dir"]),
+            ("backend.source_dir", backend["source_dir"]),
+            ("backend.sif_path", backend["sif_path"]),
+            *((f"storage.{key}", value) for key, value in storage.items() if key.endswith(("_root", "_home", "_cache"))),
+        ):
+            path = Path(str(value))
+            if not path.is_absolute() or not path.is_relative_to(mount_root):
+                raise ValueError(f"run {run['run_id']} {field} must be under declared mount_root {mount_root}")
+
+    def environment(self, campaign, run, source_id, attempt_id) -> dict[str, str]:
+        return {"QUOTA_TYPE": "normal"}
+
+    def submission_request(self, campaign, run, attempt_id) -> dict[str, Any]:
+        return {"scheduler_name": scheduler_job_name(str(run["run_id"]), attempt_id)}
+
+    def recover_submission(self, run, intent, attempt_id) -> str | None:
+        backend = run["backend"]
+        token = str(intent["submission_token"])
+        expected_name = scheduler_job_name(str(run["run_id"]), attempt_id)
+        result = self.remote_exec(
+            backend["ssh_alias"], "squeue -u $(id -un) -h -o '%i|%j|%k'", check=False
+        )
+        matches = []
+        for line in result.stdout.splitlines():
+            fields = line.split("|", 2)
+            if len(fields) == 3 and (fields[1] == expected_name or fields[2] == token):
+                matches.append(fields[0])
+        if not matches:
+            accounting = self.remote_exec(
+                backend["ssh_alias"],
+                "sacct -S now-7days -u $(id -un) -X -n -P -o JobIDRaw,JobName",
+                check=False,
+            )
+            matches = [
+                line.split("|", 1)[0] for line in accounting.stdout.splitlines()
+                if line.endswith(f"|{expected_name}") and line.split("|", 1)[0].isdigit()
+            ]
+        return matches[0] if len(matches) == 1 else None
+
+    def verify_assets(self, run, requirements, environment) -> dict[str, Any]:
+        hf_home = Path(environment["HF_HOME"])
+        datasets_cache = Path(environment["HF_DATASETS_CACHE"])
+        missing = []
+        alias = str(run["backend"]["ssh_alias"])
+        for requirement in requirements:
+            path = cache_path(requirement, hf_home, datasets_cache)
+            predicate = "-s" if requirement.kind == "file" else "-d"
+            if self.remote_exec(alias, shlex.join(["test", predicate, str(path)]), check=False).returncode:
+                missing.append({**requirement.__dict__, "path": str(path)})
+        return {"missing": missing, "verification": "remote-ssh", "verified_on": alias}
 
     def stage(self, campaign: dict[str, Any], run: dict[str, Any], source_id: str) -> bool:
         backend = run["backend"]
@@ -24,39 +196,39 @@ class WydSlurmBackend:
         if not str(backend["source_dir"]).endswith(expected_suffix):
             raise ValueError(f"source_dir must end with {expected_suffix}")
         source_marker = f"{backend['source_dir']}/.source-complete"
-        self.s.remote_exec(
+        self.remote_exec(
             backend["ssh_alias"],
-            shell_join(["mkdir", "-p", backend["source_dir"], str(Path(run["storage"]["run_dir"]).parent)]),
+            shlex.join(["mkdir", "-p", backend["source_dir"], str(Path(run["storage"]["run_dir"]).parent)]),
         )
-        staged = self.s.remote_exec(
+        staged = self.remote_exec(
             backend["ssh_alias"], f"test -f {shlex.quote(source_marker)}", check=False
         ).returncode == 0
         if not staged:
-            transport = f"ssh -o ControlMaster=auto -o ControlPersist=900 -o ControlPath={self.s.ssh_control_path}"
+            transport = f"ssh -o ControlMaster=auto -o ControlPersist=900 -o ControlPath={self.ssh_control_path}"
             self.s.run_command(
                 ["rsync", "-a", "--delete", "-e", transport,
                  "--exclude=.git/", "--exclude=outputs/", "--exclude=runs/",
                  "--exclude=checkpoints/", "--exclude=wandb/", "--exclude=*.log",
                  f"{self.s.repo_root}/", f"{backend['ssh_alias']}:{backend['source_dir']}/"]
             )
-            self.s.remote_exec(backend["ssh_alias"], shell_join(["touch", source_marker]))
+            self.remote_exec(backend["ssh_alias"], shlex.join(["touch", source_marker]))
         expected_image = str(run["image_id"])
         expected_sha = expected_image.removeprefix("sha256:")
         marker = f"{backend['sif_path']}.sha256-{expected_sha}.verified"
-        valid = self.s.remote_exec(
+        valid = self.remote_exec(
             backend["ssh_alias"],
             f"test -s {shlex.quote(backend['sif_path'])} -a -f {shlex.quote(marker)}",
             check=False,
         ).returncode == 0
         if not valid:
-            verify = self.s.remote_exec(
+            verify = self.remote_exec(
                 backend["ssh_alias"],
                 f"test -s {shlex.quote(backend['sif_path'])} && sha256sum {shlex.quote(backend['sif_path'])}",
             )
             actual_sha = verify.stdout.split()[0]
             if expected_image.startswith("sha256:") and actual_sha != expected_sha:
                 raise ValueError(f"SIF checksum mismatch: expected {expected_image}, got sha256:{actual_sha}")
-            self.s.remote_exec(backend["ssh_alias"], shell_join(["touch", marker]))
+            self.remote_exec(backend["ssh_alias"], shlex.join(["touch", marker]))
         return True
 
     def render(self, manifest: dict[str, Any]) -> str:
@@ -70,7 +242,7 @@ class WydSlurmBackend:
             f"sinfo -h -p {shlex.quote(partition)} -o '%P|%a|%l|%G'; "
             "sacctmgr -n -P show assoc where user=$(id -un) format=User,Account,Partition,QOS,DefaultQOS"
         )
-        result = self.s.remote_exec(backend["ssh_alias"], query)
+        result = self.remote_exec(backend["ssh_alias"], query)
         lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
         partition_lines = [line for line in lines if line.split("|", 1)[0].rstrip("*") == partition]
         if not partition_lines:
@@ -93,10 +265,10 @@ class WydSlurmBackend:
         backend = run["backend"]
         self.validate_live(run)
         remote_script = f"{run['storage']['run_dir']}/controller-{manifest['attempt_id']}.sbatch"
-        self.s.remote_exec(backend["ssh_alias"], shell_join(["mkdir", "-p", run["storage"]["run_dir"]]))
-        transport = f"ssh -o ControlMaster=auto -o ControlPersist=900 -o ControlPath={self.s.ssh_control_path}"
+        self.remote_exec(backend["ssh_alias"], shlex.join(["mkdir", "-p", run["storage"]["run_dir"]]))
+        transport = f"ssh -o ControlMaster=auto -o ControlPersist=900 -o ControlPath={self.ssh_control_path}"
         self.s.run_command(["rsync", "-a", "-e", transport, str(script_path), f"{backend['ssh_alias']}:{remote_script}"])
-        result = self.s.remote_exec(backend["ssh_alias"], f"sbatch --parsable {shlex.quote(remote_script)}")
+        result = self.remote_exec(backend["ssh_alias"], f"sbatch --parsable {shlex.quote(remote_script)}")
         job_id = result.stdout.strip().split(";", 1)[0]
         if not re.fullmatch(r"\d+", job_id):
             raise ValueError(f"unexpected sbatch response: {result.stdout!r}")
@@ -105,31 +277,38 @@ class WydSlurmBackend:
     def status(self, campaign, run) -> dict[str, Any]:
         record = self.s.backend_record(campaign, run)
         backend, job_id = run["backend"], str(record["backend_job_id"])
-        result = self.s.remote_exec(
+        result = self.remote_exec(
             backend["ssh_alias"],
             f"sacct -j {shlex.quote(job_id)} -X -n -P -o JobID,JobName,Partition,State,Elapsed,ExitCode",
             check=False,
         )
         lines = [line for line in result.stdout.splitlines() if line.strip()]
         if not lines:
-            queue = self.s.remote_exec(
+            queue = self.remote_exec(
                 backend["ssh_alias"], f"squeue -j {shlex.quote(job_id)} -h -o '%i|%j|%P|%T|%M|0:0'", check=False
             )
             lines = [line for line in queue.stdout.splitlines() if line.strip()]
-        return parse_accounting("\n".join(lines), job_id=job_id, run_id=run["run_id"], partition=backend["partition"])
+        status = parse_accounting("\n".join(lines), job_id=job_id, run_id=run["run_id"], partition=backend["partition"])
+        raw = status["raw_state"]
+        status["failure_class"] = (
+            "preemption" if raw == "PREEMPTED" else
+            "scheduler" if raw in {"NODE_FAIL", "BOOT_FAIL"} else
+            "resource" if raw in {"OUT_OF_MEMORY", "TIMEOUT"} else None
+        )
+        return status
 
     def cancel(self, campaign, run) -> dict[str, Any]:
         current = self.status(campaign, run)
         if current["state"] in {"SUCCEEDED", "FAILED", "PREEMPTED", "CANCELLED"}:
             return current
-        self.s.remote_exec(run["backend"]["ssh_alias"], f"scancel {shlex.quote(str(current['backend_job_id']))}")
+        self.remote_exec(run["backend"]["ssh_alias"], f"scancel {shlex.quote(str(current['backend_job_id']))}")
         return self.status(campaign, run)
 
     def collect(self, campaign, run) -> dict[str, Any]:
         backend = run["backend"]
         mirror = self.s.local_run_dir(campaign, run) / "collected_run"
         mirror.mkdir(parents=True, exist_ok=True)
-        transport = f"ssh -o ControlMaster=auto -o ControlPersist=900 -o ControlPath={self.s.ssh_control_path}"
+        transport = f"ssh -o ControlMaster=auto -o ControlPersist=900 -o ControlPath={self.ssh_control_path}"
         self.s.run_command(
             ["rsync", "-a", "--delete", "-e", transport,
              "--include=*/", "--include=manifest.yaml", "--include=status.json",
@@ -149,7 +328,7 @@ class WydSlurmBackend:
         streams: dict[str, list[str]] = {}
         for stream in ("stdout", "stderr"):
             path = f"{attempt_dir}/{stream}.log"
-            result = self.s.remote_exec(
+            result = self.remote_exec(
                 run["backend"]["ssh_alias"],
                 f"test -f {shlex.quote(path)} && tail -n {tail} {shlex.quote(path)}",
                 check=False,

@@ -22,6 +22,11 @@ defaults:
 
 profiles:
   sensecore-4gpu-spot:
+    storage:
+      data_root: /data
+      project_data_root: /data/elf
+      hf_home: /data/.cache/huggingface
+      hf_datasets_cache: /data/.cache/huggingface/datasets
     backend:
       kind: sensecore
       workspace: share-space-01e

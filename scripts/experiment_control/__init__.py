@@ -1,18 +1,15 @@
 """Reusable experiment-control primitives.
 
-The public ``scripts/experimentctl.py`` entry point remains backward compatible;
-this package contains scheduler-neutral pieces that can be tested without SSH,
-Slurm, SCO, Docker, or a GPU.
+The public ``scripts/experimentctl.py`` entry point uses these scheduler-neutral
+pieces, which can be tested without an external backend or accelerator.
 """
 
 from .runner import CommandResult, CommandRunner, SubprocessRunner
-from .states import FailureClass, normalize_sensecore_state, normalize_slurm_state
+from .states import FailureClass
 
 __all__ = [
     "CommandResult",
     "CommandRunner",
     "FailureClass",
     "SubprocessRunner",
-    "normalize_sensecore_state",
-    "normalize_slurm_state",
 ]

@@ -26,7 +26,7 @@ class CommandResult:
 
 
 class CommandRunner(Protocol):
-    """Boundary for local commands, SSH, scheduler CLIs, and test fakes."""
+    """Boundary for external commands and hermetic test fakes."""
 
     def run(
         self,

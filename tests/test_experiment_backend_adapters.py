@@ -4,10 +4,10 @@ from pathlib import Path
 from experiment_control.runner import CommandResult, SubprocessRunner
 from experiment_control.backends.wyd import WydSlurmBackend
 from experiment_control.backends.sensecore import SenseCoreBackend
+from experiment_control.metrics import parse_training_metric_line
 from experimentctl import (
     backend_services,
     materialize_run,
-    parse_training_metric_line,
     prepare_run,
     reconcile_submission,
     record_submission,
@@ -35,6 +35,7 @@ def test_slurm_status_contract_uses_injected_runner(tmp_path: Path, monkeypatch)
     campaign = slurm_campaign(tmp_path)
     run = materialize_run(campaign, campaign["runs"][0], "source-fixed")
     prepare_run(campaign, run, "source-fixed", attempt_id="attempt-001")
+    record_submission_intent(campaign, run, "attempt-001")
     record_submission(campaign, run, "attempt-001", "1234")
     fake = QueueRunner([CommandResult(("ssh",), 0, "1234|smoke-h100|h100|COMPLETED|00:01:00|0:0\n")])
     set_command_runner(fake)
@@ -144,6 +145,7 @@ def test_slurm_logs_bound_carriage_return_progress(tmp_path: Path, monkeypatch):
     campaign = slurm_campaign(tmp_path)
     run = materialize_run(campaign, campaign["runs"][0], "source-fixed")
     prepare_run(campaign, run, "source-fixed", attempt_id="attempt-001")
+    record_submission_intent(campaign, run, "attempt-001")
     record_submission(campaign, run, "attempt-001", "1234")
     fake = QueueRunner(
         [

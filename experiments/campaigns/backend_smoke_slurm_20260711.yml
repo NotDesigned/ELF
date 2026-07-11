@@ -23,6 +23,11 @@ defaults:
 
 profiles:
   wyd-common:
+    storage:
+      data_root: /data/liangluocheng
+      project_data_root: /data/liangluocheng/elf
+      hf_home: /data/liangluocheng/elf/cache/huggingface
+      hf_datasets_cache: /data/liangluocheng/elf/cache/huggingface/datasets
     backend:
       kind: slurm
       # SSH is only the login route. Compute placement remains explicit in the
@@ -33,10 +38,7 @@ profiles:
       time: "00:10:00"
       source_dir: /data/liangluocheng/elf/sources/{source_id}
       sif_path: /data/liangluocheng/elf/images/1e25f456cd26219ff89015a41b8653efb0db4444f911522802f850a791710de4.sif
-      data_root: /data/liangluocheng
-      project_data_root: /data/liangluocheng/elf
-      hf_home: /data/liangluocheng/elf/cache/huggingface
-      hf_datasets_cache: /data/liangluocheng/elf/cache/huggingface/datasets
+      mount_root: /data
   rtx5880:
     backend:
       partition: rtx5880

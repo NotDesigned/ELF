@@ -14,6 +14,8 @@ import re
 import sys
 from typing import Any, TextIO
 
+from experiment_control.backends.sensecore import normalize_state
+
 
 SECRET_ASSIGNMENT_RE = re.compile(
     r"(?i)(\b(?:secret|token|password|passwd|credential|access[_-]?key(?:[_-]?(?:id|secret))?"
@@ -26,35 +28,6 @@ SENSITIVE_QUERY_RE = re.compile(
     r"(?i)([?&](?:access[_-]?key(?:[_-]?(?:id|secret))?|api[_-]?key|secret|token|signature)=)"
     r"[^&#\s]+"
 )
-
-STATE_MAP = {
-    "WAITING": "QUEUED",
-    "INIT": "QUEUED",
-    "QUEUEING": "QUEUED",
-    "PENDING": "QUEUED",
-    "CREATING": "QUEUED",
-    "STARTING": "STARTING",
-    "RECOVERING": "STARTING",
-    "RUNNING": "RUNNING",
-    "RESTARTING": "RUNNING",
-    "SUCCEEDED": "SUCCEEDED",
-    "COMPLETED": "SUCCEEDED",
-    "SUSPENDING": "PREEMPTED",
-    "SUSPENDED": "PREEMPTED",
-    "PREEMPTED": "PREEMPTED",
-    "FAILED": "FAILED",
-    "ERROR": "FAILED",
-    "DELETING": "CANCELLED",
-    "DELETED": "CANCELLED",
-    "CANCELLED": "CANCELLED",
-    "CANCELED": "CANCELLED",
-}
-
-
-def normalize_state(value: Any) -> str:
-    """Map one raw SenseCore scheduler state to the controller vocabulary."""
-    return STATE_MAP.get(str(value or "").strip().upper(), "UNKNOWN")
-
 
 def safe_text(value: Any) -> Any:
     """Redact allowlisted string values as a second line of defense."""

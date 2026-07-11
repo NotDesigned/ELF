@@ -29,6 +29,11 @@ defaults:
 
 profiles:
   wyd-h100:
+    storage:
+      data_root: /datapool/liangluocheng
+      project_data_root: /datapool/liangluocheng/elf
+      hf_home: /datapool/liangluocheng/.cache/huggingface
+      hf_datasets_cache: /datapool/liangluocheng/.cache/huggingface/datasets
     backend:
       kind: slurm
       ssh_alias: wyd-l40s
@@ -42,10 +47,6 @@ profiles:
       apptainer_tmp_dir: /datapool/liangluocheng/elf/apptainer/tmp
       source_dir: /datapool/liangluocheng/elf/sources/{source_id}
       sif_path: /datapool/liangluocheng/elf/images/1e25f456cd26219ff89015a41b8653efb0db4444f911522802f850a791710de4.sif
-      data_root: /datapool/liangluocheng
-      project_data_root: /datapool/liangluocheng/elf
-      hf_home: /datapool/liangluocheng/.cache/huggingface
-      hf_datasets_cache: /datapool/liangluocheng/.cache/huggingface/datasets
 
 runs:
   - matrix:

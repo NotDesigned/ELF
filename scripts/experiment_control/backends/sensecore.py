@@ -3,14 +3,36 @@
 from __future__ import annotations
 
 import json
+import re
+import shlex
 import sys
+from pathlib import Path
 from typing import Any, Callable
 
 from experiment_manifest import atomic_write, utc_now
 
-from ..states import normalize_sensecore_state
 from .services import BackendServices
-from .slurm import shell_join
+
+
+def normalize_state(raw_state: str, *, cancellation_requested: bool = False) -> str:
+    raw = raw_state.upper()
+    if cancellation_requested and raw in {"SUSPENDING", "SUSPENDED", "DELETING", "DELETED"}:
+        return "CANCELLED"
+    if raw in {"WAITING", "INIT", "QUEUEING", "PENDING", "CREATING"}:
+        return "QUEUED"
+    if raw in {"STARTING", "RECOVERING"}:
+        return "STARTING"
+    if raw in {"RUNNING", "RESTARTING"}:
+        return "RUNNING"
+    if raw in {"SUCCEEDED", "COMPLETED"}:
+        return "SUCCEEDED"
+    if raw in {"SUSPENDING", "SUSPENDED"}:
+        return "PREEMPTED"
+    if raw in {"FAILED", "ERROR"}:
+        return "FAILED"
+    if raw in {"DELETING", "DELETED", "CANCELLED", "CANCELED"}:
+        return "CANCELLED"
+    return "UNKNOWN"
 
 
 class SenseCoreBackend:
@@ -20,11 +42,57 @@ class SenseCoreBackend:
         self.s = services
         self.metric_parser = metric_parser
 
+    def validate(self, run: dict[str, Any]) -> None:
+        backend = run["backend"]
+        required = {"workspace", "aec2", "worker_spec", "image", "storage_mount", "quota_type", "job_name"}
+        missing = sorted(key for key in required if not backend.get(key))
+        if missing:
+            raise ValueError(f"run {run['run_id']} backend is missing: {missing}")
+        if backend["quota_type"] != "spot":
+            raise ValueError("SenseCore runs for this account must use spot quota")
+        if not re.fullmatch(r"sha256:[0-9a-fA-F]{64}", str(run["image_id"])):
+            raise ValueError(f"run {run['run_id']} SenseCore image_id must be a registry digest")
+        image = str(backend["image"])
+        tag = image.rsplit(":", 1)[-1]
+        if tag in {"latest", "runtime", "seed"} or ":" not in image:
+            raise ValueError(f"run {run['run_id']} SenseCore image must use an immutable source-qualified tag")
+        mount_path = Path(str(backend["storage_mount"]).rsplit(":", 1)[-1])
+        if not mount_path.is_absolute():
+            raise ValueError(f"run {run['run_id']} SenseCore storage mount path must be absolute")
+        for field, value in run["storage"].items():
+            if field == "run_dir" or field.endswith(("_root", "_home", "_cache")):
+                path = Path(str(value))
+                if not path.is_relative_to(mount_path):
+                    raise ValueError(
+                        f"run {run['run_id']} storage.{field} must be under mounted path {mount_path}"
+                    )
+
+    def environment(self, campaign, run, source_id, attempt_id) -> dict[str, str]:
+        backend = run["backend"]
+        return {
+            "BACKEND_JOB_ID": str(backend["job_name"]),
+            "QUOTA_TYPE": str(backend["quota_type"]),
+            "RESOURCE_SPEC": str(backend["worker_spec"]),
+        }
+
+    def submission_request(self, campaign, run, attempt_id) -> dict[str, Any]:
+        return {"scheduler_name": str(run["backend"]["job_name"])}
+
+    def recover_submission(self, run, intent, attempt_id) -> str | None:
+        return str(run["backend"]["job_name"]) if self.find(run) else None
+
+    def verify_assets(self, run, requirements, environment) -> dict[str, Any]:
+        return {
+            "missing": None,
+            "verification": "requires-running-sensecore-worker",
+            "verified_on": None,
+        }
+
     def safe_command(self, arguments: list[str], mode: str) -> list[str]:
         safe_script = self.s.script_dir / "safe_sco.py"
-        sco = shell_join(["env", "-u", "http_proxy", "-u", "https_proxy", "-u", "all_proxy",
+        sco = shlex.join(["env", "-u", "http_proxy", "-u", "https_proxy", "-u", "all_proxy",
                           "-u", "HTTP_PROXY", "-u", "HTTPS_PROXY", "-u", "ALL_PROXY", *arguments])
-        return ["bash", "-o", "pipefail", "-c", f"{sco} | {shell_join([sys.executable, str(safe_script), mode])}"]
+        return ["bash", "-o", "pipefail", "-c", f"{sco} | {shlex.join([sys.executable, str(safe_script), mode])}"]
 
     def describe(self, run: dict[str, Any]) -> dict[str, Any]:
         backend = run["backend"]
@@ -60,7 +128,7 @@ class SenseCoreBackend:
         return False
 
     def render(self, manifest) -> str:
-        return shell_join(manifest["command"])
+        return shlex.join(manifest["command"])
 
     def _redact_error(self, text: str) -> str:
         result = self.s.run_command(
@@ -85,7 +153,7 @@ class SenseCoreBackend:
             "--worker-nodes", str(backend.get("worker_nodes", 1)),
             "--priority", str(backend.get("priority", "NORMAL")),
             "--quota-type", backend["quota_type"], "--storage-mount", backend["storage_mount"],
-            "--wait", "--command", shell_join(manifest["command"]),
+            "--wait", "--command", shlex.join(manifest["command"]),
         ]
         result = self.s.run_command(create, check=False)
         if result.returncode != 0:
@@ -99,11 +167,13 @@ class SenseCoreBackend:
         record = self.s.backend_record(campaign, run)
         summary = self.describe(run)
         marker = self.s.local_run_dir(campaign, run) / "cancel_requested.json"
+        state = normalize_state(str(summary.get("state", "")), cancellation_requested=marker.is_file())
         return {
             "run_id": run["run_id"], "backend": "sensecore",
             "backend_job_id": record["backend_job_id"],
-            "state": normalize_sensecore_state(str(summary.get("state", "")), cancellation_requested=marker.is_file()),
+            "state": state,
             "raw_state": summary.get("state"), "pool": summary.get("pool"), "spec": summary.get("spec"),
+            "failure_class": "preemption" if state == "PREEMPTED" else None,
         }
 
     def cancel(self, campaign, run) -> dict[str, Any]:

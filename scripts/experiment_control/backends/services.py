@@ -13,9 +13,7 @@ from ..runner import CommandResult
 class BackendServices:
     repo_root: Path
     script_dir: Path
-    ssh_control_path: str
     run_command: Callable[..., CommandResult]
-    remote_exec: Callable[..., CommandResult]
     local_run_dir: Callable[[dict[str, Any], dict[str, Any]], Path]
     backend_record: Callable[[dict[str, Any], dict[str, Any]], dict[str, Any]]
     summarize_run: Callable[[Path], dict[str, Any]]

@@ -202,11 +202,14 @@ from `SLURM_JOB_ID` so multiple distributed jobs can share one node safely.
 Run identity and backend:
 
 - `CONFIG`, `PROJECT_NAME`, `RUN_ID`, `ATTEMPT_ID`, `BACKEND`,
-  `BACKEND_JOB_ID`, `SENSECORE_JOB_ID`, `SOURCE_ID`, `ELF_SOURCE_ID`,
+  `BACKEND_JOB_ID`, `SOURCE_ID`, `ELF_SOURCE_ID`,
   `RUNTIME_TREE_ID`, `GIT_COMMIT`, `CAMPAIGN_ID`, `CAMPAIGN_NAME`, `IMAGE_ID`,
   `ELF_IMAGE_ID`, `QUOTA_TYPE`, `RESOURCE_SPEC`, and `MAX_INFRA_RETRIES`.
   Runtime, Git, campaign, and image identities are recorded separately so a
   campaign-only edit does not imply a new training image.
+- Direct local launches default to `BACKEND=local`, `QUOTA_TYPE=unknown`, and
+  a repository-local `.runtime` data root. Registered backends always inject
+  their explicit values and persistent storage paths.
 - `REQUIRE_IMMUTABLE_IDENTITIES` defaults to true for real runs. Set it false
   only for unrecorded local smoke tests.
 

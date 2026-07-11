@@ -126,8 +126,9 @@ as an IDE-visible docstring.
 
 ### Controller module boundaries
 
-`experimentctl.py` is the compatibility CLI and orchestration loop. Platform
-and pure-policy code is split so it can be exercised without network access:
+`experimentctl.py` is the thin CLI and backend-neutral orchestration loop.
+Platform and pure-policy code are separated so the core can be exercised
+without network access:
 
 | Module | Responsibility |
 | --- | --- |
@@ -140,9 +141,12 @@ and pure-policy code is split so it can be exercised without network access:
 | `experiment_control/backends/wyd.py` | SSH, rsync, Slurm, Apptainer staging/status/collection/cancellation. |
 | `experiment_control/backends/sensecore.py` | SCO submission/status/logging/cancellation through repository-local sanitization. |
 
-The backend registry dispatches the common `stage`, `render`, `submit`,
-`status`, `collect`, and `cancel` contract. Adding a backend does not add a new
-backend-kind branch to the CLI loop.
+The backend registry dispatches validation, platform environment resolution,
+asset verification, submission recovery, `stage`, `render`, `submit`,
+`status`, `collect`, `logs`, and `cancel`. Adding a backend does not add a new
+backend-kind branch or scheduler field to the CLI loop. Shared storage and
+launcher paths live in the backend profile's `storage` mapping; scheduler-only
+fields remain inside `backend`.
 
 ### Submission recovery
 
@@ -233,6 +237,10 @@ defaults:
   config_overrides: [epochs=1]
   storage:
     run_dir: /datapool/liangluocheng/elf/runs/{run_id}
+    data_root: /datapool/liangluocheng
+    project_data_root: /datapool/liangluocheng/elf
+    hf_home: /datapool/liangluocheng/.cache/huggingface
+    hf_datasets_cache: /datapool/liangluocheng/.cache/huggingface/datasets
 
 profiles:
   wyd-h100:
@@ -247,10 +255,6 @@ profiles:
       mount_root: /datapool
       source_dir: /datapool/liangluocheng/elf/sources/{source_id}
       sif_path: /datapool/liangluocheng/elf/images/<SIF_SHA256>.sif
-      data_root: /datapool/liangluocheng
-      project_data_root: /datapool/liangluocheng/elf
-      hf_home: /datapool/liangluocheng/.cache/huggingface
-      hf_datasets_cache: /datapool/liangluocheng/.cache/huggingface/datasets
 
 runs:
   - matrix:

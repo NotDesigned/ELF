@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Prepare, submit, inspect, and collect ELF campaigns across SenseCore and Slurm."""
+"""Prepare, submit, inspect, and collect ELF campaigns through registered backends."""
 
 from __future__ import annotations
 
@@ -7,7 +7,6 @@ import argparse
 from dataclasses import asdict
 import json
 import os
-import re
 import sys
 from pathlib import Path
 from typing import Any, Iterable
@@ -32,19 +31,17 @@ from experiment_manifest import (  # noqa: E402
     utc_now,
 )
 from experiment_campaign import load_and_resolve_campaign  # noqa: E402
-from experiment_assets import cache_path, plan_assets  # noqa: E402
+from experiment_assets import plan_assets  # noqa: E402
 from experiment_overrides import operational_overrides  # noqa: E402
 from experiment_policy import decide_next_action  # noqa: E402
-from experiment_control.backends.base import BackendRegistry  # noqa: E402
+from experiment_control.backends import build_registry  # noqa: E402
 from experiment_control.backends.services import BackendServices  # noqa: E402
-from experiment_control.backends.wyd import WydSlurmBackend  # noqa: E402
-from experiment_control.backends.sensecore import SenseCoreBackend as SenseCoreAdapter  # noqa: E402
-from experiment_control.backends.slurm import scheduler_job_name, shell_join  # noqa: E402
 from experiment_control.runner import (  # noqa: E402
     CommandResult,
     CommandRunner,
     SubprocessRunner,
 )
+from experiment_control.metrics import parse_training_metric_line  # noqa: E402
 from summarize_experiments import summarize_run  # noqa: E402
 
 
@@ -65,7 +62,6 @@ SAFE_ENV_KEYS = {
     "USE_COMPILE",
     "USE_WANDB",
 }
-SSH_CONTROL_PATH = "/tmp/elf-experimentctl-%C"
 _COMMAND_RUNNER: CommandRunner = SubprocessRunner()
 
 
@@ -132,8 +128,10 @@ def validate_run(run: Any) -> None:
     if not IDENTITY_RE.fullmatch(str(run["run_id"])):
         raise ValueError(f"invalid run_id: {run['run_id']!r}")
     backend = run["backend"]
-    if not isinstance(backend, dict) or backend.get("kind") not in {"sensecore", "slurm"}:
-        raise ValueError(f"run {run['run_id']} backend.kind must be sensecore or slurm")
+    if not isinstance(backend, dict) or backend.get("kind") not in BACKENDS.kinds:
+        raise ValueError(
+            f"run {run['run_id']} backend.kind must be one of {sorted(BACKENDS.kinds)}"
+        )
     env = run.get("env", {})
     if not isinstance(env, dict):
         raise ValueError(f"run {run['run_id']} env must be a mapping")
@@ -144,53 +142,21 @@ def validate_run(run: Any) -> None:
         if "\n" in str(value) or "\x00" in str(value):
             raise ValueError(f"run {run['run_id']} env values must be single-line text")
     storage = run["storage"]
-    if not isinstance(storage, dict) or not storage.get("run_dir"):
-        raise ValueError(f"run {run['run_id']} storage.run_dir is required")
+    required_storage = {
+        "run_dir", "data_root", "project_data_root", "hf_home", "hf_datasets_cache"
+    }
+    if not isinstance(storage, dict):
+        raise ValueError(f"run {run['run_id']} storage must be a mapping")
+    missing_storage = sorted(key for key in required_storage if not storage.get(key))
+    if missing_storage:
+        raise ValueError(f"run {run['run_id']} storage is missing: {missing_storage}")
+    for field in required_storage:
+        if not Path(str(storage[field])).is_absolute():
+            raise ValueError(f"run {run['run_id']} storage.{field} must be an absolute path")
     for value in [*backend.values(), *storage.values()]:
         if isinstance(value, str) and ("\n" in value or "\x00" in value):
             raise ValueError(f"run {run['run_id']} backend/storage values must be single-line text")
-    if backend["kind"] == "slurm":
-        required = {
-            "ssh_alias", "partition", "account", "qos", "gres", "time", "source_dir", "sif_path",
-            "data_root", "project_data_root", "hf_home", "hf_datasets_cache",
-        }
-    else:
-        required = {"workspace", "aec2", "worker_spec", "image", "storage_mount", "quota_type"}
-        if backend.get("quota_type") != "spot":
-            raise ValueError("SenseCore runs for this account must use spot quota")
-        image = str(backend.get("image", ""))
-        tag = image.rsplit(":", 1)[-1]
-        if tag in {"latest", "runtime", "seed"} or ":" not in image:
-            raise ValueError(f"run {run['run_id']} SenseCore image must use an immutable source-qualified tag")
-    missing = sorted(key for key in required if not backend.get(key))
-    if missing:
-        raise ValueError(f"run {run['run_id']} backend is missing: {missing}")
-    if backend["kind"] == "slurm" and not re.fullmatch(r"gpu:[A-Za-z0-9_-]+:[1-9][0-9]*", backend["gres"]):
-        raise ValueError(f"run {run['run_id']} has invalid Slurm gres: {backend['gres']!r}")
-    if backend["kind"] == "slurm" and not re.fullmatch(r"sha256:[0-9a-fA-F]{64}", str(run["image_id"])):
-        raise ValueError(f"run {run['run_id']} Slurm image_id must be a SIF sha256 digest")
-    if backend["kind"] == "slurm":
-        for field in ("mount_root", "apptainer_cache_dir", "apptainer_tmp_dir"):
-            value = backend.get(field)
-            if value is not None and not Path(str(value)).is_absolute():
-                raise ValueError(f"run {run['run_id']} backend.{field} must be an absolute path")
-        mount_root = Path(str(backend.get("mount_root", "/data")))
-        for field, value in (
-            ("storage.run_dir", storage["run_dir"]),
-            ("backend.source_dir", backend["source_dir"]),
-            ("backend.sif_path", backend["sif_path"]),
-            ("backend.project_data_root", backend["project_data_root"]),
-            ("backend.hf_home", backend["hf_home"]),
-            ("backend.hf_datasets_cache", backend["hf_datasets_cache"]),
-        ):
-            path = Path(str(value))
-            if not path.is_absolute() or not path.is_relative_to(mount_root):
-                raise ValueError(
-                    f"run {run['run_id']} {field} must be under declared mount_root {mount_root}"
-                )
-    for field in ("partition", "account", "qos"):
-        if backend["kind"] == "slurm" and not re.fullmatch(r"[A-Za-z0-9_.-]+", str(backend[field])):
-            raise ValueError(f"run {run['run_id']} has invalid Slurm {field}: {backend[field]!r}")
+    BACKENDS.get(str(backend["kind"])).validate(run)
 
 
 def source_identity(campaign: dict[str, Any]) -> str:
@@ -225,7 +191,7 @@ def materialize_run(campaign: dict[str, Any], run: dict[str, Any], identity: str
     """Expand stable campaign placeholders in a copied run mapping.
 
     Supported placeholders are ``{source_id}``, ``{run_id}``, ``{project}``,
-    and ``{campaign}``. This lets immutable Slurm source paths be derived only
+    and ``{campaign}``. This lets immutable backend source paths be derived only
     after the dirty-tree identity has been computed.
     """
     values = {
@@ -262,13 +228,11 @@ def frozen_source_identity(
     campaign: dict[str, Any], run: dict[str, Any], fallback: str
 ) -> str:
     """Return a prepared run's frozen source identity, or a supplied fallback."""
-    local_dir = local_run_dir(campaign, run)
-    for name in ("manifest.yaml", "control_manifest.yaml"):
-        manifest_path = local_dir / name
-        if manifest_path.is_file():
-            payload = yaml.safe_load(manifest_path.read_text(encoding="utf-8")) or {}
-            if payload.get("source_id"):
-                return str(payload["source_id"])
+    manifest_path = local_run_dir(campaign, run) / "manifest.yaml"
+    if manifest_path.is_file():
+        payload = yaml.safe_load(manifest_path.read_text(encoding="utf-8")) or {}
+        if payload.get("source_id"):
+            return str(payload["source_id"])
     return fallback
 
 
@@ -276,14 +240,15 @@ def command_environment(
     campaign: dict[str, Any], run: dict[str, Any], source_id: str, attempt_id: str
 ) -> dict[str, str]:
     """Build the reviewed non-secret environment passed to the run launcher."""
-    backend = run["backend"]
+    backend = BACKENDS.get(str(run["backend"]["kind"]))
+    storage = run["storage"]
     env = {str(key): str(value) for key, value in run.get("env", {}).items()}
     env.update(
         {
             "PROJECT_NAME": str(campaign["project"]),
             "RUN_ID": str(run["run_id"]),
             "ATTEMPT_ID": attempt_id,
-            "BACKEND": str(backend["kind"]),
+            "BACKEND": backend.kind,
             "SOURCE_ID": source_id,
             "RUNTIME_TREE_ID": source_id,
             "GIT_COMMIT": str(campaign.get("git_commit") or "unknown"),
@@ -292,32 +257,23 @@ def command_environment(
             "IMAGE_ID": str(run["image_id"]),
             "OUTPUT_DIR": str(run["storage"]["run_dir"]),
             "NGPU": str(run.get("resources", {}).get("gpus", 1)),
+            "DATA_ROOT": str(storage["data_root"]),
+            "PROJECT_DATA_ROOT": str(storage["project_data_root"]),
+            "HF_HOME": str(storage["hf_home"]),
+            "HF_DATASETS_CACHE": str(storage["hf_datasets_cache"]),
         }
     )
-    if backend["kind"] == "sensecore":
-        env.update(
-            {
-                "BACKEND_JOB_ID": str(backend["job_name"]),
-                "QUOTA_TYPE": str(backend["quota_type"]),
-                "RESOURCE_SPEC": str(backend["worker_spec"]),
-            }
-        )
-    else:
-        env["QUOTA_TYPE"] = "normal"
-        project_root = str(backend["project_data_root"])
-        env.update(
-            {
-                "DATA_ROOT": str(backend["data_root"]),
-                "PROJECT_DATA_ROOT": project_root,
-                "HF_HOME": str(backend["hf_home"]),
-                "HF_DATASETS_CACHE": str(backend["hf_datasets_cache"]),
-                "CHECKPOINT_ROOT": f"{project_root}/checkpoints",
-                "ELF_B_OWT_CHECKPOINT": f"{project_root}/checkpoints/ELF-B-owt-torch/checkpoint_95085",
-                "SAVE_DIR": f"{project_root}/saved_models",
-                "WANDB_CACHE_DIR": f"{project_root}/wandb_cache",
-                "WANDB_DIR": f"{project_root}/wandb",
-            }
-        )
+    project_root = str(storage["project_data_root"])
+    env.update(
+        {
+            "CHECKPOINT_ROOT": f"{project_root}/checkpoints",
+            "ELF_B_OWT_CHECKPOINT": f"{project_root}/checkpoints/ELF-B-owt-torch/checkpoint_95085",
+            "SAVE_DIR": f"{project_root}/saved_models",
+            "WANDB_CACHE_DIR": f"{project_root}/wandb_cache",
+            "WANDB_DIR": f"{project_root}/wandb",
+        }
+    )
+    env.update(backend.environment(campaign, run, source_id, attempt_id))
     return env
 
 
@@ -349,9 +305,6 @@ def prepare_run(
     """Freeze local control metadata before any scheduler mutation occurs."""
     local_dir = local_run_dir(campaign, run)
     manifest_path = local_dir / "manifest.yaml"
-    legacy_manifest_path = local_dir / "control_manifest.yaml"
-    if not manifest_path.exists() and legacy_manifest_path.is_file() and not legacy_manifest_path.is_symlink():
-        legacy_manifest_path.replace(manifest_path)
     remote_run_dir = str(run["storage"]["run_dir"])
     overrides = resolved_run_overrides(run, remote_run_dir)
     resolved = resolved_config(str(run["config"]), overrides)
@@ -387,16 +340,10 @@ def prepare_run(
     else:
         atomic_write(manifest_path, manifest, yaml_format=True)
         base_manifest = manifest
-    if not legacy_manifest_path.exists():
-        legacy_manifest_path.symlink_to(manifest_path.name)
-
     effective = dict(base_manifest)
     effective["attempt_id"] = attempt_id
     effective["command"] = sanitize_command(command)
     attempt_path = local_dir / "attempts" / attempt_id / "attempt.yaml"
-    legacy_attempt_path = attempt_path.with_name("control_attempt.yaml")
-    if not attempt_path.exists() and legacy_attempt_path.is_file() and not legacy_attempt_path.is_symlink():
-        legacy_attempt_path.replace(attempt_path)
     if attempt_path.exists():
         previous_attempt = yaml.safe_load(attempt_path.read_text(encoding="utf-8"))
         if previous_attempt != effective:
@@ -414,8 +361,6 @@ def prepare_run(
                 "payload": {"remote_run_dir": remote_run_dir},
             },
         )
-    if not legacy_attempt_path.exists():
-        legacy_attempt_path.symlink_to(attempt_path.name)
     status_path = local_dir / "status.json"
     if not status_path.exists():
         atomic_write(
@@ -430,21 +375,11 @@ def record_submission(
 ) -> None:
     """Atomically record scheduler acceptance in controller-owned metadata."""
     local_dir = local_run_dir(campaign, run)
-    backend_payload = {
-        "backend": run["backend"]["kind"],
-        "backend_job_id": backend_job_id,
-        "attempt_id": attempt_id,
-    }
     store = ExperimentStateStore(local_dir)
-    if store.read_submission(attempt_id) is None:
-        record_submission_intent(campaign, run, attempt_id)
     store.reconcile_submission(
         project=str(campaign["project"]), run_id=str(run["run_id"]),
         attempt_id=attempt_id, backend_job_id=backend_job_id, state=RunState.QUEUED,
     )
-    # Attempt-local mirror remains for old readers; the canonical scheduler
-    # identity is the state store's root backend.json/submission.json.
-    atomic_write(local_dir / "attempts" / attempt_id / "backend.json", backend_payload)
 
 
 def record_submission_intent(
@@ -453,24 +388,14 @@ def record_submission_intent(
     """Durably record scheduler mutation intent before crossing the API boundary."""
     local_dir = local_run_dir(campaign, run)
     token = f"{campaign['campaign']}/{run['run_id']}/{attempt_id}"
+    backend = BACKENDS.get(str(run["backend"]["kind"]))
+    request = {"submission_token": token}
+    request.update(backend.submission_request(campaign, run, attempt_id))
     return ExperimentStateStore(local_dir).begin_submission(
         project=str(campaign["project"]), run_id=str(run["run_id"]),
         attempt_id=attempt_id, backend=str(run["backend"]["kind"]),
-        request={
-            "submission_token": token,
-            "scheduler_name": run["backend"].get("job_name", run["run_id"]),
-        },
+        request=request,
     )
-
-
-def pending_submission_intent(
-    campaign: dict[str, Any], run: dict[str, Any], attempt_id: str
-) -> dict[str, Any] | None:
-    payload = ExperimentStateStore(local_run_dir(campaign, run)).read_submission(attempt_id)
-    if payload and payload.get("state") == "SUBMITTING":
-        # Compatibility with the original controller helper.
-        return {**payload, **payload.get("request", {})}
-    return None
 
 
 def reconcile_submission(
@@ -478,43 +403,17 @@ def reconcile_submission(
 ) -> str | None:
     """Recover a scheduler identity after acceptance/local-record crash."""
     local_dir = local_run_dir(campaign, run)
-    record_path = local_dir / "attempts" / attempt_id / "backend.json"
-    if record_path.is_file():
-        return str(json.loads(record_path.read_text(encoding="utf-8"))["backend_job_id"])
     root_record = local_dir / "backend.json"
     if root_record.is_file():
         payload = json.loads(root_record.read_text(encoding="utf-8"))
         if payload.get("backend_job_id") and payload.get("attempt_id") == attempt_id:
-            atomic_write(record_path, payload)
             return str(payload["backend_job_id"])
-    intent = pending_submission_intent(campaign, run, attempt_id)
-    if not intent:
+    submission = ExperimentStateStore(local_dir).read_submission(attempt_id)
+    if not submission or submission.get("state") != "SUBMITTING":
         return None
-    backend = run["backend"]
-    if backend["kind"] == "sensecore":
-        matches = SenseCoreAdapter(backend_services(), parse_training_metric_line).find(run)
-        job_id = backend["job_name"] if matches else None
-    else:
-        token = str(intent["submission_token"])
-        expected_name = scheduler_job_name(str(run["run_id"]), attempt_id)
-        query = "squeue -u $(id -un) -h -o '%i|%j|%k'"
-        result = remote_exec(backend["ssh_alias"], query, check=False)
-        matches = []
-        for line in result.stdout.splitlines():
-            fields = line.split("|", 2)
-            if len(fields) == 3 and (fields[1] == expected_name or fields[2] == token):
-                matches.append(fields[0])
-        if not matches:
-            accounting = remote_exec(
-                backend["ssh_alias"],
-                "sacct -S now-7days -u $(id -un) -X -n -P -o JobIDRaw,JobName",
-                check=False,
-            )
-            matches = [
-                line.split("|", 1)[0] for line in accounting.stdout.splitlines()
-                if line.endswith(f"|{expected_name}") and line.split("|", 1)[0].isdigit()
-            ]
-        job_id = matches[0] if len(matches) == 1 else None
+    intent = {**submission, **submission.get("request", {})}
+    backend = BACKENDS.get(str(run["backend"]["kind"]))
+    job_id = backend.recover_submission(run, intent, attempt_id)
     if job_id:
         record_submission(campaign, run, attempt_id, str(job_id))
         return str(job_id)
@@ -525,38 +424,23 @@ def ensure_attempt_not_submitted(
     campaign: dict[str, Any], run: dict[str, Any], attempt_id: str
 ) -> None:
     """Reject a second scheduler mutation for an already submitted attempt."""
-    path = local_run_dir(campaign, run) / "attempts" / attempt_id / "backend.json"
-    if path.exists():
-        payload = json.loads(path.read_text(encoding="utf-8"))
+    submission = ExperimentStateStore(local_run_dir(campaign, run)).read_submission(attempt_id)
+    if submission and submission.get("backend_job_id"):
         raise FileExistsError(
-            f"attempt {attempt_id} already has backend job {payload.get('backend_job_id')}; "
+            f"attempt {attempt_id} already has backend job {submission.get('backend_job_id')}; "
             "use a new attempt ID"
         )
-    intent = pending_submission_intent(campaign, run, attempt_id)
-    if intent:
+    if submission and submission.get("state") == "SUBMITTING":
         raise RuntimeError(
             f"attempt {attempt_id} has an unresolved submission intent; run status to reconcile "
             "before creating another scheduler job"
         )
 
 
-def remote_exec(alias: str, remote_command: str, *, check: bool = True) -> CommandResult:
-    """Execute through a configured SSH alias and reuse a bounded master socket."""
-    return run_command(
-        [
-            "ssh", "-o", "BatchMode=yes", "-o", "ControlMaster=auto",
-            "-o", "ControlPersist=900", "-o", f"ControlPath={SSH_CONTROL_PATH}",
-            alias, remote_command,
-        ],
-        check=check,
-    )
-
-
 def backend_services() -> BackendServices:
     """Inject controller IO boundaries into platform-specific adapters."""
     return BackendServices(
-        repo_root=REPO_ROOT, script_dir=SCRIPT_DIR, ssh_control_path=SSH_CONTROL_PATH,
-        run_command=run_command, remote_exec=remote_exec, local_run_dir=local_run_dir,
+        repo_root=REPO_ROOT, script_dir=SCRIPT_DIR, run_command=run_command, local_run_dir=local_run_dir,
         backend_record=backend_record, summarize_run=summarize_run,
     )
 
@@ -592,31 +476,6 @@ def update_observed_status(campaign: dict[str, Any], run: dict[str, Any], status
     )
 
 
-def parse_training_metric_line(line: str) -> dict[str, Any] | None:
-    """Parse one rank-zero ``Step N`` log line into a structured metric record."""
-    match = re.search(r"Step\s+(\d+):\s+(.*)$", line)
-    if not match:
-        return None
-    record: dict[str, Any] = {"step": int(match.group(1))}
-    key_map = {
-        "loss": "train_loss",
-        "l2": "train_l2_loss",
-        "ce": "train_ce_loss",
-        "plan": "train_plan_loss",
-        "plan_aux": "train_plan_aux_loss",
-        "emb_var": "train_plan_emb_batch_var",
-        "pred_var": "train_plan_pred_batch_var",
-        "emb_norm": "train_plan_emb_norm",
-        "pred_norm": "train_plan_pred_norm",
-        "lr": "lr",
-        "steps/sec": "steps_per_sec",
-    }
-    for key, value in re.findall(r"([A-Za-z0-9_/]+)=([-+0-9.eE]+)", match.group(2)):
-        if key in key_map:
-            record[key_map[key]] = float(value)
-    return record
-
-
 def write_local_collection(campaign: dict[str, Any], run: dict[str, Any], summary: dict[str, Any]) -> None:
     """Persist the latest collected scientific/process observation locally."""
     atomic_write(local_run_dir(campaign, run) / "collection.json", summary)
@@ -632,10 +491,7 @@ def annotate_collection(
     return annotated
 
 
-BACKENDS = BackendRegistry(
-    WydSlurmBackend(backend_services()),
-    SenseCoreAdapter(backend_services(), parse_training_metric_line),
-)
+BACKENDS = build_registry(backend_services(), parse_training_metric_line)
 
 
 def unsubmitted_status(campaign: dict[str, Any], run: dict[str, Any]) -> dict[str, Any]:
@@ -776,30 +632,7 @@ def main(argv: list[str] | None = None) -> int:
             }
             if args.command == "assets-verify":
                 env = command_environment(campaign, run, identity, args.attempt_id)
-                hf_home = Path(env.get("HF_HOME", "/data/.cache/huggingface"))
-                datasets_cache = Path(env.get("HF_DATASETS_CACHE", str(hf_home / "datasets")))
-                if backend_kind == "slurm":
-                    missing = []
-                    alias = str(run["backend"]["ssh_alias"])
-                    for requirement in requirements:
-                        path = cache_path(requirement, hf_home, datasets_cache)
-                        predicate = "-s" if requirement.kind == "file" else "-d"
-                        check = remote_exec(
-                            alias, shell_join(["test", predicate, str(path)]), check=False
-                        )
-                        if check.returncode != 0:
-                            missing.append({**asdict(requirement), "path": str(path)})
-                    result.update(
-                        {"missing": missing, "verification": "remote-ssh", "verified_on": alias}
-                    )
-                else:
-                    result.update(
-                        {
-                            "missing": None,
-                            "verification": "requires-running-sensecore-worker",
-                            "verified_on": None,
-                        }
-                    )
+                result.update(backend_adapter.verify_assets(run, requirements, env))
             outputs.append(result)
     print(json.dumps(outputs, ensure_ascii=False, indent=2, sort_keys=True))
     return 0

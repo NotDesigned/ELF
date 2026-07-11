@@ -29,6 +29,11 @@ defaults:
 
 profiles:
   wyd-l40s:
+    storage:
+      data_root: /data/liangluocheng
+      project_data_root: /data/liangluocheng/elf
+      hf_home: /data/liangluocheng/elf/cache/huggingface
+      hf_datasets_cache: /data/liangluocheng/elf/cache/huggingface/datasets
     backend:
       kind: slurm
       ssh_alias: wyd-l40s
@@ -37,12 +42,9 @@ profiles:
       qos: normal
       gres: gpu:l40s:4
       time: "24:00:00"
+      mount_root: /data
       source_dir: /data/liangluocheng/elf/sources/{source_id}
       sif_path: /data/liangluocheng/elf/images/1e25f456cd26219ff89015a41b8653efb0db4444f911522802f850a791710de4.sif
-      data_root: /data/liangluocheng
-      project_data_root: /data/liangluocheng/elf
-      hf_home: /data/liangluocheng/elf/cache/huggingface
-      hf_datasets_cache: /data/liangluocheng/elf/cache/huggingface/datasets
 
 runs:
   - matrix:

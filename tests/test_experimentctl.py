@@ -13,10 +13,11 @@ from experimentctl import (
     load_campaign,
     materialize_run,
     prepare_run,
-    parse_training_metric_line,
     record_submission,
+    record_submission_intent,
 )
-from experiment_control.backends.slurm import render_job
+from experiment_control.backends.wyd import render_job
+from experiment_control.metrics import parse_training_metric_line
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -38,7 +39,13 @@ def slurm_campaign(tmp_path: Path) -> dict:
                 "config_overrides": ["epochs=1", "save_freq=0.1"],
                 "image_id": "sha256:" + "a" * 64,
                 "resources": {"gpus": 1, "cpus": 8},
-                "storage": {"run_dir": "/data/liangluocheng/elf/runs/smoke-h100"},
+                "storage": {
+                    "run_dir": "/data/liangluocheng/elf/runs/smoke-h100",
+                    "data_root": "/data/liangluocheng",
+                    "project_data_root": "/data/liangluocheng/elf",
+                    "hf_home": "/data/liangluocheng/elf/cache/huggingface",
+                    "hf_datasets_cache": "/data/liangluocheng/elf/cache/huggingface/datasets",
+                },
                 "env": {"BATCH_SIZE": "4", "LOG_FREQ": "10"},
                 "backend": {
                     "kind": "slurm",
@@ -48,12 +55,9 @@ def slurm_campaign(tmp_path: Path) -> dict:
                     "qos": "normal",
                     "gres": "gpu:h100:1",
                     "time": "00:10:00",
+                    "mount_root": "/data",
                     "source_dir": "/data/liangluocheng/elf/sources/{source_id}",
                     "sif_path": "/data/liangluocheng/elf/images/test.sif",
-                    "data_root": "/data/liangluocheng",
-                    "project_data_root": "/data/liangluocheng/elf",
-                    "hf_home": "/data/liangluocheng/elf/cache/huggingface",
-                    "hf_datasets_cache": "/data/liangluocheng/elf/cache/huggingface/datasets",
                 },
             }
         ],
@@ -95,13 +99,17 @@ def test_render_supports_datapool_storage_mount(tmp_path, monkeypatch):
             "apptainer_tmp_dir": "/datapool/liangluocheng/elf/apptainer/tmp",
             "source_dir": "/datapool/liangluocheng/elf/sources/{source_id}",
             "sif_path": "/datapool/liangluocheng/elf/images/test.sif",
+        }
+    )
+    campaign["runs"][0]["storage"].update(
+        {
+            "run_dir": "/datapool/liangluocheng/elf/runs/smoke-h100",
             "data_root": "/datapool/liangluocheng",
             "project_data_root": "/datapool/liangluocheng/elf",
             "hf_home": "/datapool/liangluocheng/.cache/huggingface",
             "hf_datasets_cache": "/datapool/liangluocheng/.cache/huggingface/datasets",
         }
     )
-    campaign["runs"][0]["storage"]["run_dir"] = "/datapool/liangluocheng/elf/runs/smoke-h100"
     run = materialize_run(campaign, campaign["runs"][0], "source-fixed")
     manifest = prepare_run(campaign, run, "source-fixed", attempt_id="attempt-001")
     script = render_job(manifest)
@@ -168,7 +176,7 @@ def test_new_attempt_keeps_run_manifest_and_gets_its_own_command(tmp_path, monke
     second = prepare_run(campaign, run, "source-fixed", attempt_id="attempt-002")
     assert second["attempt_id"] == "attempt-002"
     assert "ATTEMPT_ID=attempt-002" in second["command"]
-    assert (tmp_path / "local/controller-test/smoke-h100/attempts/attempt-002/control_attempt.yaml").is_file()
+    assert (tmp_path / "local/controller-test/smoke-h100/attempts/attempt-002/attempt.yaml").is_file()
 
 
 def test_submitted_attempt_cannot_be_submitted_twice(tmp_path, monkeypatch):
@@ -176,6 +184,7 @@ def test_submitted_attempt_cannot_be_submitted_twice(tmp_path, monkeypatch):
     campaign = slurm_campaign(tmp_path)
     run = materialize_run(campaign, campaign["runs"][0], "source-fixed")
     prepare_run(campaign, run, "source-fixed", attempt_id="attempt-001")
+    record_submission_intent(campaign, run, "attempt-001")
     record_submission(campaign, run, "attempt-001", "1234")
     with pytest.raises(FileExistsError, match="already has backend job 1234"):
         ensure_attempt_not_submitted(campaign, run, "attempt-001")
