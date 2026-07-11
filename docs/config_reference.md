@@ -194,6 +194,8 @@ bash scripts/launch.sh <train|eval> <config.yml> [Python flags]
 `NODE_RANK`, `MASTER_ADDR`, and `MASTER_PORT`. GPU detection also recognizes
 `NPROC_PER_NODE`, `LOCAL_WORLD_SIZE`, `NUM_GPUS`, `GPU_COUNT`,
 `CUDA_VISIBLE_DEVICES`, and `NVIDIA_VISIBLE_DEVICES`.
+When `MASTER_PORT` is unset in Slurm, the launcher derives a deterministic port
+from `SLURM_JOB_ID` so multiple distributed jobs can share one node safely.
 
 ## Cloud launcher environment
 

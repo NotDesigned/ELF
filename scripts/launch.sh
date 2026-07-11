@@ -69,7 +69,15 @@ export NGPU
 NNODES=${NNODES:-1}
 NODE_RANK=${NODE_RANK:-0}
 MASTER_ADDR=${MASTER_ADDR:-127.0.0.1}
-MASTER_PORT=${MASTER_PORT:-29500}
+if [[ -z "${MASTER_PORT:-}" ]]; then
+    # Independent Slurm jobs can share one node.  Using torchrun's default
+    # port for every job makes concurrent launches race on 29500.
+    if [[ "${SLURM_JOB_ID:-}" =~ ^[0-9]+$ ]]; then
+        MASTER_PORT=$((20000 + SLURM_JOB_ID % 20000))
+    else
+        MASTER_PORT=29500
+    fi
+fi
 
 export PYTHONPATH="$(pwd)/src:${PYTHONPATH:-}"
 
@@ -77,7 +85,7 @@ if [[ "$NGPU" == "1" && "$NNODES" == "1" ]]; then
     echo "[launch] single-process: python $ENTRY --config $CONFIG ${EXTRA[*]}"
     exec python "$ENTRY" --config "$CONFIG" "${EXTRA[@]}"
 else
-    echo "[launch] torchrun nproc_per_node=$NGPU nnodes=$NNODES node_rank=$NODE_RANK $ENTRY"
+    echo "[launch] torchrun nproc_per_node=$NGPU nnodes=$NNODES node_rank=$NODE_RANK master=${MASTER_ADDR}:${MASTER_PORT} $ENTRY"
     exec torchrun \
         --nproc_per_node="$NGPU" \
         --nnodes="$NNODES" \
