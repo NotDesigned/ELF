@@ -3,7 +3,7 @@ from pathlib import Path
 
 from experiment_control.runner import CommandResult, SubprocessRunner
 from experiment_control.backends.wyd import WydSlurmBackend
-from experiment_control.projects.elf import ElfProjectAdapter
+from experiment_projects.elf import ElfProjectAdapter
 from experiment_control.backends.sensecore import SenseCoreBackend
 from experimentctl import (
     backend_services,
@@ -28,6 +28,66 @@ class QueueRunner:
         if kwargs.get("check", True):
             result.check_returncode()
         return result
+
+
+def test_sensecore_preflight_checks_cli_and_sanitized_workspace_access():
+    run = {
+        "run_id": "sensecore-preflight",
+        "backend": {
+            "kind": "sensecore", "workspace": "workspace",
+            "job_name": "sensecore-preflight",
+        },
+    }
+    fake = QueueRunner([
+        CommandResult(("sco-version",), 0, "v1.2.0\n"),
+        CommandResult(("safe-list",), 0, "[]\n"),
+    ])
+    set_command_runner(fake)
+    try:
+        report = SenseCoreBackend(backend_services()).preflight(run, scope="submit")
+    finally:
+        set_command_runner(SubprocessRunner())
+    assert report.ready is True
+    assert [check.name for check in report.checks] == ["sco-cli", "workspace-access"]
+
+
+def test_slurm_preflight_checks_tools_live_resources_and_storage(tmp_path: Path):
+    campaign = slurm_campaign(tmp_path)
+    run = materialize_run(campaign, campaign["runs"][0], "source-fixed")
+    fake = QueueRunner([
+        CommandResult(("ssh-version",), 0),
+        CommandResult(("rsync-version",), 0),
+        CommandResult(
+            ("slurm-live",), 0,
+            "h100|up|3-00:00:00|gpu:h100:8\nuser|lab||normal|normal\n",
+        ),
+        CommandResult(("runtime-storage",), 0),
+    ])
+    set_command_runner(fake)
+    try:
+        report = WydSlurmBackend(backend_services()).preflight(run, scope="stage")
+    finally:
+        set_command_runner(SubprocessRunner())
+    assert report.ready is True
+    assert [check.name for check in report.checks] == [
+        "ssh-cli", "rsync-cli", "slurm-access", "runtime-storage",
+    ]
+
+
+def test_slurm_preflight_fails_closed_before_remote_access(tmp_path: Path):
+    campaign = slurm_campaign(tmp_path)
+    run = materialize_run(campaign, campaign["runs"][0], "source-fixed")
+    fake = QueueRunner([
+        CommandResult(("ssh-version",), 127),
+        CommandResult(("rsync-version",), 0),
+    ])
+    set_command_runner(fake)
+    try:
+        report = WydSlurmBackend(backend_services()).preflight(run, scope="submit")
+    finally:
+        set_command_runner(SubprocessRunner())
+    assert report.ready is False
+    assert len(fake.commands) == 2
 
 
 def test_slurm_status_contract_uses_injected_runner(tmp_path: Path, monkeypatch):

@@ -1,4 +1,6 @@
 import json
+import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -17,11 +19,26 @@ from experimentctl import (
     record_submission_intent,
 )
 from experiment_control.backends.wyd import render_job
-from experiment_control.projects.elf import parse_training_metric_line
+from experiment_projects.elf import parse_training_metric_line
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 CONFIG = "src/configs/training_configs/ablations/owt_elfb/tier0_0_pure_elf_len256.yml"
+
+
+def test_preflight_cli_returns_nonzero_when_a_required_tool_is_unavailable():
+    env = os.environ.copy()
+    env["EXPERIMENTCTL_SSH_BIN"] = "/bin/false"
+    result = subprocess.run(
+        [
+            sys.executable, "scripts/experimentctl.py",
+            "experiments/campaigns/backend_smoke_slurm_20260711.yml",
+            "preflight", "--run", "elf-smoke-slurm-l40s-0711-1642",
+        ],
+        cwd=REPO_ROOT, env=env, text=True, capture_output=True, check=False,
+    )
+    assert result.returncode == 1
+    assert '"ready": false' in result.stdout
 
 
 def slurm_campaign(tmp_path: Path) -> dict:

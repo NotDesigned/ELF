@@ -94,6 +94,7 @@ and exposes the same operations for SenseCore and WYD Slurm:
 
 ```bash
 python scripts/experimentctl.py experiments/campaigns/CAMPAIGN.yml prepare
+python scripts/experimentctl.py experiments/campaigns/CAMPAIGN.yml preflight --scope submit
 python scripts/experimentctl.py experiments/campaigns/CAMPAIGN.yml stage
 python scripts/experimentctl.py experiments/campaigns/CAMPAIGN.yml render
 python scripts/experimentctl.py experiments/campaigns/CAMPAIGN.yml submit --run RUN_ID
@@ -109,6 +110,26 @@ python scripts/experimentctl.py experiments/campaigns/CAMPAIGN.yml cancel --run 
 
 `--run` is repeatable; omitting it selects every campaign run. `--dry-run` on
 `submit` renders and validates without mutating a scheduler.
+
+`preflight` performs sanitized, read-only checks against the selected compute
+backend. `stage` and non-dry-run `submit` require the corresponding preflight
+to pass before remote mutation. Local-only `prepare`, `render`, and
+`assets-plan` do not require an active platform login.
+
+The controller accepts only non-secret tool overrides:
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `EXPERIMENTCTL_SCO_BIN` | `sco` | SenseCore CLI executable. |
+| `EXPERIMENTCTL_SSH_BIN` | `ssh` | WYD SSH executable. |
+| `EXPERIMENTCTL_RSYNC_BIN` | `rsync` | WYD transfer executable. |
+| `EXPERIMENTCTL_DOCKER_BIN` | `docker` | Local registry publisher engine. |
+| `EXPERIMENTCTL_CRANE_BIN` | `crane` | Preferred registry client. |
+| `EXPERIMENTCTL_SKOPEO_BIN` | `skopeo` | Registry client fallback. |
+
+These select tools, not credentials. SCO uses its own profile, Docker uses its
+credential store/helper, and WYD uses SSH config or the agent. Credential
+material must never be copied into campaign environment fields.
 
 ### Controller function contract
 
@@ -138,11 +159,12 @@ without network access:
 | `experiment_assets.py` | ELF asset discovery and Hugging Face cache layout used by the ELF project adapter. |
 | `experiment_overrides.py` | ELF's ordered environment-to-config override sequence. |
 | `experiment_policy.py` | Classify failures and recommend bounded next actions without mutating a scheduler. |
-| `experiment_control/runner.py` | Injectable command boundary for production subprocesses and hermetic fakes. |
-| `experiment_control/projects/base.py` | Project protocol plus backend-verifiable asset and source-bundle value objects. |
-| `experiment_control/projects/elf.py` | The only controller module that knows ELF Config, `cloud_train.sh`, ELF checkpoints, metrics, and summaries. |
-| `experiment_control/backends/wyd.py` | SSH, rsync, Slurm, Apptainer staging/status/collection/cancellation. |
-| `experiment_control/backends/sensecore.py` | SCO submission/status/logging/cancellation through repository-local sanitization. |
+| `packages/experiment-control/.../runner.py` | Injectable command boundary for production subprocesses and hermetic fakes. |
+| `packages/experiment-control/.../preflight.py` | Sanitized backend readiness checks and fail-closed reports. |
+| `packages/experiment-control` | Independently installable backend, preflight, runner, state, sanitizer, and project-protocol package. |
+| `scripts/experiment_projects/elf.py` | The only adapter that knows ELF Config, `cloud_train.sh`, ELF checkpoints, metrics, and summaries. |
+| `packages/experiment-control/.../backends/wyd.py` | SSH, rsync, Slurm, Apptainer staging/status/collection/cancellation. |
+| `packages/experiment-control/.../backends/sensecore.py` | SCO submission/status/logging/cancellation through packaged sanitization. |
 
 The backend registry dispatches validation, platform environment resolution,
 asset verification, submission recovery, `stage`, `render`, `submit`,
@@ -216,8 +238,9 @@ observation or vice versa.
 
 ### Registry publication
 
-SenseCore output sanitization lives in `scripts/safe_sco.py`, so the repository
-does not depend on a particular user's `~/.codex` directory. Publish immutable
+SenseCore output sanitization lives in the installed `experiment_control`
+package, so the repository does not depend on a particular user's `~/.codex`
+directory. Publish immutable
 images with `scripts/push_registry_image.sh`; it distinguishes authorization
 from transport failures, bounds every operation, uses archive plus native
 crane/skopeo only as a transport fallback, verifies the remote digest, and
@@ -302,6 +325,12 @@ SenseCore runs instead declare workspace, AEC2, exact job/display name,
 immutable image tag+digest, worker spec, spot quota, and AFS mount. Campaign
 environment fields use a strict non-secret allowlist; credentials must not be
 placed in YAML or startup commands.
+
+SenseCore preflight checks the SCO executable and an exact-name workspace query
+through `safe_sco.py`; it never reads or prints SCO profiles. WYD preflight
+checks SSH/rsync, live partition/GRES and account/QOS association, plus
+Apptainer and the declared mount root. Reports contain fixed messages rather
+than raw platform responses.
 
 ### State ownership
 

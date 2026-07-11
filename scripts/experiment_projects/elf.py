@@ -11,10 +11,10 @@ from experiment_assets import cache_path, plan_assets
 from experiment_overrides import operational_overrides
 from summarize_experiments import summarize_run
 
-from .base import AssetProbe, AssetRequirement, SourceBundle
+from experiment_control.project import AssetProbe, AssetRequirement, SourceBundle
 
 
-REPO_ROOT = Path(__file__).resolve().parents[3]
+REPO_ROOT = Path(__file__).resolve().parents[2]
 SRC_ROOT = REPO_ROOT / "src"
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))

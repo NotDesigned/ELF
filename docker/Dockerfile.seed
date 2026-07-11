@@ -23,6 +23,9 @@ COPY requirements.txt .
 RUN python -m pip install --break-system-packages --upgrade pip setuptools wheel \
     && python -m pip install --break-system-packages -r requirements.txt
 
+COPY packages/experiment-control/ packages/experiment-control/
+RUN python -m pip install --break-system-packages --no-deps ./packages/experiment-control
+
 ARG PROJECT_NAME=elf
 ARG BAKED_HF_HOME=/opt/elf/hf-cache
 ARG BAKED_CHECKPOINT_ROOT=/opt/elf/checkpoints

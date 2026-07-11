@@ -26,8 +26,12 @@ IMAGE=$1
 DOCKER_PUSH_TIMEOUT_SECONDS=${DOCKER_PUSH_TIMEOUT_SECONDS:-900}
 DOCKER_SAVE_TIMEOUT_SECONDS=${DOCKER_SAVE_TIMEOUT_SECONDS:-900}
 REGISTRY_OPERATION_TIMEOUT_SECONDS=${REGISTRY_OPERATION_TIMEOUT_SECONDS:-300}
+DOCKER_BIN=${EXPERIMENTCTL_DOCKER_BIN:-docker}
+CRANE_BIN=${EXPERIMENTCTL_CRANE_BIN:-crane}
+SKOPEO_BIN=${EXPERIMENTCTL_SKOPEO_BIN:-skopeo}
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-SAFE_SCO="$SCRIPT_DIR/safe_sco.py"
+SAFE_SCO="$(dirname "$SCRIPT_DIR")/packages/experiment-control/src/experiment_control/safe_sco.py"
+AUTH_CHECK="$SCRIPT_DIR/check_docker_registry_auth.py"
 WORK_DIR=""
 
 cleanup() {
@@ -54,16 +58,23 @@ case "$IMAGE_TAG" in
   latest|runtime|seed) die "mutable tag '$IMAGE_TAG' is not accepted for recorded experiments" ;;
 esac
 
-command -v docker >/dev/null || die "docker is required"
+command -v "$DOCKER_BIN" >/dev/null || die "docker is required"
 command -v timeout >/dev/null || die "timeout is required"
 [[ -f "$SAFE_SCO" ]] || die "missing repository sanitizer: $SAFE_SCO"
-docker image inspect "$IMAGE" >/dev/null 2>&1 || die "local image does not exist: $IMAGE"
+[[ -f "$AUTH_CHECK" ]] || die "missing Docker credential checker: $AUTH_CHECK"
+"$DOCKER_BIN" info >/dev/null 2>&1 || die "Docker daemon is unavailable"
+"$DOCKER_BIN" image inspect "$IMAGE" >/dev/null 2>&1 || die "local image does not exist: $IMAGE"
+REGISTRY_HOST=${IMAGE%%/*}
+python3 "$AUTH_CHECK" "$REGISTRY_HOST" >/dev/null \
+  || die "Docker credential reference is missing for $REGISTRY_HOST"
 
 PUBLISHER=""
-if command -v crane >/dev/null; then
+if command -v "$CRANE_BIN" >/dev/null; then
   PUBLISHER=crane
-elif command -v skopeo >/dev/null; then
+  PUBLISHER_BIN=$CRANE_BIN
+elif command -v "$SKOPEO_BIN" >/dev/null; then
   PUBLISHER=skopeo
+  PUBLISHER_BIN=$SKOPEO_BIN
 fi
 [[ -n "$PUBLISHER" ]] || die "native crane or skopeo is required for remote digest verification"
 
@@ -77,7 +88,7 @@ WORK_DIR=$(mktemp -d "${TMPDIR:-/tmp}/elf-registry.XXXXXXXX")
 PUSH_LOG="$WORK_DIR/docker-push.log"
 
 set +e
-timeout "${DOCKER_PUSH_TIMEOUT_SECONDS}s" docker push "$IMAGE" >"$PUSH_LOG" 2>&1
+timeout "${DOCKER_PUSH_TIMEOUT_SECONDS}s" "$DOCKER_BIN" push "$IMAGE" >"$PUSH_LOG" 2>&1
 PUSH_RC=$?
 set -e
 
@@ -113,7 +124,7 @@ if [[ "$PUSH_RC" -ne 0 ]]; then
     exit 31
   fi
 
-  IMAGE_SIZE=$(docker image inspect --format '{{.Size}}' "$IMAGE" 2>/dev/null || true)
+  IMAGE_SIZE=$("$DOCKER_BIN" image inspect --format '{{.Size}}' "$IMAGE" 2>/dev/null || true)
   [[ "$IMAGE_SIZE" =~ ^[0-9]+$ ]] || die "could not determine local image size"
   FREE_KIB=$(df -Pk "$WORK_DIR" | awk 'NR == 2 {print $4}')
   REQUIRED_KIB=$(( (IMAGE_SIZE * 12 / 10 + 536870912 + 1023) / 1024 ))
@@ -122,19 +133,19 @@ if [[ "$PUSH_RC" -ne 0 ]]; then
   fi
 
   ARCHIVE="$WORK_DIR/image.tar"
-  timeout "${DOCKER_SAVE_TIMEOUT_SECONDS}s" docker save -o "$ARCHIVE" "$IMAGE"
+  timeout "${DOCKER_SAVE_TIMEOUT_SECONDS}s" "$DOCKER_BIN" save -o "$ARCHIVE" "$IMAGE"
   FALLBACK_LOG="$WORK_DIR/fallback.log"
   set +e
   if [[ "$PUBLISHER" == crane ]]; then
     env -u http_proxy -u https_proxy -u all_proxy \
       -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY \
-      timeout "${REGISTRY_OPERATION_TIMEOUT_SECONDS}s" crane push "$ARCHIVE" "$IMAGE" \
+      timeout "${REGISTRY_OPERATION_TIMEOUT_SECONDS}s" "$PUBLISHER_BIN" push "$ARCHIVE" "$IMAGE" \
       >"$FALLBACK_LOG" 2>&1
   else
     env -u http_proxy -u https_proxy -u all_proxy \
       -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY \
       timeout "${REGISTRY_OPERATION_TIMEOUT_SECONDS}s" \
-      skopeo copy "docker-archive:$ARCHIVE" "docker://$IMAGE" >"$FALLBACK_LOG" 2>&1
+      "$PUBLISHER_BIN" copy "docker-archive:$ARCHIVE" "docker://$IMAGE" >"$FALLBACK_LOG" 2>&1
   fi
   FALLBACK_RC=$?
   set -e
@@ -149,13 +160,13 @@ set +e
 if [[ "$PUBLISHER" == crane ]]; then
   REMOTE_DIGEST=$(env -u http_proxy -u https_proxy -u all_proxy \
     -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY \
-    timeout "${REGISTRY_OPERATION_TIMEOUT_SECONDS}s" crane digest "$IMAGE" 2>"$WORK_DIR/digest.log")
+    timeout "${REGISTRY_OPERATION_TIMEOUT_SECONDS}s" "$PUBLISHER_BIN" digest "$IMAGE" 2>"$WORK_DIR/digest.log")
   DIGEST_RC=$?
 else
   REMOTE_DIGEST=$(env -u http_proxy -u https_proxy -u all_proxy \
     -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY \
     timeout "${REGISTRY_OPERATION_TIMEOUT_SECONDS}s" \
-    skopeo inspect --format '{{.Digest}}' "docker://$IMAGE" 2>"$WORK_DIR/digest.log")
+    "$PUBLISHER_BIN" inspect --format '{{.Digest}}' "docker://$IMAGE" 2>"$WORK_DIR/digest.log")
   DIGEST_RC=$?
 fi
 set -e

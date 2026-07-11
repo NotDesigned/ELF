@@ -11,7 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 import experimentctl
 from experiment_control.backends.base import BackendRegistry
-from experiment_control.projects.base import (
+from experiment_control.project import (
     AssetProbe,
     AssetRequirement,
     ProjectRegistry,

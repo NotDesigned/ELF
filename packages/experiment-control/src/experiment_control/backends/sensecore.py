@@ -3,15 +3,15 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import shlex
 import sys
 from pathlib import Path
 from typing import Any
 
-from experiment_manifest import atomic_write, utc_now
-
 from .services import BackendServices
+from ..preflight import PreflightCheck, PreflightReport
 
 
 def normalize_state(raw_state: str, *, cancellation_requested: bool = False) -> str:
@@ -40,6 +40,14 @@ class SenseCoreBackend:
 
     def __init__(self, services: BackendServices):
         self.s = services
+
+    @staticmethod
+    def sco_bin(run: dict[str, Any]) -> str:
+        """Resolve a non-secret CLI override without exposing SCO credentials."""
+        return str(
+            run.get("backend", {}).get("sco_bin")
+            or os.environ.get("EXPERIMENTCTL_SCO_BIN", "sco")
+        )
 
     def validate(self, run: dict[str, Any]) -> None:
         backend = run["backend"]
@@ -74,6 +82,36 @@ class SenseCoreBackend:
             "RESOURCE_SPEC": str(backend["worker_spec"]),
         }
 
+    def preflight(self, run: dict[str, Any], *, scope: str) -> PreflightReport:
+        """Check the SCO executable and sanitized workspace access."""
+        sco = self.sco_bin(run)
+        version = self.s.run_command(
+            ["env", "-u", "http_proxy", "-u", "https_proxy", "-u", "all_proxy",
+             "-u", "HTTP_PROXY", "-u", "HTTPS_PROXY", "-u", "ALL_PROXY",
+             sco, "version"],
+            check=False,
+        )
+        checks = [
+            PreflightCheck(
+                "sco-cli", "tool", "PASS" if version.returncode == 0 else "FAIL",
+                "SCO CLI is executable" if version.returncode == 0 else "SCO CLI is unavailable",
+            )
+        ]
+        if version.returncode == 0:
+            try:
+                self.find(run)
+            except (RuntimeError, ValueError):
+                checks.append(PreflightCheck(
+                    "workspace-access", "authentication", "FAIL",
+                    "sanitized exact-name query failed; refresh SCO login or connectivity",
+                ))
+            else:
+                checks.append(PreflightCheck(
+                    "workspace-access", "authorization", "PASS",
+                    "exact-name query is permitted",
+                ))
+        return PreflightReport(self.kind, scope, tuple(checks))
+
     def submission_request(self, campaign, run, attempt_id) -> dict[str, Any]:
         return {"scheduler_name": str(run["backend"]["job_name"])}
 
@@ -88,7 +126,7 @@ class SenseCoreBackend:
         }
 
     def safe_command(self, arguments: list[str], mode: str) -> list[str]:
-        safe_script = self.s.script_dir / "safe_sco.py"
+        safe_script = Path(__file__).resolve().parents[1] / "safe_sco.py"
         sco = shlex.join(["env", "-u", "http_proxy", "-u", "https_proxy", "-u", "all_proxy",
                           "-u", "HTTP_PROXY", "-u", "HTTPS_PROXY", "-u", "ALL_PROXY", *arguments])
         return ["bash", "-o", "pipefail", "-c", f"{sco} | {shlex.join([sys.executable, str(safe_script), mode])}"]
@@ -96,7 +134,7 @@ class SenseCoreBackend:
     def describe(self, run: dict[str, Any]) -> dict[str, Any]:
         backend = run["backend"]
         result = self.s.run_command(
-            self.safe_command(["sco", "acp", "jobs", "describe", backend["job_name"],
+            self.safe_command([self.sco_bin(run), "acp", "jobs", "describe", backend["job_name"],
                                "--workspace-name", backend["workspace"], "-o", "json"], "job-summary"),
             check=False,
         )
@@ -110,7 +148,7 @@ class SenseCoreBackend:
     def find(self, run: dict[str, Any]) -> list[dict[str, Any]]:
         backend = run["backend"]
         result = self.s.run_command(
-            self.safe_command(["sco", "acp", "jobs", "list", "--workspace-name", backend["workspace"],
+            self.safe_command([self.sco_bin(run), "acp", "jobs", "list", "--workspace-name", backend["workspace"],
                                "--name", backend["job_name"], "--page-size", "5", "-o", "json"], "job-list"),
             check=False,
         )
@@ -131,7 +169,7 @@ class SenseCoreBackend:
 
     def _redact_error(self, text: str) -> str:
         result = self.s.run_command(
-            [sys.executable, str(self.s.script_dir / "safe_sco.py"), "redact-lines"],
+            [sys.executable, str(Path(__file__).resolve().parents[1] / "safe_sco.py"), "redact-lines"],
             input_text=text, check=False,
         )
         return result.stdout.strip()
@@ -145,7 +183,7 @@ class SenseCoreBackend:
         create = [
             "env", "-u", "http_proxy", "-u", "https_proxy", "-u", "all_proxy",
             "-u", "HTTP_PROXY", "-u", "HTTPS_PROXY", "-u", "ALL_PROXY",
-            "sco", "acp", "jobs", "create", "--workspace-name", backend["workspace"],
+            self.sco_bin(run), "acp", "jobs", "create", "--workspace-name", backend["workspace"],
             "--aec2-name", backend["aec2"], "--name", backend["job_name"],
             "--job-name", backend["display_name"], "--container-image-url", backend["image"],
             "--training-framework", "pytorch", "--worker-spec", backend["worker_spec"],
@@ -178,7 +216,10 @@ class SenseCoreBackend:
     def cancel(self, campaign, run) -> dict[str, Any]:
         current = self.status(campaign, run)
         marker = self.s.local_run_dir(campaign, run) / "cancel_requested.json"
-        atomic_write(marker, {"run_id": run["run_id"], "backend_job_id": current["backend_job_id"], "requested_at": utc_now()})
+        self.s.atomic_write(marker, {
+            "run_id": run["run_id"], "backend_job_id": current["backend_job_id"],
+            "requested_at": self.s.utc_now(),
+        })
         if current.get("raw_state") in {"SUSPENDING", "SUSPENDED", "DELETING", "DELETED"}:
             current["state"] = "CANCELLED"
             return current
@@ -188,7 +229,7 @@ class SenseCoreBackend:
         result = self.s.run_command(
             ["env", "-u", "http_proxy", "-u", "https_proxy", "-u", "all_proxy",
              "-u", "HTTP_PROXY", "-u", "HTTPS_PROXY", "-u", "ALL_PROXY",
-             "sco", "acp", "jobs", "stop", backend["job_name"], "--workspace-name", backend["workspace"]],
+             self.sco_bin(run), "acp", "jobs", "stop", backend["job_name"], "--workspace-name", backend["workspace"]],
             check=False,
         )
         if result.returncode != 0:
@@ -208,7 +249,7 @@ class SenseCoreBackend:
         backend = run["backend"]
         result = self.s.run_command(
             ["timeout", "20s", "env", "-u", "http_proxy", "-u", "https_proxy", "-u", "all_proxy",
-             "-u", "HTTP_PROXY", "-u", "HTTPS_PROXY", "-u", "ALL_PROXY", "sco", "acp", "jobs",
+             "-u", "HTTP_PROXY", "-u", "HTTPS_PROXY", "-u", "ALL_PROXY", self.sco_bin(run), "acp", "jobs",
              "stream-logs", backend["job_name"], "--workspace-name", backend["workspace"]],
             check=False,
         )

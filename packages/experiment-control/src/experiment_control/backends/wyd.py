@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import re
 import shlex
+import subprocess
 from pathlib import Path
 from typing import Any
 
 from .services import BackendServices
-from safe_sco import redact_line
+from ..preflight import PreflightCheck, PreflightReport
+from ..safe_sco import redact_line
 
 
 SLURM_STATES = {
@@ -108,10 +111,24 @@ class WydSlurmBackend:
     def __init__(self, services: BackendServices):
         self.s = services
 
+    @property
+    def ssh_bin(self) -> str:
+        return os.environ.get("EXPERIMENTCTL_SSH_BIN", "ssh")
+
+    @property
+    def rsync_bin(self) -> str:
+        return os.environ.get("EXPERIMENTCTL_RSYNC_BIN", "rsync")
+
+    def ssh_transport(self) -> str:
+        return shlex.join([
+            self.ssh_bin, "-o", "ControlMaster=auto", "-o", "ControlPersist=900",
+            "-o", f"ControlPath={self.ssh_control_path}",
+        ])
+
     def remote_exec(self, alias: str, command: str, *, check: bool = True):
         return self.s.run_command(
             [
-                "ssh", "-o", "BatchMode=yes", "-o", "ControlMaster=auto",
+                self.ssh_bin, "-o", "BatchMode=yes", "-o", "ControlMaster=auto",
                 "-o", "ControlPersist=900", "-o", f"ControlPath={self.ssh_control_path}",
                 alias, command,
             ],
@@ -153,6 +170,53 @@ class WydSlurmBackend:
 
     def environment(self, campaign, run, source_id, attempt_id) -> dict[str, str]:
         return {"QUOTA_TYPE": "normal"}
+
+    def preflight(self, run: dict[str, Any], *, scope: str) -> PreflightReport:
+        """Check local transport tools plus live Slurm/storage compatibility."""
+        checks: list[PreflightCheck] = []
+        for name, command in (
+            ("ssh-cli", [self.ssh_bin, "-V"]),
+            ("rsync-cli", [self.rsync_bin, "--version"]),
+        ):
+            result = self.s.run_command(command, check=False)
+            checks.append(PreflightCheck(
+                name, "tool", "PASS" if result.returncode == 0 else "FAIL",
+                f"{name} is executable" if result.returncode == 0 else f"{name} is unavailable",
+            ))
+        if any(check.status == "FAIL" for check in checks):
+            return PreflightReport(self.kind, scope, tuple(checks))
+        try:
+            live = self.validate_live(run)
+        except subprocess.CalledProcessError:
+            checks.append(PreflightCheck(
+                "slurm-access", "transport", "FAIL",
+                "SSH transport or remote Slurm query failed",
+            ))
+        except RuntimeError as error:
+            resource_failure = "partition" in str(error).lower() or "gres" in str(error).lower()
+            checks.append(PreflightCheck(
+                "slurm-access", "resource" if resource_failure else "authorization", "FAIL",
+                "requested partition/GPU is unavailable" if resource_failure
+                else "Slurm account/QOS association is unavailable",
+            ))
+        else:
+            checks.append(PreflightCheck(
+                "slurm-access", "resource", "PASS",
+                f"partition {live['partition']} exposes the requested GPU type",
+            ))
+            backend = run["backend"]
+            storage = self.remote_exec(
+                backend["ssh_alias"],
+                f"command -v apptainer >/dev/null && test -d {shlex.quote(str(backend['mount_root']))}",
+                check=False,
+            )
+            checks.append(PreflightCheck(
+                "runtime-storage", "storage",
+                "PASS" if storage.returncode == 0 else "FAIL",
+                "Apptainer and mount root are available" if storage.returncode == 0
+                else "Apptainer or mount root is unavailable",
+            ))
+        return PreflightReport(self.kind, scope, tuple(checks))
 
     def submission_request(self, campaign, run, attempt_id) -> dict[str, Any]:
         return {"scheduler_name": scheduler_job_name(str(run["run_id"]), attempt_id)}
@@ -204,8 +268,8 @@ class WydSlurmBackend:
             backend["ssh_alias"], f"test -f {shlex.quote(source_marker)}", check=False
         ).returncode == 0
         if not staged:
-            transport = f"ssh -o ControlMaster=auto -o ControlPersist=900 -o ControlPath={self.ssh_control_path}"
-            command = ["rsync", "-a", "--delete", "-e", transport]
+            transport = self.ssh_transport()
+            command = [self.rsync_bin, "-a", "--delete", "-e", transport]
             command.extend(
                 argument for pattern in source_bundle.excludes
                 for argument in ("--exclude", pattern)
@@ -270,8 +334,8 @@ class WydSlurmBackend:
         self.validate_live(run)
         remote_script = f"{run['storage']['run_dir']}/controller-{manifest['attempt_id']}.sbatch"
         self.remote_exec(backend["ssh_alias"], shlex.join(["mkdir", "-p", run["storage"]["run_dir"]]))
-        transport = f"ssh -o ControlMaster=auto -o ControlPersist=900 -o ControlPath={self.ssh_control_path}"
-        self.s.run_command(["rsync", "-a", "-e", transport, str(script_path), f"{backend['ssh_alias']}:{remote_script}"])
+        transport = self.ssh_transport()
+        self.s.run_command([self.rsync_bin, "-a", "-e", transport, str(script_path), f"{backend['ssh_alias']}:{remote_script}"])
         result = self.remote_exec(backend["ssh_alias"], f"sbatch --parsable {shlex.quote(remote_script)}")
         job_id = result.stdout.strip().split(";", 1)[0]
         if not re.fullmatch(r"\d+", job_id):
@@ -312,9 +376,9 @@ class WydSlurmBackend:
         backend = run["backend"]
         mirror = self.s.local_run_dir(campaign, run) / "collected_run"
         mirror.mkdir(parents=True, exist_ok=True)
-        transport = f"ssh -o ControlMaster=auto -o ControlPersist=900 -o ControlPath={self.ssh_control_path}"
+        transport = self.ssh_transport()
         self.s.run_command(
-            ["rsync", "-a", "--delete", "-e", transport,
+            [self.rsync_bin, "-a", "--delete", "-e", transport,
              "--include=*/", "--include=manifest.yaml", "--include=status.json",
              "--include=backend.json", "--include=train_metrics.jsonl",
              "--include=metrics.jsonl", "--exclude=*",

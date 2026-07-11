@@ -1,6 +1,8 @@
-"""Installed scientific-project adapters."""
+"""ELF's installed scientific-project adapters."""
 
-from .base import AssetProbe, AssetRequirement, ProjectAdapter, ProjectRegistry, SourceBundle
+from experiment_control.project import (
+    AssetProbe, AssetRequirement, ProjectAdapter, ProjectRegistry, SourceBundle,
+)
 
 
 def build_project_registry() -> ProjectRegistry:

@@ -26,6 +26,7 @@ def fake_environment(
 printf 'docker %s\\n' "$*" >> {marker!s}
 if [[ "$1" == image && "$2" == inspect && "${{3:-}}" != --format ]]; then exit 0; fi
 if [[ "$1" == image && "$2" == inspect && "$3" == --format ]]; then printf '1048576\\n'; exit 0; fi
+if [[ "$1" == info ]]; then exit 0; fi
 if [[ "$1" == push ]]; then {docker_push}; fi
 if [[ "$1" == save ]]; then : > "$3"; exit 0; fi
 exit 2
@@ -49,6 +50,12 @@ exit 2
         write_executable(bin_dir / "skopeo", skopeo)
     else:
         raise ValueError(f"unsupported fake publisher: {publisher}")
+    docker_config = tmp_path / "docker-config"
+    docker_config.mkdir()
+    (docker_config / "config.json").write_text(
+        '{"auths":{"registry.example.test":{"auth":"not-read-by-check"}}}',
+        encoding="utf-8",
+    )
     env = os.environ.copy()
     env.update({
         "PATH": f"{bin_dir}:/usr/bin:/bin",
@@ -56,6 +63,7 @@ exit 2
         "DOCKER_PUSH_TIMEOUT_SECONDS": "5",
         "DOCKER_SAVE_TIMEOUT_SECONDS": "5",
         "REGISTRY_OPERATION_TIMEOUT_SECONDS": "5",
+        "DOCKER_CONFIG": str(docker_config),
     })
     return env
 
@@ -79,6 +87,15 @@ def test_dry_run_does_not_push(tmp_path: Path) -> None:
     calls = (tmp_path / "calls").read_text(encoding="utf-8")
     assert "docker image inspect" in calls
     assert "docker push" not in calls
+
+
+def test_dry_run_requires_registry_credential_reference(tmp_path: Path) -> None:
+    env = fake_environment(tmp_path, "exit 99")
+    (Path(env["DOCKER_CONFIG"]) / "config.json").write_text("{}", encoding="utf-8")
+    result = run_script(env, "--dry-run", IMAGE)
+    assert result.returncode == 2
+    assert "credential reference is missing" in result.stderr
+    assert "docker push" not in (tmp_path / "calls").read_text(encoding="utf-8")
 
 
 def test_successful_docker_push_is_digest_verified(tmp_path: Path) -> None:

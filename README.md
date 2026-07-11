@@ -10,7 +10,11 @@ Create a conda environment named `elf` and install the dependencies:
 conda create -n elf python=3.10 -y
 conda activate elf
 pip install -r requirements.txt
+pip install -e packages/experiment-control
 ```
+
+The experiment backend package has its own API and integration guide in
+[`packages/experiment-control/README.md`](packages/experiment-control/README.md).
 
 Then log in to WandB to track your experiments if needed:
 

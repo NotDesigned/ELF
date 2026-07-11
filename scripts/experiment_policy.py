@@ -3,7 +3,13 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+from pathlib import Path
+import sys
 from typing import Any
+
+PACKAGE_SRC = Path(__file__).resolve().parents[1] / "packages" / "experiment-control" / "src"
+if str(PACKAGE_SRC) not in sys.path:
+    sys.path.insert(0, str(PACKAGE_SRC))
 
 from experiment_control.states import FailureClass, classify_failure
 

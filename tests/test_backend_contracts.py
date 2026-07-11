@@ -1,5 +1,5 @@
 from experiment_control.backends.base import BackendRegistry
-from experiment_control.projects.base import ProjectRegistry
+from experiment_control.project import ProjectRegistry
 from experiment_control.backends.wyd import parse_accounting, scheduler_job_name
 import experimentctl
 

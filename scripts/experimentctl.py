@@ -16,6 +16,9 @@ import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPT_DIR = Path(__file__).resolve().parent
+PACKAGE_SRC = REPO_ROOT / "packages" / "experiment-control" / "src"
+if str(PACKAGE_SRC) not in sys.path:
+    sys.path.insert(0, str(PACKAGE_SRC))
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
@@ -33,7 +36,7 @@ from experiment_campaign import load_and_resolve_campaign  # noqa: E402
 from experiment_policy import decide_next_action  # noqa: E402
 from experiment_control.backends import build_registry  # noqa: E402
 from experiment_control.backends.services import BackendServices  # noqa: E402
-from experiment_control.projects import build_project_registry  # noqa: E402
+from experiment_projects import build_project_registry  # noqa: E402
 from experiment_control.runner import (  # noqa: E402
     CommandResult,
     CommandRunner,
@@ -432,9 +435,10 @@ def ensure_attempt_not_submitted(
 def backend_services() -> BackendServices:
     """Inject controller IO boundaries into platform-specific adapters."""
     return BackendServices(
-        repo_root=REPO_ROOT, script_dir=SCRIPT_DIR, run_command=run_command, local_run_dir=local_run_dir,
+        run_command=run_command, local_run_dir=local_run_dir,
         backend_record=backend_record, summarize_run=summarize_project_run,
         parse_metric=parse_project_metric,
+        atomic_write=atomic_write, utc_now=utc_now,
     )
 
 
@@ -516,13 +520,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("campaign", type=Path)
     parser.add_argument(
         "command", choices=(
-            "prepare", "stage", "render", "submit", "status", "collect", "cancel",
+            "prepare", "preflight", "stage", "render", "submit", "status", "collect", "cancel",
             "observe", "logs", "decide", "assets-plan", "assets-verify",
         )
     )
     parser.add_argument("--run", action="append", default=[], help="limit to this run ID; repeatable")
     parser.add_argument("--attempt-id", default="attempt-001")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument(
+        "--scope", choices=("stage", "submit", "observe"), default="submit",
+        help="readiness scope used by the preflight command",
+    )
     parser.add_argument("--tail", type=int, default=100, help="maximum log lines per stream")
     return parser.parse_args(argv)
 
@@ -549,7 +557,11 @@ def main(argv: list[str] | None = None) -> int:
             manifest = prepare_run(campaign, run, identity, attempt_id=args.attempt_id)
         if args.command == "prepare":
             outputs.append({"run_id": run["run_id"], "state": "CREATED"})
+        elif args.command == "preflight":
+            report = backend_adapter.preflight(run, scope=args.scope)
+            outputs.append({"run_id": run["run_id"], **report.to_dict()})
         elif args.command == "stage":
+            backend_adapter.preflight(run, scope="stage").require_ready()
             bundle = PROJECTS.get(str(campaign["project"])).source_bundle(REPO_ROOT)
             staged = backend_adapter.stage(campaign, run, identity, bundle)
             outputs.append({"run_id": run["run_id"], "staged": staged})
@@ -560,6 +572,7 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "submit":
             assert manifest is not None
             if not args.dry_run:
+                backend_adapter.preflight(run, scope="submit").require_ready()
                 recovered = reconcile_submission(campaign, run, args.attempt_id)
                 if recovered:
                     outputs.append({"run_id": run["run_id"], "backend_job_id": recovered, "reconciled": True})
@@ -642,6 +655,8 @@ def main(argv: list[str] | None = None) -> int:
                 result.update(backend_adapter.verify_assets(run, probes))
             outputs.append(result)
     print(json.dumps(outputs, ensure_ascii=False, indent=2, sort_keys=True))
+    if args.command == "preflight" and any(not output.get("ready", False) for output in outputs):
+        return 1
     return 0
 
 

@@ -7,7 +7,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SCRIPT = ROOT / "scripts" / "safe_sco.py"
+SCRIPT = ROOT / "packages/experiment-control/src/experiment_control/safe_sco.py"
 
 
 def run_safe(

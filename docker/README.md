@@ -83,6 +83,12 @@ and only uses a temporary `docker save` plus native `crane`/`skopeo` fallback
 for classified transport failures such as TLS EOF or HTTP 502. It removes the
 archive on every exit and succeeds only after verifying the remote digest.
 
+The dry run is a local registry preflight: it requires a reachable Docker
+daemon, the exact local immutable image, a `crane` or `skopeo` verifier, and a
+credential reference for the target registry in Docker's configured store or
+helper. It never prints or copies the credential. A real push remains the only
+authoritative test of push authorization.
+
 The short `seed` and `runtime` tags above are convenient staging aliases. A
 recorded research run must use an immutable source-qualified tag or image
 digest; the experiment manifest workflow records that identity separately.

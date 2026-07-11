@@ -23,6 +23,9 @@ COPY requirements.txt .
 RUN python -m pip install --break-system-packages --upgrade pip setuptools wheel \
     && python -m pip install --break-system-packages -r requirements.txt
 
+COPY packages/experiment-control/ packages/experiment-control/
+RUN python -m pip install --break-system-packages --no-deps ./packages/experiment-control
+
 COPY src/ src/
 COPY scripts/ scripts/
 COPY tests/ tests/

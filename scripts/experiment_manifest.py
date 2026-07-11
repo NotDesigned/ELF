@@ -18,6 +18,9 @@ from typing import Any, Mapping
 
 import yaml
 
+PACKAGE_SRC = Path(__file__).resolve().parents[1] / "packages" / "experiment-control" / "src"
+if str(PACKAGE_SRC) not in sys.path:
+    sys.path.insert(0, str(PACKAGE_SRC))
 
 IDENTITY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 SECRET_KEY_RE = re.compile(
@@ -626,7 +629,7 @@ def prepare(args: argparse.Namespace) -> dict[str, Any]:
             f"attempt already exists: {attempt_path}; choose a new ATTEMPT_ID"
         )
 
-    from experiment_control.projects import build_project_registry
+    from experiment_projects import build_project_registry
 
     project = build_project_registry().get(args.project)
     config = project.resolve_config(args.config, args.config_override)
