@@ -93,6 +93,25 @@ Available training configs:
 **Estimated wall-clock:** ~4 h per epoch on 8× H200 (OpenWebText, ELF-B,
 global batch size 512, bf16). The default ELF-B OWT run is 5 epochs.
 
+## Quick demo
+
+Generate a few OpenWebText-style samples from a checkpoint with a short 8-step
+demo sampler:
+
+```bash
+bash scripts/demo.sh embedded-language-flows/ELF-B-owt-torch
+```
+
+Useful overrides:
+
+```bash
+CONDA_ENV=elf NUM_SAMPLES=8 BATCH_SIZE=2 bash scripts/demo.sh /path/to/checkpoint_95085
+PPL=1 RECONSTRUCTION=1 NUM_SAMPLES=8 BATCH_SIZE=2 bash scripts/demo.sh embedded-language-flows/ELF-B-owt-torch
+```
+
+The script writes outputs under `outputs/demo/elf_b_owt` by default and prints
+the first few generated samples in the terminal.
+
 ## Evaluation
 
 Run evaluation against the converted checkpoints on HuggingFace. We recommend
