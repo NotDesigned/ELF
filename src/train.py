@@ -271,12 +271,24 @@ def run_training(config, *, force_cpu: bool = False):
     if config.use_wandb and rank == 0 and wandb is not None:
         wandb_config = {k: getattr(config, k) for k in dir(config) if not k.startswith("_")}
         wandb_tags = config.wandb_tag.split(",") if config.wandb_tag else None
-        wandb.init(
-            project=config.wandb_project, entity=config.wandb_entity,
-            name=config.wandb_run_name, id=config.wandb_run_name, resume=config.wandb_resume,
-            tags=wandb_tags, config=wandb_config, dir="/tmp",
+        wandb_run_id = getattr(config, "wandb_run_id", None)
+        wandb_resume = getattr(config, "wandb_resume", None)
+        wandb_kwargs = dict(
+            project=config.wandb_project,
+            entity=config.wandb_entity,
+            name=config.wandb_run_name,
+            tags=wandb_tags,
+            config=wandb_config,
+            dir=os.environ.get("WANDB_DIR", "/tmp"),
         )
-        resume_suffix = f" (resume={config.wandb_resume}, id={config.wandb_run_name})"
+        if wandb_run_id:
+            wandb_kwargs["id"] = wandb_run_id
+            wandb_kwargs["resume"] = wandb_resume or "allow"
+        elif wandb_resume:
+            wandb_kwargs["resume"] = wandb_resume
+        wandb.init(**wandb_kwargs)
+        run_id = getattr(wandb.run, "id", wandb_run_id)
+        resume_suffix = f" (resume={wandb_kwargs.get('resume')}, id={run_id})"
         log_for_0(f"Wandb initialized: {wandb.run.url}{resume_suffix}")
 
     torch.manual_seed(config.seed)

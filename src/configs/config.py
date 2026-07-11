@@ -378,8 +378,9 @@ class Config:
     wandb_project: str = "ELF"
     wandb_entity: str = None
     wandb_run_name: str = None
+    wandb_run_id: str = None  # Optional stable W&B id; leave unset to create a fresh run.
     wandb_tag: str = None
-    wandb_resume: str = "allow"
+    wandb_resume: str = None
 
     # Misc
     seed: int = 0
@@ -473,12 +474,14 @@ def apply_config_overrides(config: Config, overrides: list) -> Config:
         if original_value is None:
             # Use type annotation to infer the intended type
             annotated_type = config.__annotations__.get(field_name)
-            if annotated_type == int:
+            if annotated_type in (int, "int"):
                 converted_value = int(value_str)
-            elif annotated_type == float:
+            elif annotated_type in (float, "float"):
                 converted_value = float(value_str)
-            elif annotated_type == bool:
+            elif annotated_type in (bool, "bool"):
                 converted_value = _parse_bool(value_str, field_name)
+            elif annotated_type in (str, "str"):
+                converted_value = value_str
             else:
                 converted_value = value_str
         elif original_type == bool:

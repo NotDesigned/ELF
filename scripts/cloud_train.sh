@@ -20,14 +20,27 @@ fi
 PROJECT_NAME="${PROJECT_NAME:-elf}"
 DATA_ROOT="${DATA_ROOT:-/data}"
 PROJECT_DATA_ROOT="${PROJECT_DATA_ROOT:-$DATA_ROOT/$PROJECT_NAME}"
-OUTPUT_ROOT="${OUTPUT_ROOT:-$PROJECT_DATA_ROOT/outputs}"
+OUTPUT_ROOT="${OUTPUT_ROOT:-$PROJECT_DATA_ROOT/runs}"
 CHECKPOINT_ROOT="${CHECKPOINT_ROOT:-$PROJECT_DATA_ROOT/checkpoints}"
 
 run_path="${CONFIG#src/configs/training_configs/}"
 run_path="${run_path%.yml}"
 run_path="${run_path%.yaml}"
+run_slug="$(printf '%s' "$run_path" | tr '/_' '--' | tr -cd '[:alnum:].-')"
+if [[ -z "${RUN_ID:-}" ]]; then
+    run_nonce="$(od -An -N4 -tx1 /dev/urandom | tr -d ' \n')"
+    RUN_ID="${run_slug}-$(date -u +%Y%m%dT%H%M%SZ)-${run_nonce}"
+fi
+ATTEMPT_ID="${ATTEMPT_ID:-attempt-001}"
+BACKEND="${BACKEND:-sensecore}"
+BACKEND_JOB_ID="${BACKEND_JOB_ID:-${SENSECORE_JOB_ID:-}}"
+QUOTA_TYPE="${QUOTA_TYPE:-spot}"
+if [[ "$BACKEND" == "sensecore" && "$QUOTA_TYPE" != "spot" ]]; then
+    echo "[cloud_train] this account is configured for spot quota only, got QUOTA_TYPE=$QUOTA_TYPE" >&2
+    exit 1
+fi
 
-OUTPUT_DIR="${OUTPUT_DIR:-$OUTPUT_ROOT/$run_path}"
+OUTPUT_DIR="${OUTPUT_DIR:-$OUTPUT_ROOT/$RUN_ID}"
 HF_ENDPOINT="${HF_ENDPOINT:-https://hf-mirror.com}"
 HF_HOME="${HF_HOME:-$DATA_ROOT/.cache/huggingface}"
 HF_DATASETS_CACHE="${HF_DATASETS_CACHE:-$HF_HOME/datasets}"
@@ -40,6 +53,8 @@ DATASET_ID="${DATASET_ID:-embedded-language-flows/openwebtext-t5}"
 ENCODER_MODEL="${ENCODER_MODEL:-t5-small}"
 ELF_B_CHECKPOINT_FILE="${ELF_B_CHECKPOINT_FILE:-checkpoint_95085}"
 ELF_B_OWT_CHECKPOINT="${ELF_B_OWT_CHECKPOINT:-$CHECKPOINT_ROOT/ELF-B-owt-torch/$ELF_B_CHECKPOINT_FILE}"
+SOURCE_ID="${SOURCE_ID:-${ELF_SOURCE_ID:-unknown}}"
+IMAGE_ID="${IMAGE_ID:-${ELF_IMAGE_ID:-unknown}}"
 
 truthy() {
     case "${1:-}" in
@@ -251,59 +266,85 @@ if truthy "${USE_ELF_B_WARM_START:-0}" && [[ -z "${WARM_START:-}" ]]; then
     WARM_START="$ELF_B_OWT_CHECKPOINT"
 fi
 
-overrides=(
-    --config_override "output_dir=$OUTPUT_DIR"
-)
+overrides=()
+manifest_overrides=()
+
+add_override() {
+    overrides+=(--config_override "$1")
+    manifest_overrides+=(--config-override "$1")
+}
+
+add_override "output_dir=$OUTPUT_DIR"
 
 if [[ -n "${USE_WANDB:-}" ]]; then
-    overrides+=(--config_override "use_wandb=$USE_WANDB")
+    add_override "use_wandb=$USE_WANDB"
 fi
 if [[ -n "${WANDB_PROJECT:-}" ]]; then
-    overrides+=(--config_override "wandb_project=$WANDB_PROJECT")
+    add_override "wandb_project=$WANDB_PROJECT"
 fi
 if [[ -n "${WANDB_ENTITY:-}" ]]; then
-    overrides+=(--config_override "wandb_entity=$WANDB_ENTITY")
+    add_override "wandb_entity=$WANDB_ENTITY"
 fi
+WANDB_RUN_NAME="${WANDB_RUN_NAME:-$RUN_ID}"
+WANDB_RUN_ID="${WANDB_RUN_ID:-$RUN_ID}"
+WANDB_RESUME="${WANDB_RESUME:-allow}"
+add_override "wandb_run_name=$WANDB_RUN_NAME"
+add_override "wandb_run_id=$WANDB_RUN_ID"
+add_override "wandb_resume=$WANDB_RESUME"
 if [[ -n "${GLOBAL_BATCH_SIZE:-}" ]]; then
-    overrides+=(--config_override "global_batch_size=$GLOBAL_BATCH_SIZE")
+    add_override "global_batch_size=$GLOBAL_BATCH_SIZE"
 fi
 if [[ -n "${BATCH_SIZE:-}" ]]; then
-    overrides+=(--config_override "global_batch_size=null")
-    overrides+=(--config_override "batch_size=$BATCH_SIZE")
+    add_override "global_batch_size=null"
+    add_override "batch_size=$BATCH_SIZE"
 fi
 if [[ -n "${NUM_WORKERS:-}" ]]; then
-    overrides+=(--config_override "num_workers=$NUM_WORKERS")
+    add_override "num_workers=$NUM_WORKERS"
 fi
 if [[ -n "${LOG_FREQ:-}" ]]; then
-    overrides+=(--config_override "log_freq=$LOG_FREQ")
+    add_override "log_freq=$LOG_FREQ"
 fi
 if [[ -n "${USE_COMPILE:-}" ]]; then
-    overrides+=(--config_override "use_compile=$USE_COMPILE")
+    add_override "use_compile=$USE_COMPILE"
 fi
 if [[ -n "${WARM_START:-}" ]]; then
-    overrides+=(--config_override "warm_start=$WARM_START")
+    add_override "warm_start=$WARM_START"
 fi
 if [[ -n "${WARM_START_USE_EMA:-}" ]]; then
-    overrides+=(--config_override "warm_start_use_ema=$WARM_START_USE_EMA")
+    add_override "warm_start_use_ema=$WARM_START_USE_EMA"
+fi
+if [[ -n "${RESUME:-}" ]]; then
+    add_override "resume=$RESUME"
 fi
 if [[ -n "${HF_REPO_ID:-}" ]]; then
-    overrides+=(--config_override "hf_repo_id=$HF_REPO_ID")
+    add_override "hf_repo_id=$HF_REPO_ID"
 fi
 
 echo "[cloud_train] config=$CONFIG"
+echo "[cloud_train] run_id=$RUN_ID attempt_id=$ATTEMPT_ID backend=$BACKEND backend_job_id=${BACKEND_JOB_ID:-<pending>}"
 echo "[cloud_train] output_dir=$OUTPUT_DIR"
 echo "[cloud_train] data_root=$DATA_ROOT"
 echo "[cloud_train] project_data_root=$PROJECT_DATA_ROOT"
 echo "[cloud_train] hf_home=$HF_HOME hf_datasets_cache=$HF_DATASETS_CACHE"
 echo "[cloud_train] hf_endpoint=$HF_ENDPOINT offline=${HF_HUB_OFFLINE:-0}/${TRANSFORMERS_OFFLINE:-0}/${HF_DATASETS_OFFLINE:-0}"
-echo "[cloud_train] wandb_dir=$WANDB_DIR save_dir=$SAVE_DIR"
+echo "[cloud_train] wandb_dir=$WANDB_DIR wandb_run_id=$WANDB_RUN_ID save_dir=$SAVE_DIR"
 echo "[cloud_train] checkpoint_root=$CHECKPOINT_ROOT"
 echo "[cloud_train] baked_hf_home=$BAKED_HF_HOME baked_checkpoint_root=$BAKED_CHECKPOINT_ROOT"
 echo "[cloud_train] NGPU=$NGPU NNODES=${NNODES:-1} NODE_RANK=${NODE_RANK:-0}"
 
 cmd=(bash scripts/launch.sh train "$CONFIG" "${overrides[@]}" "$@")
 printf '[cloud_train] command:'
-printf ' %q' "${cmd[@]}"
+for command_arg in "${cmd[@]}"; do
+    command_key="${command_arg%%=*}"
+    case "${command_key,,}" in
+        *secret*|*token*|*password*|*credential*|*access_key*|*access-key*|*api_key*|*api-key*|*proxy*|*authorization*|*cookie*)
+            printf ' %q' "$command_key=<redacted>"
+            ;;
+        *)
+            printf ' %q' "$command_arg"
+            ;;
+    esac
+done
 printf '\n'
 
 if [[ "${DRY_RUN:-0}" == "1" ]]; then
@@ -312,6 +353,35 @@ fi
 
 if truthy "${HYDRATE_ONLY:-0}"; then
     echo "[cloud_train] HYDRATE_ONLY=1, exiting after cache/checkpoint hydration"
+    exit 0
+fi
+
+manifest_cmd=(
+    python scripts/experiment_manifest.py
+    --project "$PROJECT_NAME"
+    --run-id "$RUN_ID"
+    --attempt-id "$ATTEMPT_ID"
+    --backend "$BACKEND"
+    --backend-job-id "$BACKEND_JOB_ID"
+    --config "$CONFIG"
+    --output-dir "$OUTPUT_DIR"
+    --source-id "$SOURCE_ID"
+    --image-id "$IMAGE_ID"
+    --gpus "$NGPU"
+    --nodes "${NNODES:-1}"
+    --quota "$QUOTA_TYPE"
+    --resource-spec "${RESOURCE_SPEC:-}"
+    --max-infra-retries "${MAX_INFRA_RETRIES:-2}"
+    "${manifest_overrides[@]}"
+)
+if truthy "${REQUIRE_IMMUTABLE_IDENTITIES:-1}"; then
+    manifest_cmd+=(--require-immutable-identities)
+fi
+manifest_cmd+=(-- "${cmd[@]}")
+"${manifest_cmd[@]}"
+
+if truthy "${PREPARE_ONLY:-0}"; then
+    echo "[cloud_train] PREPARE_ONLY=1, exiting after manifest creation"
     exit 0
 fi
 

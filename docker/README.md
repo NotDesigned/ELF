@@ -34,6 +34,7 @@ Build and push:
 ```bash
 docker build . \
   -f docker/Dockerfile.seed \
+  --build-arg SOURCE_ID="$(bash scripts/source_identity.sh)" \
   --build-context hf_cache=/home/proton/.cache/elf/docker-hf-cache \
   --build-context elf_b_ckpt=/home/proton/.cache/elf/checkpoints/ELF-B-owt-torch \
   -t "$IMAGE:seed"
@@ -60,7 +61,9 @@ to the slim context and build seed with `--build-arg PRELOAD_SENTENCE_T5=true`.
 After `/data` is hydrated:
 
 ```bash
-docker build . -f docker/Dockerfile -t "$IMAGE:runtime"
+docker build . -f docker/Dockerfile \
+  --build-arg SOURCE_ID="$(bash scripts/source_identity.sh)" \
+  -t "$IMAGE:runtime"
 docker push "$IMAGE:runtime"
 ```
 
@@ -71,6 +74,8 @@ digest; the experiment manifest workflow records that identity separately.
 Run examples:
 
 ```bash
+RUN_ID=tier0-pure-elf-s0-$(date -u +%Y%m%dT%H%M%SZ) \
+IMAGE_ID="$IMAGE@sha256:<registry-digest>" \
 NGPU=8 \
 bash scripts/cloud_train.sh src/configs/training_configs/ablations/owt_elfb/tier0_0_pure_elf.yml
 ```
@@ -82,6 +87,39 @@ bash scripts/cloud_train.sh src/configs/training_configs/ablations/owt_elfb/tier
 ```
 
 Use `DRY_RUN=1` to print the final launch command without starting training.
+Use `PREPARE_ONLY=1` to create and validate the durable experiment records but
+stop before the training process; unlike dry-run, this intentionally writes to
+the selected run directory.
+
+## Experiment identity
+
+Every real launch creates a unique `/data/elf/runs/<run-id>` directory. When
+`RUN_ID` is omitted, the launcher generates one from the config path, UTC time,
+and random bytes. A recorded SenseCore run requires immutable `SOURCE_ID` and
+`IMAGE_ID` values; `SOURCE_ID` is normally baked into the image, while
+`IMAGE_ID` should be the registry digest or a source-qualified immutable tag.
+
+Before training starts, the launcher atomically writes:
+
+- `manifest.yaml`: immutable scientific config and source/image identities.
+- `attempts/<attempt-id>/attempt.yaml`: command, backend, resources, and resume source.
+- `events.jsonl`, `backend.json`, and `status.json`: durable Agent-facing control records.
+
+Spot recovery keeps the same `RUN_ID`, uses a new `ATTEMPT_ID`, and explicitly
+sets `RESUME` to the run directory or a completed checkpoint. Reusing an
+existing attempt ID fails instead of overwriting metadata:
+
+```bash
+RUN_ID=<original-run-id> ATTEMPT_ID=attempt-002 \
+RESUME=/data/elf/runs/<original-run-id> \
+IMAGE_ID="$IMAGE@sha256:<same-registry-digest>" \
+bash scripts/cloud_train.sh <config>
+```
+
+`Wandb` uses the scientific `RUN_ID` by default, so a new generated run creates
+a fresh tracker run and later attempts resume the same tracker identity.
+`REQUIRE_IMMUTABLE_IDENTITIES=0` is reserved for local smoke tests; do not use
+it for recorded research runs.
 
 ## Notes
 

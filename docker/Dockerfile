@@ -33,6 +33,7 @@ ARG PROJECT_NAME=elf
 ARG BAKED_HF_HOME=/opt/elf/hf-cache
 ARG BAKED_CHECKPOINT_ROOT=/opt/elf/checkpoints
 ARG ELF_B_CHECKPOINT_FILE=checkpoint_95085
+ARG SOURCE_ID=unknown
 
 ENV PROJECT_NAME=${PROJECT_NAME} \
     PYTHONPATH=/app/src \
@@ -41,6 +42,7 @@ ENV PROJECT_NAME=${PROJECT_NAME} \
     HF_DATASETS_CACHE=/data/.cache/huggingface/datasets \
     BAKED_HF_HOME=${BAKED_HF_HOME} \
     BAKED_CHECKPOINT_ROOT=${BAKED_CHECKPOINT_ROOT} \
+    ELF_SOURCE_ID=${SOURCE_ID} \
     ELF_B_OWT_CHECKPOINT=/data/${PROJECT_NAME}/checkpoints/ELF-B-owt-torch/${ELF_B_CHECKPOINT_FILE} \
     WANDB_DIR=/data/${PROJECT_NAME}/wandb \
     WANDB_CACHE_DIR=/data/${PROJECT_NAME}/wandb_cache \
@@ -50,7 +52,7 @@ ENV PROJECT_NAME=${PROJECT_NAME} \
     TRANSFORMERS_OFFLINE=1 \
     HF_DATASETS_OFFLINE=1
 
-RUN chmod +x scripts/launch.sh scripts/cloud_train.sh \
+RUN chmod +x scripts/launch.sh scripts/cloud_train.sh scripts/experiment_manifest.py scripts/source_identity.sh \
     && mkdir -p /data/.cache/huggingface /data/${PROJECT_NAME}/wandb \
         /data/${PROJECT_NAME}/wandb_cache /data/${PROJECT_NAME}/outputs \
         /data/${PROJECT_NAME}/saved_models /data/${PROJECT_NAME}/checkpoints

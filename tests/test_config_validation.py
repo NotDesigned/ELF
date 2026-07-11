@@ -49,6 +49,18 @@ def test_overrides_accept_null_and_reject_bad_bool():
         apply_config_overrides(cfg, ["use_wandb=maybe"])
 
 
+def test_wandb_run_name_does_not_imply_stable_run_id():
+    cfg = Config()
+    cfg.wandb_run_name = "shared-display-name"
+
+    assert cfg.wandb_run_id is None
+    assert cfg.wandb_resume is None
+
+    cfg = apply_config_overrides(cfg, ["wandb_run_id=fixed-id", "wandb_resume=allow"])
+    assert cfg.wandb_run_id == "fixed-id"
+    assert cfg.wandb_resume == "allow"
+
+
 def test_plan_time_scheduler_noise_power_leads_and_validates():
     cfg = Config()
     cfg.plan_time_schedule = "noise_power"
