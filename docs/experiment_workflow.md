@@ -31,24 +31,13 @@ also contain its required evaluation records and readable artifacts.
 The helper has two commands. The default command prepares a run/attempt; the
 `record` command appends a lifecycle transition.
 
-### Function contract
-
-| Function | Input | Output / side effect | Failure meaning |
-| --- | --- | --- | --- |
-| `sanitize_command` | Argument vector | Secret-redacted argument vector | Pure transformation |
-| `atomic_write` / `atomic_create` | Path and JSON/YAML payload | fsync + atomic replacement, or exclusive creation | Durable state was not committed or immutable state already exists |
-| `append_event` | Event path and mapping | One fsynced JSONL event | Lifecycle record was not committed |
-| `ExperimentStateStore` | One local run directory | Run/attempt creation, status transitions, submission intent, and reconciliation | Identity conflict, invalid transition, or duplicate scheduler identity |
-| `prepare` | Parsed prepare arguments | Canonical run manifest, attempt manifest, initial state/event | Identity conflict, reused attempt, or mutable source/image identity |
-| `record` | Parsed transition arguments | New `status.json` and appended event | Transition does not belong to a prepared run/attempt |
-
 ELF config resolution and scientific-field selection belong to
 `scripts/experiment_projects/elf.py`, not this backend-neutral state helper.
 Controller and runtime construct the shared manifest schema through
 `experiment_run_manifest.build_run_manifest`.
 
-Detailed argument, return, and exception semantics are also kept beside each
-Python function as docstrings, so `help()` and IDE hover remain authoritative.
+Argument, return, and failure semantics live beside each Python function as
+tested docstrings; this document records only cross-module contracts.
 
 Prepare example:
 
@@ -79,18 +68,6 @@ python scripts/summarize_experiments.py /data/liangluocheng/elf/runs \
   --format csv --output fusion-len256-v1.csv
 ```
 
-### Function contract
-
-| Function | Responsibility |
-| --- | --- |
-| `load_mapping` | Strictly load one JSON/YAML object. |
-| `read_jsonl` | Strictly load JSON objects and report exact corrupt line. |
-| `discover_run_dirs` | Resolve, deduplicate, and sort run directories. |
-| `latest_record` | Select greatest-step training record, breaking ties by file order. |
-| `collect_eval_metrics` | Search nested evaluation outputs and surface same-step conflicts. |
-| `summarize_run` | Produce one flat run row and compute `plan_ppl_gap`. |
-| `write_json` / `write_csv` | Serialize deterministic campaign output. |
-
 `plan_ppl_gap = shuffled_plan_ppl - oracle_plan_ppl`; positive is better because
 the correct plan produced lower perplexity than a mismatched plan.
 
@@ -101,17 +78,17 @@ and exposes the same operations for SenseCore and WYD Slurm:
 
 ```bash
 python scripts/experimentctl.py experiments/campaigns/CAMPAIGN.yml prepare
+python scripts/experimentctl.py experiments/campaigns/CAMPAIGN.yml assets-plan
 python scripts/experimentctl.py experiments/campaigns/CAMPAIGN.yml preflight --scope submit
 python scripts/experimentctl.py experiments/campaigns/CAMPAIGN.yml stage
-python scripts/experimentctl.py experiments/campaigns/CAMPAIGN.yml render
+python scripts/experimentctl.py experiments/campaigns/CAMPAIGN.yml submit --run RUN_ID --dry-run
+python scripts/experimentctl.py experiments/campaigns/CAMPAIGN.yml assets-verify --run RUN_ID
 python scripts/experimentctl.py experiments/campaigns/CAMPAIGN.yml submit --run RUN_ID
 python scripts/experimentctl.py experiments/campaigns/CAMPAIGN.yml status --run RUN_ID
 python scripts/experimentctl.py experiments/campaigns/CAMPAIGN.yml collect --run RUN_ID
 python scripts/experimentctl.py experiments/campaigns/CAMPAIGN.yml observe --run RUN_ID
 python scripts/experimentctl.py experiments/campaigns/CAMPAIGN.yml logs --run RUN_ID --tail 100
 python scripts/experimentctl.py experiments/campaigns/CAMPAIGN.yml decide --run RUN_ID
-python scripts/experimentctl.py experiments/campaigns/CAMPAIGN.yml assets-plan --run RUN_ID
-python scripts/experimentctl.py experiments/campaigns/CAMPAIGN.yml assets-verify --run RUN_ID
 python scripts/experimentctl.py experiments/campaigns/CAMPAIGN.yml cancel --run RUN_ID
 ```
 
@@ -120,8 +97,8 @@ python scripts/experimentctl.py experiments/campaigns/CAMPAIGN.yml cancel --run 
 
 `preflight` performs sanitized, read-only checks against the selected compute
 backend. `stage` and non-dry-run `submit` require the corresponding preflight
-to pass before remote mutation. Local-only `prepare`, `render`, and
-`assets-plan` do not require an active platform login.
+to pass before remote mutation. Local-only `prepare`, `assets-plan`, and
+dry-run submission do not require an active platform login.
 
 The controller accepts only non-secret tool overrides:
 
@@ -137,21 +114,6 @@ The controller accepts only non-secret tool overrides:
 These select tools, not credentials. SCO uses its own profile, Docker uses its
 credential store/helper, and WYD uses SSH config or the agent. Credential
 material must never be copied into campaign environment fields.
-
-### Controller function contract
-
-| Function | Responsibility |
-| --- | --- |
-| `load_campaign` / `validate_run` | Validate schema, backend fields, safe environment allowlist, explicit Slurm GRES, and SenseCore spot policy. |
-| `source_identity` / `materialize_run` | Compute runtime-tree identity and expand immutable path placeholders. |
-| `prepare_run` | Resolve config/overrides and atomically freeze the canonical run manifest and local attempt before submission. |
-| `ProjectAdapter` | Own project config semantics, launcher command, runtime environment, assets, metrics, summary, and source-bundle policy. |
-| `WydSlurmBackend` | Stage immutable source/SIF artifacts and implement Slurm render, submit, status, collect, and cancel. |
-| `SenseCoreBackend` | Implement exact-name SCO submit/status/log collection/cancel through immediate sanitization. |
-| `BackendRegistry` | Dispatch the common backend contract without platform branches in the CLI. |
-
-Every Python function also carries its detailed input/output/failure semantics
-as an IDE-visible docstring.
 
 ### Controller module boundaries
 
@@ -264,51 +226,9 @@ canonical manifest.
 
 Known matrix tokens use `{axis}` or `{axis.field}`. Controller-time tokens such
 as `{source_id}`, `{run_id}`, `{project}`, and `{campaign}` remain untouched
-until the immutable source identity and run are materialized. For example:
-
-```yaml
-schema_version: 1
-campaign: fusion-smoke
-project: elf
-source_id: auto
-local_root: outputs/experiment_campaigns
-
-defaults:
-  image_id: sha256:<SIF_SHA256>
-  resources: {gpus: 1, cpus: 8}
-  config_overrides: [epochs=1]
-  storage:
-    run_dir: /datapool/liangluocheng/elf/runs/{run_id}
-    data_root: /datapool/liangluocheng
-    project_data_root: /datapool/liangluocheng/elf
-    hf_home: /datapool/liangluocheng/.cache/huggingface
-    hf_datasets_cache: /datapool/liangluocheng/.cache/huggingface/datasets
-
-profiles:
-  wyd-h100:
-    backend:
-      kind: slurm
-      ssh_alias: wyd-l40s
-      partition: h100
-      account: lab
-      qos: normal
-      gres: gpu:h100:1
-      time: "00:10:00"
-      mount_root: /datapool
-      source_dir: /datapool/liangluocheng/elf/sources/{source_id}
-      sif_path: /datapool/liangluocheng/elf/images/<SIF_SHA256>.sif
-
-runs:
-  - matrix:
-      variant:
-        - {name: a0, config: configs/a0.yml}
-        - {name: a1, config: configs/a1.yml}
-      seed: [42, 43]
-    template:
-      profile: wyd-h100
-      run_id: "fusion-{variant.name}-s{seed}"
-      config: "{variant.config}"
-```
+until the immutable source identity and run are materialized. Executable
+examples live under [`experiments/campaigns/`](../experiments/campaigns/), so
+schema examples cannot drift independently from validated campaigns.
 
 `profile` may also be an ordered list, for example
 `[wyd-common, l40s]`, so shared login/storage settings and accelerator
