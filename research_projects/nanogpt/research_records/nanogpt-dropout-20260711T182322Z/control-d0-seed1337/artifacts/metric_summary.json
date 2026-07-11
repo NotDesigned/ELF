@@ -1,0 +1,8 @@
+{
+  "primary": {
+    "step": 300,
+    "split": "val",
+    "loss": 2.2797
+  },
+  "eval_records": 4
+}

@@ -1,0 +1,21 @@
+project: nanogpt
+campaign_id: nanogpt-dropout-20260711T182322Z
+run_id: treatment-d02-seed1337
+attempt_id: attempt-001
+backend: slurm
+hypothesis: dropout 0.2 raises matched step-300 validation loss by at least 0.020 versus dropout 0.0
+role: treatment
+single_factor: {name: dropout, value: 0.2}
+seed: 1337
+source_id: upstream-3adf61e-tree-e676d874222b30b7
+source_commit: 3adf61e154c3fe3fca428ad6bc3818b27a3b8291
+source_train_py_sha256: 413bd97b40bb400a2a0d01230e2946f056c263ebac1b7281c2367d964a123085
+image_id: sha256:1e25f456cd26219ff89015a41b8653efb0db4444f911522802f850a791710de4
+dataset_sha256: {input.txt: 86c4e6aa9db7c042ec79f339dcb96d42b0075e16b8fc2e86bf0ca57e2dc565ed, train.bin: 6ec305602a99ac2802745a134e1f5e33e2231b4855525b00b9aebb730ac2626f, val.bin: d37d30cc0c8327c270d493299c3dca54135f6d5f1c9ef60cda78076e311204b1, meta.pkl: 6ee5a37533af83b67fcbe6b93705fde9e15e78bafe895f54b2cb2cb32534526c}
+model: {n_layer: 4, n_head: 4, n_embd: 128, block_size: 128, bias: false, target_parameters_max: 2000000}
+training: {batch_size: 64, gradient_accumulation_steps: 1, max_iters: 300, learning_rate: 0.001, min_lr: 0.0001, warmup_iters: 20, lr_decay_iters: 300, weight_decay: 0.1, dtype: bfloat16, compile: false, wandb: false}
+evaluation: {interval_steps: 100, eval_iters: 50, primary_metric: val_loss_at_step_300, supported_delta_min: 0.020, falsified_delta_max: 0.0}
+resources: {cluster: wyd-lab, ssh: wyd-l40s, partition: l40s, account: lab, qos: normal, gres: 'gpu:l40s:1', gpus: 1, cpus: 4, memory_gb: 32, max_time: '00:05:00'}
+storage: {run_dir: /data/liangluocheng/nanogpt/runs/nanogpt-dropout-20260711T182322Z/treatment-d02-seed1337, checkpoint_dir: /data/liangluocheng/nanogpt/runs/nanogpt-dropout-20260711T182322Z/treatment-d02-seed1337/checkpoints}
+retry: {max_scientific_jobs_total: 2, max_infra_retries: 1, retry_only_transport_node_scheduler: true}
+checkpoint: {expected_first_minutes: 1, max_uncheckpointed_minutes: 2, completion: sha256_marker_and_torch_load}

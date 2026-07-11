@@ -1,0 +1,5 @@
+{"event":"manifest_frozen","attempt_id":"attempt-001","backend":"slurm"}
+{"event": "submitted", "job_id": "1789", "unix_time": 1783794346.4092586}
+{"event":"worker_start","job_id":"1789","node":"wyd-l40s"}
+{"event":"process_exit","job_id":"1789","exit_code":0}
+{"event": "scheduler_terminal_observed", "job_id": "1789", "state": "COMPLETED", "exit_code": "0:0", "elapsed": "00:00:42"}

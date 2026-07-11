@@ -1,0 +1,1 @@
+{"backend": "slurm", "cluster": "wyd-lab", "partition": "l40s", "gres": "gpu:l40s:1", "attempt_id": "attempt-001", "job_id": "1790"}
