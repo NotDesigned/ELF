@@ -77,6 +77,7 @@ def main():
         text_samples=nonempty, max_length=args.max_length, retokenize=True,
     )
 
+    print(f"Max Length:    {args.max_length}")
     print(f"Perplexity:   {results['ppl']:.4f}")
     print(f"Mean Entropy: {results['mean_entropy']:.4f}")
 
@@ -85,6 +86,7 @@ def main():
         "input": args.input,
         "ppl_model": args.model,
         "num_samples": len(nonempty),
+        "max_length": args.max_length,
         "ppl": results["ppl"],
         "mean_entropy": results["mean_entropy"],
     }

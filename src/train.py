@@ -143,6 +143,71 @@ def _log_model_parameter_summary(model) -> None:
             log_for_0(f"  - {label}: {count:,} ({_format_param_count(count)})")
 
 
+def _run_train_sampling_eval_if_due(
+    *,
+    state,
+    encoder,
+    eval_dataset,
+    train_dataset,
+    tokenizer,
+    config,
+    generator,
+    local_batch_size: int,
+    sentence_encoder,
+    global_step: int,
+) -> bool:
+    """Run lightweight generation+PPL during training when the step schedule asks for it."""
+    eval_freq = int(getattr(config, "train_sampling_eval_freq", 0))
+    if eval_freq <= 0 or global_step <= 0 or global_step % eval_freq != 0:
+        return False
+
+    original_output_dir = config.output_dir
+    original_num_samples = config.num_samples
+    original_reconstruction_eval = getattr(config, "reconstruction_eval", False)
+    original_reconstruction_num_samples = getattr(config, "reconstruction_num_samples", None)
+    original_sampling_configs = config.sampling_configs
+
+    eval_num_samples = int(getattr(config, "train_sampling_eval_num_samples", 64))
+    eval_batch_size = int(getattr(config, "train_sampling_eval_batch_size", min(local_batch_size, eval_num_samples)))
+    max_configs = int(getattr(config, "train_sampling_eval_max_configs", 1))
+    metric_names = ["gPPL"]
+    if bool(getattr(config, "use_sentence_plan", False)):
+        metric_names.extend(["oracle_plan_ppl", "shuffled_plan_ppl"])
+    metric_names.append("token_recon_ppl")
+
+    try:
+        config.output_dir = os.path.join(original_output_dir, "train_sampling_eval")
+        config.num_samples = eval_num_samples
+        config.reconstruction_eval = True
+        config.reconstruction_num_samples = eval_num_samples
+        config.sampling_configs = list(original_sampling_configs[:max_configs])
+        if not config.sampling_configs:
+            raise ValueError("train sampling eval has no sampling config to run")
+
+        log_for_0(
+            "Running train-time sampling eval: "
+            f"step={global_step}, samples={eval_num_samples}, "
+            f"batch={eval_batch_size}, configs={len(config.sampling_configs)}, "
+            f"metrics={'+'.join(metric_names)}"
+        )
+        run_generation(
+            state=state, encoder=encoder, eval_dataset=eval_dataset,
+            tokenizer=tokenizer, config=config, generator=generator,
+            local_batch_size=eval_batch_size,
+            train_dataset=train_dataset,
+            sentence_encoder=sentence_encoder,
+        )
+        return True
+    finally:
+        config.output_dir = original_output_dir
+        config.num_samples = original_num_samples
+        config.reconstruction_eval = original_reconstruction_eval
+        config.reconstruction_num_samples = original_reconstruction_num_samples
+        config.sampling_configs = original_sampling_configs
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Train ELF Diffusion Model (PyTorch).")
     parser.add_argument("--config", type=str, default=None,
@@ -179,6 +244,14 @@ def run_training(config, *, force_cpu: bool = False):
     )
     log_for_0(f"Batch size per device: {config.batch_size}")
     log_for_0(f"Number of epochs: {config.epochs}")
+    log_for_0(
+        f"Eval PPL: online={config.online_eval}, model={config.eval_ppl_model}, "
+        f"max_length={config.eval_ppl_max_length}, batch={config.eval_ppl_batch_size}"
+    )
+    log_for_0(
+        f"Reconstruction diagnostics: enabled={config.reconstruction_eval}, "
+        f"samples={config.reconstruction_num_samples or config.num_samples}"
+    )
     log_for_0(f"PyTorch device: {device}, world_size={world}")
     log_for_0(f"BF16 autocast: {bool(getattr(config, 'use_bf16', True)) and device.type == 'cuda'}")
     log_for_0(f"Gradient checkpointing: {bool(getattr(config, 'gradient_checkpointing', True))}")
@@ -187,6 +260,8 @@ def run_training(config, *, force_cpu: bool = False):
             "Sentence plan: "
             f"type={config.sentence_encoder_type}, adapter={getattr(config, 'plan_adapter_type', 'slot_mlp')}, "
             f"slots={config.num_plan_tokens}, dim={config.sentence_emb_dim}, "
+            f"time={getattr(config, 'plan_time_schedule', 'aligned')}"
+            f"(gamma={getattr(config, 'plan_time_warp_gamma', 1.0)}), "
             f"grad={getattr(config, 'sentence_encoder_grad', 'none')}, "
             f"aux_passes={getattr(config, 'plan_aux_passes', 1)}, "
             f"aux_context={getattr(config, 'plan_aux_token_context', 'denoiser_z')}"
@@ -418,6 +493,18 @@ def run_training(config, *, force_cpu: bool = False):
         f"Steps/epoch={steps_per_epoch}, epochs={config.epochs}, total={steps_per_epoch * config.epochs} | "
         f"save every {config.save_freq} epoch(s), eval every {config.eval_freq} epoch(s)"
     )
+    if int(getattr(config, "train_sampling_eval_freq", 0)) > 0:
+        metric_names = ["gPPL"]
+        if bool(getattr(config, "use_sentence_plan", False)):
+            metric_names.extend(["oracle_plan_ppl", "shuffled_plan_ppl"])
+        metric_names.append("token_recon_ppl")
+        log_for_0(
+            f"Train-time sampling eval ({' + '.join(metric_names)}): "
+            f"every {config.train_sampling_eval_freq} step(s), "
+            f"samples={config.train_sampling_eval_num_samples}, "
+            f"batch={config.train_sampling_eval_batch_size}, "
+            f"max_configs={config.train_sampling_eval_max_configs}"
+        )
 
     if config.sampling_configs_path:
         config.sampling_configs = load_sampling_configs(config.sampling_configs_path)
@@ -563,6 +650,15 @@ def run_training(config, *, force_cpu: bool = False):
                     log_for_0(f"Saved checkpoint at epoch {progress:.2f} (step {global_step})")
                     last_save_epoch = progress
 
+            if _run_train_sampling_eval_if_due(
+                state=state, encoder=encoder, eval_dataset=eval_dataset,
+                train_dataset=train_dataset, tokenizer=tokenizer,
+                config=config, generator=g, local_batch_size=local_batch_size,
+                sentence_encoder=sentence_encoder, global_step=global_step,
+            ):
+                last_log_step = global_step
+                last_log_time = time.time()
+
         epoch_pbar.close()
         current_epoch = epoch + 1
         state.epoch = current_epoch
@@ -576,6 +672,8 @@ def run_training(config, *, force_cpu: bool = False):
                 state=state, encoder=encoder, eval_dataset=eval_dataset,
                 tokenizer=tokenizer, config=config, generator=g,
                 local_batch_size=local_batch_size,
+                train_dataset=train_dataset,
+                sentence_encoder=sentence_encoder,
             )
             last_log_step = global_step
             last_log_time = time.time()

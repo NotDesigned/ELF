@@ -16,11 +16,12 @@ from transformers import AutoTokenizer
 
 from modules.t5_encoder import get_encoder
 from modules.model import ELF_models
+from modules.sentence_plan import build_sentence_plan_encoder
 from utils.logging_utils import log_for_0
 from utils.checkpoint_utils import load_checkpoint
 from utils.train_utils import TrainState, local_rank_zero_first
 from utils.data_utils import load_jsonl_dataset, load_dataset_split, get_pad_token_id
-from generation import test_generation_uncond, test_generation_cond
+from generation import run_generation
 from configs.config import load_config_from_yaml, apply_config_overrides, load_sampling_configs, resolve_batch_sizes
 
 logging.basicConfig(
@@ -84,6 +85,14 @@ def main():
     log_for_0(f"Max length: {config.max_length}")
     log_for_0(f"Max input length: {config.max_input_length}")
     log_for_0(f"Num samples: {config.num_samples}")
+    log_for_0(
+        f"Eval PPL: online={config.online_eval}, model={config.eval_ppl_model}, "
+        f"max_length={config.eval_ppl_max_length}, batch={config.eval_ppl_batch_size}"
+    )
+    log_for_0(
+        f"Reconstruction diagnostics: enabled={config.reconstruction_eval}, "
+        f"samples={config.reconstruction_num_samples or config.num_samples}"
+    )
     log_for_0(f"Sampling configs: {len(config.sampling_configs)} config(s)")
     log_for_0(f"BF16 autocast (sampling): {bool(getattr(config, 'use_bf16', True)) and device.type == 'cuda'}")
     log_for_0(f"torch.compile (eval model): {bool(getattr(config, 'use_compile', False))}")
@@ -109,12 +118,27 @@ def main():
                 eval_dataset = load_dataset_split(config.eval_data_path)
             log_for_0(f"Eval dataset size: {len(eval_dataset)}")
 
+        train_dataset = None
+        if bool(getattr(config, "reconstruction_eval", False)) and eval_dataset is None and config.data_path is not None:
+            log_for_0("Loading train dataset subset source for clean reconstruction eval...")
+            train_dataset = load_dataset_split(config.data_path)
+            log_for_0(f"Train dataset size: {len(train_dataset)}")
+
         # Encoder (HuggingFace T5)
         log_for_0(f"Loading Encoder: {config.encoder_model_name}...")
         encoder_config, encoder = get_encoder(config.encoder_model_name, torch.float32)
         encoder = encoder.to(device).eval()
         for p in encoder.parameters():
             p.requires_grad_(False)
+
+        sentence_encoder = build_sentence_plan_encoder(config, device)
+        if sentence_encoder is not None:
+            if sentence_encoder.embedding_dim != int(config.sentence_emb_dim):
+                raise ValueError(
+                    f"Sentence-T5 dim {sentence_encoder.embedding_dim} does not match "
+                    f"config.sentence_emb_dim={config.sentence_emb_dim}"
+                )
+            log_for_0(f"Sentence-T5 encoder loaded: dim={sentence_encoder.embedding_dim}")
 
     # ELF model
     log_for_0(f"Creating {config.model} model...")
@@ -174,20 +198,12 @@ def main():
         if len(seed_list) > 1:
             config.output_dir = os.path.join(original_output_dir, f"seed_{seed_val}")
 
-        for sc_idx, sc in enumerate(config.sampling_configs):
-            if len(config.sampling_configs) > 1:
-                log_for_0(f"\n--- Sampling config {sc_idx + 1}/{len(config.sampling_configs)} ---")
-            common_kwargs = dict(
-                state=state, tokenizer=tokenizer, generator=seed_gen,
-                config=config, sampling_config=sc,
-                batch_size=local_batch_size, num_samples=config.num_samples,
-            )
-            if eval_dataset is None:
-                test_generation_uncond(**common_kwargs)
-            else:
-                test_generation_cond(
-                    **common_kwargs, encoder=encoder, dataset=eval_dataset,
-                )
+        run_generation(
+            state=state, encoder=encoder, eval_dataset=eval_dataset,
+            tokenizer=tokenizer, config=config, generator=seed_gen,
+            local_batch_size=local_batch_size, train_dataset=train_dataset,
+            sentence_encoder=sentence_encoder,
+        )
 
         config.output_dir = original_output_dir
 

@@ -337,11 +337,37 @@ Question: do more detached plan-denoiser passes improve sampling / plan
 refinement while preserving the learned encoder representation?
 
 **Current metrics:** `loss`, `l2_loss`, `ce_loss`, `plan_loss`, and
-`plan_aux_loss` are returned from `train_step.py`; generation keeps the existing
-PPL / BLEU / ROUGE paths. `plan_emb_batch_var`, `plan_emb_norm`,
-`plan_pred_batch_var`, and `plan_pred_norm` are logged as collapse diagnostics.
-With RMSNorm over 768 dimensions, `plan_emb_norm` should be close to
-`sqrt(768) = 27.7` for learned runs.
+`plan_aux_loss` are returned from `train_step.py`. `train_ce_loss` is still the
+training decoder branch, not the sampling metric: decoder rows see clean `s0`
+and `plan_t=1`, while denoiser rows are masked out for CE.
+
+Generation/diagnostic eval is split around the actual question we want to test:
+
+- **gPPL / generation samples:** start from noise, jointly refine token latent
+  and sentence-plan latent, then decode with `_dlm_decode_batch`.
+- **oracle_plan_ppl:** build the clean sentence-plan latent `s0` from the real
+  continuation (`Sentence-T5` target or learned ELF encoder pass), keep that
+  plan fixed, start the token latent from noise, refine only the token field, and
+  decode. This asks whether a good plan helps token generation.
+- **shuffled_plan_ppl:** same as `oracle_plan_ppl`, but `s0` comes from a
+  different sample (the next eval sample id, wrapping around). This is the
+  negative control for plan semantics and still works when eval batch size is 1.
+- **token_recon_ppl:** encode real text into clean T5 token latent `x0`, build
+  clean `s0` when sentence plans are enabled, and decode directly without
+  diffusion sampling. This is only a decoder/token-autoencoding sanity check; it
+  is not the core plan-sampling metric.
+
+For training-time monitoring, `train_sampling_eval_freq > 0` runs a lightweight
+generation pass plus oracle/shuffled plan and token-reconstruction diagnostics
+every N steps under `output_dir/train_sampling_eval`; all use
+`train_sampling_eval_num_samples` and `train_sampling_eval_batch_size`, and
+generation/plan sampling use the first
+`train_sampling_eval_max_configs` sampling configs.
+
+`plan_emb_batch_var`, `plan_emb_norm`, `plan_pred_batch_var`, and
+`plan_pred_norm` are logged as collapse diagnostics. With RMSNorm over 768
+dimensions, `plan_emb_norm` should be close to `sqrt(768) = 27.7` for learned
+runs.
 
 ## Warm Start
 
