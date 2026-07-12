@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -20,6 +21,9 @@ def write_executable(path: Path, body: str) -> None:
 def fake_environment(
     tmp_path: Path, docker_push: str, *, publisher: str = "crane"
 ) -> dict[str, str]:
+    safe_sco = shutil.which("experiment-safe-sco")
+    if safe_sco is None:
+        raise RuntimeError("experiment-safe-sco is not installed")
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     marker = tmp_path / "calls"
@@ -65,6 +69,7 @@ exit 2
         "DOCKER_SAVE_TIMEOUT_SECONDS": "5",
         "REGISTRY_OPERATION_TIMEOUT_SECONDS": "5",
         "DOCKER_CONFIG": str(docker_config),
+        "EXPERIMENTCTL_SAFE_SCO_BIN": safe_sco,
     })
     return env
 

@@ -13,21 +13,12 @@ from typing import Any
 import yaml
 
 from experiment_control.manifest import (
-    IDENTITY_RE,
-    SECRET_KEY_RE,
-    URL_USERINFO_RE,
     ExperimentStateStore,
-    LifecycleStatus,
     RunState,
-    SubmissionIntent,
-    _require_immutable,
-    _validate_identity,
-    append_event,
-    append_event_once,
-    atomic_create,
-    atomic_write,
+    require_immutable,
     sanitize_command,
     utc_now,
+    validate_identity,
 )
 from experiment_control.run_manifest import build_run_manifest, comparable_manifest
 
@@ -42,11 +33,11 @@ def prepare(args: argparse.Namespace) -> dict[str, Any]:
     Returns:
         Paths to the run manifest and newly created attempt manifest.
     """
-    _validate_identity("run_id", args.run_id)
-    _validate_identity("attempt_id", args.attempt_id)
+    validate_identity("run_id", args.run_id)
+    validate_identity("attempt_id", args.attempt_id)
     if args.require_immutable_identities:
-        _require_immutable("source_id", args.source_id)
-        _require_immutable("image_id", args.image_id)
+        require_immutable("source_id", args.source_id)
+        require_immutable("image_id", args.image_id)
 
     store = ExperimentStateStore(args.output_dir)
     run_dir = store.run_dir
@@ -64,7 +55,7 @@ def prepare(args: argparse.Namespace) -> dict[str, Any]:
     if encoded_contract or requested_role:
         if not encoded_contract or not requested_role:
             raise ValueError("research contract and role must be supplied together")
-        _validate_identity("research_role", requested_role)
+        validate_identity("research_role", requested_role)
         try:
             decoded = base64.urlsafe_b64decode(
                 encoded_contract.encode("ascii")
@@ -172,8 +163,8 @@ def record(args: argparse.Namespace) -> dict[str, Any]:
     Recording is allowed only after the run and attempt manifests exist and
     their identities agree with the command arguments.
     """
-    _validate_identity("run_id", args.run_id)
-    _validate_identity("attempt_id", args.attempt_id)
+    validate_identity("run_id", args.run_id)
+    validate_identity("attempt_id", args.attempt_id)
     store = ExperimentStateStore(args.output_dir)
     run_dir = store.run_dir
     manifest_path = store.manifest_path

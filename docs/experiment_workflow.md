@@ -261,6 +261,16 @@ while the container launcher imports the installed experiment-control package be
 any training work and prints its resolved module path. Login nodes may not have
 `/dev/fuse` permission to mount the SIF for a true container-side preflight.
 
+ELF consumes only the package's documented
+[`downstream_contract.md`](https://github.com/NotDesigned/ml-experiment-control/blob/main/docs/downstream_contract.md)
+surface. In particular, controller integration uses `BackendServices`, the
+backend/project registries, `CommandRunner`, and the public state helpers
+`append_event`, `atomic_write`, `validate_identity`, `require_immutable`,
+`sanitize_command`, and `utc_now`.
+Names beginning with `_` and unlisted module internals are not ELF contracts.
+Advancing the commit pin requires the package's gates plus ELF's backend,
+project-adapter, manifest, and sanitizer integration tests.
+
 ### Codex documentation-sync hook
 
 The repository-level `.codex/hooks.json` records the starting commits of ELF,
@@ -318,9 +328,9 @@ observation or vice versa. Once the scheduler is terminal, current
 
 ### Registry publication
 
-SenseCore output sanitization lives in the installed `experiment_control`
-package, so the repository does not depend on a particular user's `~/.codex`
-directory. Publish immutable
+SenseCore output sanitization lives in the installed
+`experiment-safe-sco` Rust binary, so the repository does not depend on a
+particular user's Python module path or `~/.codex` directory. Publish immutable
 images with `tools/push_registry_image.sh`; it distinguishes authorization
 from transport failures, bounds every operation, uses archive plus native
 crane/skopeo only as a transport fallback, verifies the remote digest, and
@@ -402,7 +412,7 @@ Attempt IDs used on SenseCore follow the same lowercase/internal-hyphen
 discipline. Display names are not assumed to share this constraint.
 
 SenseCore preflight checks the SCO executable and an exact-name workspace query
-through `safe_sco.py`; malformed/non-JSON responses fail closed. WYD observe
+through `experiment-safe-sco`; malformed/non-JSON responses fail closed. WYD observe
 preflight checks only SSH and Slurm control access; stage adds rsync/storage;
 submit adds live partition/GRES, account/QOS, Apptainer, and mount checks.
 Reports contain fixed messages rather than raw platform responses.

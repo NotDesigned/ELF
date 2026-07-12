@@ -22,16 +22,14 @@ import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
-from .manifest import (  # noqa: E402
-    IDENTITY_RE,
-    SECRET_KEY_RE,
-    URL_USERINFO_RE,
+from experiment_control import (  # noqa: E402
     ExperimentStateStore,
     RunState,
     append_event,
     atomic_write,
     sanitize_command,
     utc_now,
+    validate_identity,
 )
 from .campaign import load_and_resolve_campaign  # noqa: E402
 from .policy import decide_next_action  # noqa: E402
@@ -64,9 +62,10 @@ _ATTEMPT_SELECTOR = "__experiment_attempt_id"
 _TERMINAL_STATES = frozenset({"SUCCEEDED", "FAILED", "PREEMPTED", "CANCELLED"})
 _CAMPAIGN_SECRET_KEY_RE = re.compile(
     r"(?:^|[_-])(?:secret|password|credential|access[_-]?key(?:[_-](?:id|secret))?"
-    r"|api[_-]?key|authorization|cookie|token)(?:$|[_-])",
+    r"|api[_-]?key|authorization|cookie|proxy|token)(?:$|[_-])",
     re.IGNORECASE,
 )
+_URL_USERINFO_RE = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://[^/@\s]+@")
 
 
 def _reject_embedded_credentials(value: Any, *, path: str) -> None:
@@ -83,7 +82,7 @@ def _reject_embedded_credentials(value: Any, *, path: str) -> None:
         for index, item in enumerate(value):
             _reject_embedded_credentials(item, path=f"{path}[{index}]")
         return
-    if isinstance(value, str) and URL_USERINFO_RE.search(value):
+    if isinstance(value, str) and _URL_USERINFO_RE.search(value):
         raise ValueError(f"URL userinfo is forbidden in campaign metadata: {path}")
 
 
@@ -144,8 +143,10 @@ def load_campaign(path: Path) -> dict[str, Any]:
     for key in ("campaign", "project", "runs"):
         if not payload.get(key):
             raise ValueError(f"campaign is missing {key}")
-    if not IDENTITY_RE.fullmatch(str(payload["campaign"])):
-        raise ValueError("campaign identity contains unsupported characters")
+    try:
+        validate_identity("campaign", str(payload["campaign"]))
+    except ValueError as error:
+        raise ValueError("campaign identity contains unsupported characters") from error
     if not isinstance(payload["runs"], list) or not payload["runs"]:
         raise ValueError("campaign runs must be a non-empty list")
     seen: set[str] = set()
@@ -166,8 +167,10 @@ def validate_run(run: Any, *, project: str | None = None) -> None:
     for key in ("run_id", "config", "backend", "storage", "image_id"):
         if not run.get(key):
             raise ValueError(f"run is missing {key}")
-    if not IDENTITY_RE.fullmatch(str(run["run_id"])):
-        raise ValueError(f"invalid run_id: {run['run_id']!r}")
+    try:
+        validate_identity("run_id", str(run["run_id"]))
+    except ValueError as error:
+        raise ValueError(f"invalid run_id: {run['run_id']!r}") from error
     backend = run["backend"]
     if not isinstance(backend, dict) or backend.get("kind") not in BACKENDS.kinds:
         raise ValueError(
@@ -177,7 +180,10 @@ def validate_run(run: Any, *, project: str | None = None) -> None:
     if not isinstance(env, dict):
         raise ValueError(f"run {run['run_id']} env must be a mapping")
     allowed_env = PROJECTS.get(project).safe_env_keys if project is not None else frozenset()
-    forbidden = [key for key in env if key not in allowed_env or SECRET_KEY_RE.search(key)]
+    forbidden = [
+        key for key in env
+        if key not in allowed_env or _CAMPAIGN_SECRET_KEY_RE.search(key)
+    ]
     if forbidden:
         raise ValueError(f"run {run['run_id']} has forbidden env keys: {sorted(forbidden)}")
     for value in env.values():
@@ -288,8 +294,10 @@ def selected_attempt_id(run: dict[str, Any]) -> str | None:
     if value is None:
         return None
     attempt_id = str(value)
-    if not IDENTITY_RE.fullmatch(attempt_id):
-        raise ValueError(f"invalid internal attempt selector: {attempt_id!r}")
+    try:
+        validate_identity("attempt_id", attempt_id)
+    except ValueError as error:
+        raise ValueError(f"invalid internal attempt selector: {attempt_id!r}") from error
     return attempt_id
 
 

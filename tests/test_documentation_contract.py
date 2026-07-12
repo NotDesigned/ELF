@@ -38,6 +38,10 @@ def test_experiment_workflow_uses_current_modules_and_storage_profiles() -> None
     assert "experiment_run_manifest.build_run_manifest" not in text
     assert "src/elf_experiments/campaign.py" in text
     assert "src/elf_experiments/controller.py" in text
+    assert "downstream_contract.md" in text
+    assert "Names beginning with `_`" in text
+    assert "experiment-safe-sco" in text
+    assert "safe_sco.py" not in text
     assert "/data/liangluocheng/elf" in text
     assert "/datapool/liangluocheng/elf" in text
     for stale_table_entry in (

@@ -1,6 +1,16 @@
+import experiment_control
 from experiment_control.backends.base import BackendRegistry
 from experiment_control.project import ProjectRegistry
 from elf_experiments import controller as experimentctl
+
+
+def test_package_dependency_uses_documented_public_surface():
+    experiment_control.validate_identity("run_id", "elf-run")
+    experiment_control.require_immutable("source_id", "source-deadbeef")
+    assert callable(experiment_control.append_event)
+    assert callable(experiment_control.atomic_write)
+    assert callable(experiment_control.sanitize_command)
+    assert callable(experiment_control.utc_now)
 
 
 def test_controller_core_accepts_a_registered_backend_without_platform_branch(monkeypatch):

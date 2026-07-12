@@ -29,6 +29,7 @@ REGISTRY_OPERATION_TIMEOUT_SECONDS=${REGISTRY_OPERATION_TIMEOUT_SECONDS:-300}
 DOCKER_BIN=${EXPERIMENTCTL_DOCKER_BIN:-docker}
 CRANE_BIN=${EXPERIMENTCTL_CRANE_BIN:-crane}
 SKOPEO_BIN=${EXPERIMENTCTL_SKOPEO_BIN:-skopeo}
+SAFE_SCO_BIN=${EXPERIMENTCTL_SAFE_SCO_BIN:-experiment-safe-sco}
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 AUTH_CHECK="$SCRIPT_DIR/check_docker_registry_auth.py"
 WORK_DIR=""
@@ -60,8 +61,8 @@ esac
 command -v "$DOCKER_BIN" >/dev/null || die "docker is required"
 command -v timeout >/dev/null || die "timeout is required"
 [[ -f "$AUTH_CHECK" ]] || die "missing Docker credential checker: $AUTH_CHECK"
-python3 -c 'import experiment_control.safe_sco' >/dev/null 2>&1 \
-  || die "ml-experiment-control package is not installed"
+command -v "$SAFE_SCO_BIN" >/dev/null \
+  || die "ml-experiment-control Rust sanitizer is not installed"
 "$DOCKER_BIN" info >/dev/null 2>&1 || die "Docker daemon is unavailable"
 "$DOCKER_BIN" image inspect "$IMAGE" >/dev/null 2>&1 || die "local image does not exist: $IMAGE"
 REGISTRY_HOST=${IMAGE%%/*}
@@ -108,7 +109,7 @@ classify_push_failure() {
 }
 
 print_redacted_tail() {
-  tail -n 80 "$1" | python3 -m experiment_control.safe_sco redact-lines >&2
+  tail -n 80 "$1" | "$SAFE_SCO_BIN" redact-lines >&2
 }
 
 if [[ "$PUSH_RC" -ne 0 ]]; then
