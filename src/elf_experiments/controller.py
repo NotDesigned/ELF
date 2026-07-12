@@ -27,7 +27,6 @@ from .manifest import (  # noqa: E402
     ExperimentStateStore,
     RunState,
     append_event,
-    atomic_create,
     atomic_write,
     sanitize_command,
     utc_now,
@@ -49,6 +48,10 @@ from experiment_control.runner import (  # noqa: E402
     SubprocessRunner,
 )
 from experiment_control.states import FailureClass, classify_failure  # noqa: E402
+from experiment_control.outbox import (  # noqa: E402
+    cancel_intent_path as package_cancel_intent_path,
+    execute_cancel_outbox,
+)
 
 
 _COMMAND_RUNNER: CommandRunner = SubprocessRunner()
@@ -504,58 +507,24 @@ def cancel_intent_path(campaign: dict[str, Any], run: dict[str, Any]) -> Path:
     attempt_id = selected_attempt_id(run)
     if not attempt_id:
         raise ValueError("cancel requires an explicit attempt selector")
-    return run_root_dir(campaign, run) / "attempts" / attempt_id / "cancel_intent.json"
+    return package_cancel_intent_path(run_root_dir(campaign, run), attempt_id)
 
 
 def cancel_with_intent(campaign: dict[str, Any], run: dict[str, Any], backend_adapter) -> dict[str, Any]:
-    """Cancel one exact scheduler identity through a durable create-once outbox."""
+    """Bind ELF/backend context to the package-owned durable cancel outbox."""
     record = backend_record(campaign, run)
     attempt_id = str(record["attempt_id"])
     job_id = str(record["backend_job_id"])
-    path = cancel_intent_path(campaign, run)
-    if path.is_file():
-        intent = json.loads(path.read_text(encoding="utf-8"))
-        if intent.get("backend_job_id") != job_id or intent.get("attempt_id") != attempt_id:
-            raise ValueError("cancel intent conflicts with selected scheduler identity")
-        if intent.get("state") == "VERIFIED":
-            return dict(intent["result"])
-        status = backend_adapter.status(campaign, run)
-        if str(status.get("backend_job_id")) != job_id:
-            raise RuntimeError("cancel reconciliation returned a different backend job identity")
-        if str(status.get("state", "")).upper() in {
-            "SUCCEEDED", "FAILED", "CANCELLED", "PREEMPTED",
-        }:
-            intent.update({"state": "VERIFIED", "verified_at": utc_now(), "result": status})
-            atomic_write(path, intent)
-            return status
-        raise RuntimeError(
-            "cancel intent is unresolved and target is still nonterminal; "
-            "do not issue a second cancel mutation"
-        )
-    intent = {
-        "schema_version": 1, "state": "REQUESTED", "requested_at": utc_now(),
-        "project": campaign["project"], "run_id": run["run_id"],
-        "attempt_id": attempt_id, "backend": record.get("backend"),
-        "backend_job_id": job_id,
-    }
-    atomic_create(path, intent)
-    append_event(run_root_dir(campaign, run) / "events.jsonl", {
-        "timestamp": intent["requested_at"], "run_id": run["run_id"],
-        "attempt_id": attempt_id, "backend": record.get("backend"),
-        "backend_job_id": job_id, "event": "cancel_requested", "payload": {},
-    })
-    status = backend_adapter.cancel(campaign, run)
-    if str(status.get("backend_job_id")) != job_id:
-        raise RuntimeError("cancel returned a different backend job identity")
-    intent.update({"state": "VERIFIED", "verified_at": utc_now(), "result": status})
-    atomic_write(path, intent)
-    append_event(run_root_dir(campaign, run) / "events.jsonl", {
-        "timestamp": intent["verified_at"], "run_id": run["run_id"],
-        "attempt_id": attempt_id, "backend": record.get("backend"),
-        "backend_job_id": job_id, "event": "cancel_verified",
-        "payload": {"state": status.get("state")},
-    })
-    return status
+    return execute_cancel_outbox(
+        run_dir=run_root_dir(campaign, run),
+        project=str(campaign["project"]),
+        run_id=str(run["run_id"]),
+        attempt_id=attempt_id,
+        backend=record.get("backend"),
+        backend_job_id=job_id,
+        status_call=lambda: backend_adapter.status(campaign, run),
+        cancel_call=lambda: backend_adapter.cancel(campaign, run),
+    )
 
 
 def recorded_scheduler_job_ids(local_dir: Path, attempt_id: str) -> list[str]:

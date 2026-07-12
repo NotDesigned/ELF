@@ -29,15 +29,17 @@ The root `backend.json`, `status.json`, `collection.json`, and `decision.json`
 are read-model mirrors of the current attempt. Attempt-local files are the
 canonical history; observing an older attempt cannot move the root mirror.
 
-## Manifest and state helper: `elf_experiments.manifest`
+## Manifest and state helper
 
-The helper has two commands. The default command prepares a run/attempt; the
-`record` command appends a lifecycle transition.
+The ELF-facing `tools/experiment_manifest.py` helper has two commands. The
+default command prepares a run/attempt; the `record` command appends a
+lifecycle transition. Its durable store, atomic events, and submission outbox
+come from the installed `experiment_control.manifest` package.
 
 ELF config resolution and scientific-field selection belong to
 `src/elf_experiments/projects/elf.py`, not this backend-neutral state helper.
 Controller and runtime construct the shared manifest schema through
-`elf_experiments.run_manifest.build_run_manifest`.
+`experiment_control.run_manifest.build_run_manifest`.
 
 New Run manifests set `identity_version: 2` and freeze resolved scientific
 config, source/runtime/campaign/image identities, backend, resources, full
@@ -156,8 +158,10 @@ without network access:
 | --- | --- |
 | `src/elf_experiments/campaign.py` | Resolve defaults, profiles, matrices, and authored runs. |
 | `tools/instantiate_campaign.py` | Render one explicit fresh ELF campaign instance without overwriting history. |
-| `src/elf_experiments/manifest.py` and `tools/experiment_manifest.py` | Atomic run/attempt store and its thin state-helper CLI. |
-| `src/elf_experiments/run_manifest.py` | Construct the canonical manifest schema shared by controller and runtime. |
+| Installed `experiment_control/manifest.py` | Own the atomic Run/Attempt store, lifecycle events, and submission outbox. |
+| Installed `experiment_control/run_manifest.py` | Construct the canonical backend-neutral manifest schema. |
+| Installed `experiment_control/outbox.py` | Execute durable cancel intents around backend mutations. |
+| `src/elf_experiments/manifest.py`, `src/elf_experiments/run_manifest.py`, and `tools/experiment_manifest.py` | Preserve ELF's config-aware CLI and compatibility imports over the package-owned primitives. |
 | `src/elf_experiments/assets.py` | ELF asset discovery and Hugging Face cache layout used by the ELF project adapter. |
 | `src/elf_experiments/overrides.py` | ELF's ordered environment-to-config override sequence. |
 | `src/elf_experiments/policy.py` | Classify failures and recommend bounded next actions without mutating a scheduler. |
@@ -401,7 +405,7 @@ For SenseCore, collection obtains the exact job's worker table through a
 schema-checked sanitizer that drops host/pod IP columns and retains only worker
 identity and phase.
 
-Controller and runtime use `elf_experiments.run_manifest.build_run_manifest` for
+Controller and runtime use `experiment_control.run_manifest.build_run_manifest` for
 the same canonical `manifest.yaml` schema. Slurm stages that manifest before
 the job script; the runtime validates it before creating attempt/process
 records. Checkpoint collection accepts only `checkpoint_<step>` payloads whose

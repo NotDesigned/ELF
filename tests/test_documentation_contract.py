@@ -30,7 +30,10 @@ def test_experiment_workflow_uses_current_modules_and_storage_profiles() -> None
 
     assert "python tools/experiment_manifest.py" in text
     assert "python -m elf_experiments.manifest" not in text
-    assert "elf_experiments.run_manifest.build_run_manifest" in text
+    assert "experiment_control.run_manifest.build_run_manifest" in text
+    assert "Installed `experiment_control/manifest.py`" in text
+    assert "Installed `experiment_control/outbox.py`" in text
+    assert "elf_experiments.run_manifest.build_run_manifest" not in text
     assert "experiment_run_manifest.build_run_manifest" not in text
     assert "src/elf_experiments/campaign.py" in text
     assert "src/elf_experiments/controller.py" in text

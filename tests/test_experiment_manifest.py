@@ -4,9 +4,6 @@ import sys
 from pathlib import Path
 
 import yaml
-import pytest
-
-from elf_experiments.manifest import ExperimentStateStore, RunState, sanitize_command
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -49,32 +46,6 @@ def prepare_args(run_dir: Path, attempt_id: str = "attempt-001") -> list[str]:
         "train",
         str(CONFIG),
     ]
-
-
-def test_legacy_control_records_are_observable_but_not_mutable(tmp_path):
-    run_dir = tmp_path / "legacy-run"
-    attempt_dir = run_dir / "attempts" / "attempt-001"
-    attempt_dir.mkdir(parents=True)
-    legacy = {
-        "schema_version": 1,
-        "project": "elf",
-        "run_id": "legacy-run",
-        "attempt_id": "attempt-001",
-        "created_at": "2026-07-11T00:00:00Z",
-        "backend": {"kind": "legacy-backend"},
-    }
-    (run_dir / "control_manifest.yaml").write_text(yaml.safe_dump(legacy))
-    (attempt_dir / "control_attempt.yaml").write_text(yaml.safe_dump(legacy))
-    store = ExperimentStateStore(run_dir)
-
-    assert store.load_manifest()["run_id"] == "legacy-run"
-    assert store.load_attempt("attempt-001")["attempt_id"] == "attempt-001"
-    assert store.read_status("attempt-001").state == RunState.CREATED
-    assert not store.manifest_path.exists()
-    assert not store.attempt_path("attempt-001").exists()
-
-    with pytest.raises(ValueError, match="observation-only"):
-        store.ensure_manifest(legacy)
 
 
 def test_prepare_writes_durable_run_and_attempt_records(tmp_path):
@@ -162,9 +133,3 @@ def test_record_updates_status_and_appends_lifecycle_event(tmp_path):
     assert status["exit_code"] == 0
     assert events[-1]["event"] == "process_exited"
     assert events[-1]["payload"]["exit_code"] == 0
-
-
-def test_manifest_command_redacts_secret_values():
-    assert sanitize_command(
-        ["train", "WANDB_API_KEY=secret-value", "--access-token", "secret-value", "seed=42"]
-    ) == ["train", "WANDB_API_KEY=<redacted>", "--access-token", "<redacted>", "seed=42"]
