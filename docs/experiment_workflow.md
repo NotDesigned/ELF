@@ -257,6 +257,22 @@ while the container launcher imports the installed experiment-control package be
 any training work and prints its resolved module path. Login nodes may not have
 `/dev/fuse` permission to mount the SIF for a true container-side preflight.
 
+### Codex documentation-sync hook
+
+The repository-level `.codex/hooks.json` records the starting commits of ELF,
+`ml-experiment-control`, and `research-console` at `SessionStart`. At `Stop`, it
+checks both committed and uncommitted implementation changes through
+`.codex/hooks/docs_sync.py`. A turn that changes an experiment-control boundary
+without changing that repository's README or `docs/` is continued automatically
+so Codex can review the documentation impact. When documentation genuinely does
+not need to change, the final response must include
+`Docs impact: none — <specific reason>`.
+
+Codex requires repo-local command hooks to be reviewed and trusted through
+`/hooks` before first use, and again whenever the hook definition changes. The
+hook is a review gate; repository tests remain the executable contract for the
+specific documented module paths and ownership rules.
+
 `observe` records scheduler evidence and collects process/model evidence as
 separate objects. `decide` writes `decision.json`. It permits a retry only for
 classified transport, scheduler/node, or preemption failures within the
