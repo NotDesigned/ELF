@@ -588,8 +588,176 @@ def test_collection_separates_stale_runtime_from_scheduler_truth():
     assert result["runtime_state"] == "RUNNING"
     assert result["scheduler_state"] == "CANCELLED"
     assert result["worker_state"] == "RELEASED"
-    assert result["process_state"] == "RUNNING"
+    assert result["process_state"] == "CANCELLED"
     assert result["model_state"] == "OBSERVED"
+
+
+def test_terminal_scheduler_state_overrides_stale_worker_and_process_state():
+    result = annotate_collection(
+        {"state": "RUNNING", "worker_state": "ALLOCATED", "step": 10},
+        {"state": "SUCCEEDED"},
+    )
+    assert result["runtime_state"] == "RUNNING"
+    assert result["scheduler_state"] == "SUCCEEDED"
+    assert result["worker_state"] == "RELEASED"
+    assert result["process_state"] == "SUCCEEDED"
+
+
+def test_collection_cleans_nul_padded_process_logs():
+    result = annotate_collection(
+        {
+            "state": "RUNNING",
+            "process_evidence": {
+                "observed": True,
+                "stdout_tail": ["metric\x00\x00"],
+                "stderr_tail": ["progress\x00"],
+            },
+        },
+        {"state": "RUNNING"},
+    )
+    assert result["process_evidence"]["stdout_tail"] == ["metric"]
+    assert result["process_evidence"]["stderr_tail"] == ["progress"]
+
+
+def test_logs_fall_back_to_attempt_collection_when_live_probe_is_unavailable(
+    tmp_path, monkeypatch,
+):
+    monkeypatch.chdir(REPO_ROOT)
+    campaign = slurm_campaign(tmp_path)
+    run = materialize_run(campaign, campaign["runs"][0], "source-fixed")
+    prepare_run(campaign, run, "source-fixed", attempt_id="attempt-001")
+    record_submission_intent(campaign, run, "attempt-001")
+    record_submission(campaign, run, "attempt-001", "1234")
+    selected = experimentctl.select_attempt(run, "attempt-001")
+    experimentctl.write_local_collection(campaign, selected, {
+        "process_evidence": {
+            "observed": True,
+            "sources": {"stdout": "/remote/stdout", "stderr": "/remote/stderr"},
+            "stdout_tail": ["one", "two", "three"],
+            "stderr_tail": ["warning"],
+        }
+    })
+
+    class UnavailableLogs:
+        def logs(self, _campaign, _run, *, tail):
+            raise RuntimeError(f"live log probe unavailable at tail {tail}")
+
+    result = experimentctl.read_logs(
+        campaign, selected, UnavailableLogs(), tail=2
+    )
+    assert result["live"] is False
+    assert result["evidence_source"] == "cached_collection"
+    assert result["stdout"] == ["two", "three"]
+    assert result["stderr"] == ["warning"]
+    assert result["backend_job_id"] == "1234"
+
+
+def test_watch_streams_first_metric_and_persists_decision(
+    tmp_path, monkeypatch, capsys,
+):
+    monkeypatch.chdir(REPO_ROOT)
+    campaign = slurm_campaign(tmp_path)
+    run = materialize_run(campaign, campaign["runs"][0], "source-fixed")
+    prepare_run(campaign, run, "source-fixed", attempt_id="attempt-001")
+    record_submission_intent(campaign, run, "attempt-001")
+    record_submission(campaign, run, "attempt-001", "1234")
+    selected = experimentctl.select_attempt(run, "attempt-001")
+
+    class RunningBackend:
+        def status(self, _campaign, selected_run):
+            return {
+                "run_id": selected_run["run_id"], "backend": "slurm",
+                "backend_job_id": "1234", "state": "RUNNING",
+                "raw_state": "RUNNING",
+            }
+
+        def collect(self, _campaign, selected_run):
+            return {
+                "run_id": selected_run["run_id"], "state": "RUNNING",
+                "step": 100, "optimizer_step": 50, "train_loss": 3.0,
+            }
+
+    backend = RunningBackend()
+
+    class Registry:
+        kinds = frozenset({"slurm"})
+
+        def get(self, _kind):
+            return backend
+
+    monkeypatch.setattr(experimentctl, "BACKENDS", Registry())
+    assert experimentctl.watch_runs(
+        campaign, [selected], attempt_id="attempt-001",
+        interval_seconds=1, timeout_seconds=0, until="first-metric",
+    ) == 0
+    events = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert [event["event"] for event in events] == [
+        "watch_observation", "watch_run_complete", "watch_complete",
+    ]
+    assert events[0]["model_state"] == "OBSERVED"
+    assert events[0]["optimizer_step"] == 50
+    assert events[1]["reason"] == "first-metric"
+    assert events[1]["decision"]["action"] == "OBSERVE"
+    assert (
+        tmp_path / "local/controller-test/smoke-h100/attempts/attempt-001/decision.json"
+    ).is_file()
+
+
+def test_first_metric_gate_does_not_accept_checkpoint_only_evidence():
+    assert experimentctl.has_model_metric({
+        "model_state": "OBSERVED", "latest_completed_checkpoint": "/ckpt"
+    }) is False
+    assert experimentctl.has_model_metric({"step": 0}) is True
+
+
+def test_watch_terminal_state_collects_and_decides_without_sleeping(
+    tmp_path, monkeypatch, capsys,
+):
+    monkeypatch.chdir(REPO_ROOT)
+    campaign = slurm_campaign(tmp_path)
+    run = materialize_run(campaign, campaign["runs"][0], "source-fixed")
+    prepare_run(campaign, run, "source-fixed", attempt_id="attempt-001")
+    record_submission_intent(campaign, run, "attempt-001")
+    record_submission(campaign, run, "attempt-001", "1234")
+    selected = experimentctl.select_attempt(run, "attempt-001")
+
+    class TerminalBackend:
+        def status(self, _campaign, selected_run):
+            return {
+                "run_id": selected_run["run_id"], "backend": "slurm",
+                "backend_job_id": "1234", "state": "SUCCEEDED",
+                "raw_state": "COMPLETED", "exit_code": "0:0",
+            }
+
+        def collect(self, _campaign, selected_run):
+            return {
+                "run_id": selected_run["run_id"], "state": "RUNNING",
+                "step": 100, "latest_completed_checkpoint": "/remote/ckpt",
+            }
+
+    backend = TerminalBackend()
+
+    class Registry:
+        kinds = frozenset({"slurm"})
+
+        def get(self, _kind):
+            return backend
+
+    monkeypatch.setattr(experimentctl, "BACKENDS", Registry())
+    monkeypatch.setattr(
+        experimentctl.time, "sleep",
+        lambda _seconds: (_ for _ in ()).throw(AssertionError("must not sleep")),
+    )
+    assert experimentctl.watch_runs(
+        campaign, [selected], attempt_id="attempt-001",
+        interval_seconds=60, timeout_seconds=0, until="terminal",
+    ) == 0
+    events = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    terminal = events[1]
+    assert terminal["reason"] == "terminal"
+    assert terminal["worker_state"] == "RELEASED"
+    assert terminal["process_state"] == "SUCCEEDED"
+    assert terminal["decision"]["action"] == "VERIFY_RESULTS"
 
 
 def test_collection_classifies_pretraining_import_failure():

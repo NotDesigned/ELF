@@ -11,6 +11,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -52,6 +53,7 @@ from experiment_control.states import FailureClass, classify_failure  # noqa: E4
 
 _COMMAND_RUNNER: CommandRunner = SubprocessRunner()
 _ATTEMPT_SELECTOR = "__experiment_attempt_id"
+_TERMINAL_STATES = frozenset({"SUCCEEDED", "FAILED", "PREEMPTED", "CANCELLED"})
 _CAMPAIGN_SECRET_KEY_RE = re.compile(
     r"(?:^|[_-])(?:secret|password|credential|access[_-]?key(?:[_-](?:id|secret))?"
     r"|api[_-]?key|authorization|cookie|token)(?:$|[_-])",
@@ -764,6 +766,19 @@ def campaign_research_block(
     return evaluate_research_block(contract=contract, role_records=records)
 
 
+def clean_log_lines(value: Any, *, max_chars: int = 32768) -> list[str]:
+    """Normalize persisted/tool-facing log lines and bound pathological rows."""
+    if not isinstance(value, list):
+        return []
+    cleaned: list[str] = []
+    for value_line in value:
+        line = str(value_line).replace("\x00", "")
+        if len(line) > max_chars:
+            line = line[:max_chars] + "…<truncated>"
+        cleaned.append(line)
+    return cleaned
+
+
 def annotate_collection(
     summary: dict[str, Any], scheduler_status: dict[str, Any]
 ) -> dict[str, Any]:
@@ -772,21 +787,41 @@ def annotate_collection(
     annotated["runtime_state"] = summary.get("state")
     annotated["scheduler_state"] = scheduler_status.get("state")
     process_evidence = summary.get("process_evidence", {})
+    if isinstance(process_evidence, dict):
+        process_evidence = dict(process_evidence)
+        process_evidence["stdout_tail"] = clean_log_lines(
+            process_evidence.get("stdout_tail")
+        )
+        process_evidence["stderr_tail"] = clean_log_lines(
+            process_evidence.get("stderr_tail")
+        )
+        annotated["process_evidence"] = process_evidence
     process_observed = bool(
         isinstance(process_evidence, dict) and process_evidence.get("observed")
     )
-    scheduler_terminal = scheduler_status.get("state") in {
-        "SUCCEEDED", "FAILED", "PREEMPTED", "CANCELLED"
-    }
+    scheduler_state = str(scheduler_status.get("state") or "UNKNOWN")
+    scheduler_terminal = scheduler_state in _TERMINAL_STATES
     inferred_worker = (
         "RELEASED" if scheduler_terminal
         else "ALLOCATED" if process_observed
         else "UNKNOWN"
     )
-    annotated["worker_state"] = summary.get("worker_state", inferred_worker)
-    annotated["process_state"] = summary.get("state") or "UNKNOWN"
-    if scheduler_status.get("state") == "FAILED" and process_observed:
-        annotated["process_state"] = "FAILED"
+    # Scheduler terminality proves that the allocation and its processes can
+    # no longer be running. Preserve the adapter's possibly stale runtime
+    # observation separately in ``runtime_state``, but never expose that stale
+    # value as current worker/process state.
+    annotated["worker_state"] = (
+        "RELEASED" if scheduler_terminal
+        else summary.get("worker_state", inferred_worker)
+    )
+    runtime_state = summary.get("state")
+    process_was_observed = process_observed or runtime_state not in {None, "", "UNKNOWN"}
+    annotated["process_state"] = (
+        scheduler_state if scheduler_terminal and process_was_observed
+        else "UNKNOWN" if scheduler_terminal
+        else runtime_state or "UNKNOWN"
+    )
+    if scheduler_state == "FAILED" and process_observed:
         failure = classify_failure(json.dumps(process_evidence, ensure_ascii=False))
         if failure is not FailureClass.UNKNOWN:
             annotated["failure_class"] = failure.value
@@ -817,6 +852,71 @@ def annotate_collection(
     return annotated
 
 
+def cached_attempt_logs(
+    campaign: dict[str, Any], run: dict[str, Any], *, tail: int,
+    live_error: str,
+) -> dict[str, Any] | None:
+    """Return bounded attempt logs cached by collect/observe, when available.
+
+    A transient backend log probe must not make logs appear unavailable when a
+    prior controller observation already persisted sanitized process evidence.
+    The response is explicitly marked non-live so callers cannot mistake it
+    for a successful remote read.
+    """
+    attempt_id = selected_attempt_id(run)
+    if not attempt_id:
+        return None
+    path = run_root_dir(campaign, run) / "attempts" / attempt_id / "collection.json"
+    if not path.is_file():
+        return None
+    collection = json.loads(path.read_text(encoding="utf-8"))
+    evidence = collection.get("process_evidence")
+    if not isinstance(evidence, dict) or not evidence.get("observed"):
+        return None
+    stdout = evidence.get("stdout_tail")
+    stderr = evidence.get("stderr_tail")
+    if not isinstance(stdout, list) or not isinstance(stderr, list):
+        return None
+    record = backend_record(campaign, run)
+    return {
+        "run_id": run["run_id"],
+        "backend": run["backend"]["kind"],
+        "backend_job_id": record["backend_job_id"],
+        "attempt_id": attempt_id,
+        "tail": tail,
+        "sources": evidence.get("sources", {}),
+        "stdout": clean_log_lines(stdout[-tail:]),
+        "stderr": clean_log_lines(stderr[-tail:]),
+        "live": False,
+        "evidence_source": "cached_collection",
+        "live_error": live_error,
+    }
+
+
+def read_logs(
+    campaign: dict[str, Any], run: dict[str, Any], backend_adapter,
+    *, tail: int,
+) -> dict[str, Any]:
+    """Read live backend logs, falling back to explicit cached evidence."""
+    try:
+        payload = backend_adapter.logs(campaign, run, tail=tail)
+    except RuntimeError:
+        cached = cached_attempt_logs(
+            campaign, run, tail=tail,
+            live_error="live log probe unavailable; cached evidence returned",
+        )
+        if cached is None:
+            raise
+        return cached
+    payload = dict(payload)
+    for key in ("stdout", "stderr", "lines"):
+        if key in payload:
+            payload[key] = clean_log_lines(payload[key])
+    payload.setdefault("live", True)
+    payload.setdefault("evidence_source", "backend")
+    return payload
+
+
 def status_for_decision(
     status: dict[str, Any], collection: dict[str, Any]
 ) -> dict[str, Any]:
@@ -844,6 +944,183 @@ def unsubmitted_status(campaign: dict[str, Any], run: dict[str, Any]) -> dict[st
     return payload
 
 
+def observe_run(
+    campaign: dict[str, Any], run: dict[str, Any], backend_adapter,
+    *, attempt_id: str,
+) -> dict[str, Any]:
+    """Collect one four-layer observation and persist its attempt read model."""
+    reconcile_submission(campaign, run, attempt_id)
+    backend_payload = ExperimentStateStore(
+        run_root_dir(campaign, run)
+    ).load_backend(attempt_id) or {}
+    if backend_payload.get("backend_job_id"):
+        status = backend_adapter.status(campaign, run)
+        update_observed_status(campaign, run, status)
+        collection = annotate_collection(
+            backend_adapter.collect(campaign, run), status
+        )
+        write_local_collection(campaign, run, collection)
+    else:
+        status, collection = unsubmitted_status(campaign, run), None
+    return {
+        "run_id": run["run_id"],
+        "scheduler": status,
+        "worker": {
+            "state": collection.get("worker_state", "UNKNOWN")
+            if collection else "UNKNOWN"
+        },
+        "process": {
+            "state": collection.get("process_state", "UNKNOWN")
+            if collection else "UNKNOWN"
+        },
+        "model": collection,
+    }
+
+
+def decide_run(
+    campaign: dict[str, Any], run: dict[str, Any], *, attempt_id: str,
+) -> dict[str, Any]:
+    """Evaluate retry and research policy from the latest durable observation."""
+    local_dir = run_root_dir(campaign, run)
+    status = unsubmitted_status(campaign, run)
+    collection_path = local_dir / "attempts" / attempt_id / "collection.json"
+    collection = (
+        json.loads(collection_path.read_text(encoding="utf-8"))
+        if collection_path.is_file() else {}
+    )
+    attempts = [
+        path for path in (local_dir / "attempts").glob("attempt-*")
+        if path.is_dir()
+    ]
+    retry = run.get("retry", {"max_infra_retries": 0})
+    diagnostic = json.dumps(collection, ensure_ascii=False)
+    decision_status = status_for_decision(status, collection)
+    decision = decide_next_action(
+        decision_status, retries_used=max(0, len(attempts) - 1),
+        max_infra_retries=int(retry.get("max_infra_retries", 0)),
+        diagnostic_text=diagnostic,
+        completed_checkpoint=collection.get("latest_completed_checkpoint"),
+    )
+    payload = decision.to_dict()
+    payload["attempt_id"] = attempt_id
+    contract = campaign.get("research_contract")
+    if contract is not None:
+        role = str(run["research_role"])
+        research = evaluate_research_run(
+            status=status, collection=collection,
+            contract=contract, role=role,
+        )
+        payload.update(research)
+        block = campaign_research_block(
+            campaign, current_run_id=str(run["run_id"]),
+            current_decision=payload, attempt_id=attempt_id,
+        )
+        payload.update(block)
+        if decision.action == "OBSERVE" and research["research_action"] == "STOP_RECOMMENDED":
+            payload["action"] = "STOP_RECOMMENDED"
+        elif decision.action == "VERIFY_RESULTS":
+            if research["research_outcome"] == "PASS":
+                payload["action"] = block["block_action"]
+            else:
+                payload["action"] = research["research_action"]
+    decision_path = local_dir / "attempts" / attempt_id / "decision.json"
+    atomic_write(decision_path, payload)
+    current = ExperimentStateStore(local_dir).load_backend()
+    if current and current.get("attempt_id") == attempt_id:
+        atomic_write(local_dir / "decision.json", payload)
+    return {"run_id": run["run_id"], **payload}
+
+
+def has_model_metric(model: dict[str, Any]) -> bool:
+    """Return whether a collection contains an actual model metric record."""
+    return any(
+        model.get(field) is not None
+        for field in ("step", "optimizer_step", "latest_metric")
+    )
+
+
+def watch_runs(
+    campaign: dict[str, Any], runs: list[dict[str, Any]], *, attempt_id: str,
+    interval_seconds: float, timeout_seconds: float, until: str,
+) -> int:
+    """Stream JSONL observations until every selected run reaches a stop gate.
+
+    Terminal runs are collected by ``observe_run`` and immediately evaluated
+    by ``decide_run``. This command is read-only with respect to schedulers: a
+    STOP_RECOMMENDED decision is reported but never converted into cancellation.
+    """
+    if interval_seconds <= 0:
+        raise ValueError("--interval-seconds must be greater than zero")
+    if timeout_seconds < 0:
+        raise ValueError("--timeout-seconds must be zero or greater")
+    if until not in {"terminal", "first-metric"}:
+        raise ValueError("--until must be terminal or first-metric")
+    started = time.monotonic()
+    pending = {str(run["run_id"]): run for run in runs}
+    polls = 0
+    while pending:
+        polls += 1
+        for run_id, run in list(pending.items()):
+            backend_adapter = BACKENDS.get(str(run["backend"]["kind"]))
+            observation = observe_run(
+                campaign, run, backend_adapter, attempt_id=attempt_id
+            )
+            scheduler_state = str(observation["scheduler"].get("state", "UNKNOWN"))
+            model = observation.get("model") or {}
+            metric_observed = has_model_metric(model)
+            terminal = scheduler_state in _TERMINAL_STATES
+            print(json.dumps({
+                "event": "watch_observation",
+                "poll": polls,
+                "run_id": run_id,
+                "scheduler_state": scheduler_state,
+                "worker_state": observation["worker"]["state"],
+                "process_state": observation["process"]["state"],
+                "model_state": model.get("model_state", "NOT_OBSERVED"),
+                "step": model.get("step"),
+                "optimizer_step": model.get("optimizer_step"),
+            }, ensure_ascii=False, sort_keys=True), flush=True)
+            reached = terminal or (until == "first-metric" and metric_observed)
+            if reached:
+                decision = decide_run(campaign, run, attempt_id=attempt_id)
+                reason = "terminal" if terminal else "first-metric"
+                print(json.dumps({
+                    "event": "watch_run_complete",
+                    "run_id": run_id,
+                    "reason": reason,
+                    "scheduler_state": scheduler_state,
+                    "worker_state": observation["worker"]["state"],
+                    "process_state": observation["process"]["state"],
+                    "model_state": model.get("model_state", "NOT_OBSERVED"),
+                    "step": model.get("step"),
+                    "optimizer_step": model.get("optimizer_step"),
+                    "decision": decision,
+                }, ensure_ascii=False, sort_keys=True), flush=True)
+                del pending[run_id]
+        if not pending:
+            break
+        elapsed = time.monotonic() - started
+        if timeout_seconds and elapsed >= timeout_seconds:
+            print(json.dumps({
+                "event": "watch_timeout",
+                "elapsed_seconds": elapsed,
+                "pending_run_ids": sorted(pending),
+                "polls": polls,
+            }, ensure_ascii=False, sort_keys=True), flush=True)
+            return 1
+        sleep_for = interval_seconds
+        if timeout_seconds:
+            sleep_for = min(sleep_for, max(0.0, timeout_seconds - elapsed))
+        time.sleep(sleep_for)
+    print(json.dumps({
+        "event": "watch_complete",
+        "polls": polls,
+        "run_ids": sorted(str(run["run_id"]) for run in runs),
+        "until": until,
+    }, ensure_ascii=False, sort_keys=True), flush=True)
+    return 0
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     """Parse campaign path, operation, optional run filters, and dry-run policy."""
     parser = argparse.ArgumentParser(description=__doc__)
@@ -851,7 +1128,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "command", choices=(
             "prepare", "preflight", "stage", "submit", "status", "collect", "cancel",
-            "observe", "logs", "decide", "assets-plan", "assets-verify", "check-identity",
+            "observe", "watch", "logs", "decide", "assets-plan", "assets-verify", "check-identity",
         )
     )
     parser.add_argument("--run", action="append", default=[], help="limit to this run ID; repeatable")
@@ -862,6 +1139,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="readiness scope used by the preflight command",
     )
     parser.add_argument("--tail", type=int, default=100, help="maximum log lines per stream")
+    parser.add_argument(
+        "--interval-seconds", type=float, default=60.0,
+        help="watch polling interval; must be greater than zero",
+    )
+    parser.add_argument(
+        "--timeout-seconds", type=float, default=0.0,
+        help="watch timeout; zero waits without a deadline",
+    )
+    parser.add_argument(
+        "--until", choices=("terminal", "first-metric"), default="terminal",
+        help="watch completion gate",
+    )
     return parser.parse_args(argv)
 
 
@@ -875,12 +1164,20 @@ def main(argv: list[str] | None = None) -> int:
     runs_with_identity = []
     for run in selected:
         identity = str(run.get("source_id", default_identity))
-        if args.command in {"status", "collect", "cancel", "observe", "logs", "decide"}:
+        if args.command in {"status", "collect", "cancel", "observe", "watch", "logs", "decide"}:
             identity = frozen_source_identity(campaign, run, identity)
         materialized = materialize_run(campaign, run, identity)
-        if args.command in {"status", "collect", "cancel", "observe", "logs", "decide"}:
+        if args.command in {"status", "collect", "cancel", "observe", "watch", "logs", "decide"}:
             materialized = select_attempt(materialized, args.attempt_id)
         runs_with_identity.append((materialized, identity))
+    if args.command == "watch":
+        return watch_runs(
+            campaign, [run for run, _identity in runs_with_identity],
+            attempt_id=args.attempt_id,
+            interval_seconds=args.interval_seconds,
+            timeout_seconds=args.timeout_seconds,
+            until=args.until,
+        )
     outputs: list[dict[str, Any]] = []
     for run, identity in runs_with_identity:
         backend_kind = run["backend"]["kind"]
@@ -963,84 +1260,21 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "logs":
             if args.tail < 1 or args.tail > 10000:
                 raise ValueError("--tail must be between 1 and 10000")
-            outputs.append(backend_adapter.logs(campaign, run, tail=args.tail))
+            outputs.append(read_logs(
+                campaign, run, backend_adapter, tail=args.tail
+            ))
         elif args.command == "cancel":
             status = cancel_with_intent(campaign, run, backend_adapter)
             update_observed_status(campaign, run, status)
             outputs.append(status)
         elif args.command == "observe":
-            reconcile_submission(campaign, run, args.attempt_id)
-            backend_payload = ExperimentStateStore(
-                run_root_dir(campaign, run)
-            ).load_backend(args.attempt_id) or {}
-            if backend_payload.get("backend_job_id"):
-                status = backend_adapter.status(campaign, run)
-                update_observed_status(campaign, run, status)
-                collection = annotate_collection(
-                    backend_adapter.collect(campaign, run), status
-                )
-                write_local_collection(campaign, run, collection)
-            else:
-                status, collection = unsubmitted_status(campaign, run), None
-            outputs.append({
-                "run_id": run["run_id"],
-                "scheduler": status,
-                "worker": {
-                    "state": collection.get("worker_state", "UNKNOWN")
-                    if collection else "UNKNOWN"
-                },
-                "process": {
-                    "state": collection.get("process_state", "UNKNOWN")
-                    if collection else "UNKNOWN"
-                },
-                "model": collection,
-            })
+            outputs.append(observe_run(
+                campaign, run, backend_adapter, attempt_id=args.attempt_id
+            ))
         elif args.command == "decide":
-            local_dir = run_root_dir(campaign, run)
-            status = unsubmitted_status(campaign, run)
-            collection_path = local_dir / "attempts" / args.attempt_id / "collection.json"
-            collection = json.loads(collection_path.read_text(encoding="utf-8")) if collection_path.is_file() else {}
-            attempts = [path for path in (local_dir / "attempts").glob("attempt-*") if path.is_dir()]
-            retry = run.get("retry", {"max_infra_retries": 0})
-            diagnostic = json.dumps(collection, ensure_ascii=False)
-            # Collection inspects process logs and can produce a more precise
-            # classification than the scheduler/status transport envelope.
-            # Decisions must use that latest attempt evidence when available.
-            decision_status = status_for_decision(status, collection)
-            decision = decide_next_action(
-                decision_status, retries_used=max(0, len(attempts) - 1),
-                max_infra_retries=int(retry.get("max_infra_retries", 0)),
-                diagnostic_text=diagnostic,
-                completed_checkpoint=collection.get("latest_completed_checkpoint"),
-            )
-            payload = decision.to_dict()
-            payload["attempt_id"] = args.attempt_id
-            contract = campaign.get("research_contract")
-            if contract is not None:
-                role = str(run["research_role"])
-                research = evaluate_research_run(
-                    status=status, collection=collection,
-                    contract=contract, role=role,
-                )
-                payload.update(research)
-                block = campaign_research_block(
-                    campaign, current_run_id=str(run["run_id"]),
-                    current_decision=payload, attempt_id=args.attempt_id,
-                )
-                payload.update(block)
-                if decision.action == "OBSERVE" and research["research_action"] == "STOP_RECOMMENDED":
-                    payload["action"] = "STOP_RECOMMENDED"
-                elif decision.action == "VERIFY_RESULTS":
-                    if research["research_outcome"] == "PASS":
-                        payload["action"] = block["block_action"]
-                    else:
-                        payload["action"] = research["research_action"]
-            decision_path = local_dir / "attempts" / args.attempt_id / "decision.json"
-            atomic_write(decision_path, payload)
-            current = ExperimentStateStore(local_dir).load_backend()
-            if current and current.get("attempt_id") == args.attempt_id:
-                atomic_write(local_dir / "decision.json", payload)
-            outputs.append({"run_id": run["run_id"], **payload})
+            outputs.append(decide_run(
+                campaign, run, attempt_id=args.attempt_id
+            ))
         elif args.command in {"assets-plan", "assets-verify"}:
             project = PROJECTS.get(str(campaign["project"]))
             requirements = project.plan_assets(

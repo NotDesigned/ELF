@@ -68,8 +68,8 @@ $CTL submit --run RUN_ID --dry-run
 $CTL assets-verify --run RUN_ID
 $CTL stage --run RUN_ID
 $CTL submit --run RUN_ID
-$CTL observe --run RUN_ID
-$CTL decide --run RUN_ID
+$CTL watch --run RUN_ID --until first-metric --interval-seconds 30
+$CTL watch --run RUN_ID --until terminal --interval-seconds 60
 ```
 
 `check-identity` is the first live read-only gate and exits nonzero for a
@@ -90,6 +90,12 @@ and `decide`. A retry uses a new attempt ID and a new scheduler resource name.
 The Run manifest must remain byte-equivalent in all identity fields. Cancel is
 also outbox-protected: an unresolved cancel intent is reconciled by exact job
 ID and is never blindly reissued.
+
+`watch` is the preferred Agent-facing observation loop. It emits JSONL
+progress, persists each observation, and runs `decide` after a terminal state.
+It deliberately does not turn a decision into scheduler mutation: cancellation
+or retry remains a separate, explicit command. Use `--timeout-seconds` when an
+outer Agent needs a bounded call; zero means no deadline.
 
 For WYD, `stage` also verifies the project-declared required files in the
 staged source tree. The ELF launcher performs the actual import check as its

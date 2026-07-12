@@ -100,6 +100,7 @@ python tools/experimentctl.py experiments/campaigns/CAMPAIGN.yml submit --run RU
 python tools/experimentctl.py experiments/campaigns/CAMPAIGN.yml status --run RUN_ID
 python tools/experimentctl.py experiments/campaigns/CAMPAIGN.yml collect --run RUN_ID
 python tools/experimentctl.py experiments/campaigns/CAMPAIGN.yml observe --run RUN_ID
+python tools/experimentctl.py experiments/campaigns/CAMPAIGN.yml watch --run RUN_ID --until terminal
 python tools/experimentctl.py experiments/campaigns/CAMPAIGN.yml logs --run RUN_ID --tail 100
 python tools/experimentctl.py experiments/campaigns/CAMPAIGN.yml decide --run RUN_ID
 python tools/experimentctl.py experiments/campaigns/CAMPAIGN.yml cancel --run RUN_ID
@@ -107,6 +108,14 @@ python tools/experimentctl.py experiments/campaigns/CAMPAIGN.yml cancel --run RU
 
 `--run` is repeatable; omitting it selects every campaign run. `--dry-run` on
 `submit` renders and validates without mutating a scheduler.
+
+`watch` emits one compact JSON object per line. It periodically performs the
+same durable four-layer refresh as `observe`; terminal runs are collected and
+passed through `decide` automatically. `--until first-metric` is the initial
+health gate, while the default `--until terminal` waits for completion.
+`--interval-seconds` controls polling and `--timeout-seconds 0` means no
+deadline. Watch never cancels or retries a job: `STOP_RECOMMENDED` and retry
+recommendations remain explicit decisions for a separate authorized action.
 
 `preflight` performs sanitized, read-only checks against the selected compute
 backend. `stage` and non-dry-run `submit` require the corresponding preflight
@@ -252,6 +261,12 @@ bars are normalized before the final line bound is applied. SenseCore uses a
 20-second live stream and reports `expired: true` when the terminal job's log
 token has expired instead of retrying indefinitely.
 
+When a transient live log probe fails but the selected attempt already has
+sanitized process evidence persisted by `observe` or `collect`, `logs` returns
+that bounded cache with `live: false` and
+`evidence_source: cached_collection`. It still fails closed when neither live
+nor cached evidence exists.
+
 SenseCore CLI v1.2 may print the exact non-JSON sentinel `No jobs found` on a
 successful exact-name query requested as JSON. The bundled sanitizer maps only
 that exact sentinel (or empty stdout) to `[]`; every other non-JSON response
@@ -267,7 +282,11 @@ without either layer use `terminal_without_process_or_model_evidence`.
 Collection records both `scheduler_state` and `runtime_state`. They may differ
 after preemption or cancellation because a killed process cannot always update
 its own status file; scheduler truth must not overwrite the historical runtime
-observation or vice versa.
+observation or vice versa. Once the scheduler is terminal, current
+`worker_state` is `RELEASED`; when process/runtime evidence exists, current
+`process_state` follows that terminal state. Without such evidence it remains
+`UNKNOWN`. The stale process-authored value remains available only as
+`runtime_state`.
 
 ### Registry publication
 
