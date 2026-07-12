@@ -69,8 +69,8 @@ $CTL submit --run RUN_ID --dry-run
 $CTL assets-verify --run RUN_ID
 $CTL stage --run RUN_ID
 $CTL submit --run RUN_ID
-$CTL watch --run RUN_ID --until first-metric --interval-seconds 30
-$CTL watch --run RUN_ID --until terminal --interval-seconds 60
+$CTL watch --run RUN_ID --until first-metric --interval-seconds 30 --poll-timeout-seconds 60
+$CTL watch --run RUN_ID --until terminal --interval-seconds 60 --poll-timeout-seconds 60
 ```
 
 `check-identity` is the first live read-only gate and exits nonzero for a
@@ -99,6 +99,9 @@ or retry remains a separate, explicit command. Use `--timeout-seconds` when an
 outer Agent needs a bounded call; zero means no deadline. When
 `--until first-metric` reaches a terminal state before any model metric, the
 run event reports `gate_passed: false` and the command exits nonzero.
+Each poll also has an independent hard deadline. If a backend command blocks,
+`watch_poll_timeout` reports `RETRY_OBSERVATION`; this is not permission to
+cancel, resubmit, or change experiment resources.
 
 For WYD, `stage` also verifies the project-declared required files in the
 staged source tree. The ELF launcher performs the actual import check as its

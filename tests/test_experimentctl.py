@@ -718,7 +718,8 @@ def test_watch_streams_first_metric_and_persists_decision(
     monkeypatch.setattr(experimentctl, "BACKENDS", Registry())
     assert experimentctl.watch_runs(
         campaign, [selected], attempt_id="attempt-001",
-        interval_seconds=1, timeout_seconds=0, until="first-metric",
+        interval_seconds=1, timeout_seconds=0, poll_timeout_seconds=60,
+        until="first-metric",
     ) == 0
     events = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
     assert [event["event"] for event in events] == [
@@ -787,7 +788,8 @@ def test_watch_first_metric_gate_fails_when_run_terminates_without_metric(
     )
     assert experimentctl.watch_runs(
         campaign, [selected], attempt_id="attempt-001",
-        interval_seconds=60, timeout_seconds=0, until="first-metric",
+        interval_seconds=60, timeout_seconds=0, poll_timeout_seconds=60,
+        until="first-metric",
     ) == 1
 
     events = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
@@ -845,7 +847,8 @@ def test_watch_terminal_state_collects_and_decides_without_sleeping(
     )
     assert experimentctl.watch_runs(
         campaign, [selected], attempt_id="attempt-001",
-        interval_seconds=60, timeout_seconds=0, until="terminal",
+        interval_seconds=60, timeout_seconds=0, poll_timeout_seconds=60,
+        until="terminal",
     ) == 0
     events = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
     terminal = events[1]
@@ -854,6 +857,41 @@ def test_watch_terminal_state_collects_and_decides_without_sleeping(
     assert terminal["worker_state"] == "RELEASED"
     assert terminal["process_state"] == "SUCCEEDED"
     assert terminal["decision"]["action"] == "VERIFY_RESULTS"
+
+
+def test_watch_hard_times_out_one_blocked_poll(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(REPO_ROOT)
+    campaign = controller_campaign(tmp_path)
+    run = materialize_run(campaign, campaign["runs"][0], "source-fixed")
+    prepare_run(campaign, run, "source-fixed", attempt_id="attempt-001")
+    record_submission_intent(campaign, run, "attempt-001")
+    record_submission(campaign, run, "attempt-001", "1234")
+    selected = experimentctl.select_attempt(run, "attempt-001")
+
+    class BlockedBackend:
+        def status(self, _campaign, _run):
+            raise subprocess.TimeoutExpired(["ssh", "test-login"], 0.01)
+
+    backend = BlockedBackend()
+
+    class Registry:
+        kinds = frozenset({"test-backend"})
+
+        def get(self, _kind):
+            return backend
+
+    monkeypatch.setattr(experimentctl, "BACKENDS", Registry())
+    assert experimentctl.watch_runs(
+        campaign, [selected], attempt_id="attempt-001",
+        interval_seconds=60, timeout_seconds=0.01,
+        poll_timeout_seconds=30, until="terminal",
+    ) == 1
+    events = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert [event["event"] for event in events] == [
+        "watch_poll_timeout", "watch_timeout",
+    ]
+    assert events[0]["action"] == "RETRY_OBSERVATION"
+    assert events[0]["run_id"] == "controller-run"
 
 
 def test_collection_classifies_pretraining_import_failure():

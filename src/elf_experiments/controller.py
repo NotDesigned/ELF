@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import argparse
 import base64
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import asdict
 import json
 import os
@@ -55,6 +57,9 @@ from experiment_control.outbox import (  # noqa: E402
 
 
 _COMMAND_RUNNER: CommandRunner = SubprocessRunner()
+_COMMAND_DEADLINE: ContextVar[float | None] = ContextVar(
+    "experimentctl_command_deadline", default=None
+)
 _ATTEMPT_SELECTOR = "__experiment_attempt_id"
 _TERMINAL_STATES = frozenset({"SUCCEEDED", "FAILED", "PREEMPTED", "CANCELLED"})
 _CAMPAIGN_SECRET_KEY_RE = re.compile(
@@ -101,9 +106,26 @@ def run_command(
     Returns:
         The completed process with stdout and stderr captured.
     """
+    deadline = _COMMAND_DEADLINE.get()
+    timeout_seconds = None
+    if deadline is not None:
+        timeout_seconds = max(0.001, deadline - time.monotonic())
     return _COMMAND_RUNNER.run(
-        command, cwd=cwd, check=check, input_text=input_text
+        command, cwd=cwd, check=check, input_text=input_text,
+        timeout_seconds=timeout_seconds,
     )
+
+
+@contextmanager
+def command_deadline(timeout_seconds: float):
+    """Apply one monotonic hard deadline to all backend commands in a poll."""
+    if timeout_seconds <= 0:
+        raise ValueError("command deadline must be greater than zero")
+    token = _COMMAND_DEADLINE.set(time.monotonic() + timeout_seconds)
+    try:
+        yield
+    finally:
+        _COMMAND_DEADLINE.reset(token)
 
 
 def set_command_runner(runner: CommandRunner) -> None:
@@ -1010,7 +1032,8 @@ def has_model_metric(model: dict[str, Any]) -> bool:
 
 def watch_runs(
     campaign: dict[str, Any], runs: list[dict[str, Any]], *, attempt_id: str,
-    interval_seconds: float, timeout_seconds: float, until: str,
+    interval_seconds: float, timeout_seconds: float, poll_timeout_seconds: float,
+    until: str,
 ) -> int:
     """Stream JSONL observations until every selected run reaches a stop gate.
 
@@ -1022,6 +1045,8 @@ def watch_runs(
         raise ValueError("--interval-seconds must be greater than zero")
     if timeout_seconds < 0:
         raise ValueError("--timeout-seconds must be zero or greater")
+    if poll_timeout_seconds <= 0:
+        raise ValueError("--poll-timeout-seconds must be greater than zero")
     if until not in {"terminal", "first-metric"}:
         raise ValueError("--until must be terminal or first-metric")
     started = time.monotonic()
@@ -1029,12 +1054,39 @@ def watch_runs(
     failed_gate_run_ids: list[str] = []
     polls = 0
     while pending:
+        elapsed = time.monotonic() - started
+        if timeout_seconds and elapsed >= timeout_seconds:
+            print(json.dumps({
+                "event": "watch_timeout",
+                "elapsed_seconds": elapsed,
+                "pending_run_ids": sorted(pending),
+                "polls": polls,
+            }, ensure_ascii=False, sort_keys=True), flush=True)
+            return 1
         polls += 1
         for run_id, run in list(pending.items()):
             backend_adapter = BACKENDS.get(str(run["backend"]["kind"]))
-            observation = observe_run(
-                campaign, run, backend_adapter, attempt_id=attempt_id
-            )
+            elapsed_before_poll = time.monotonic() - started
+            poll_budget = poll_timeout_seconds
+            if timeout_seconds:
+                poll_budget = min(
+                    poll_budget,
+                    max(0.001, timeout_seconds - elapsed_before_poll),
+                )
+            try:
+                with command_deadline(poll_budget):
+                    observation = observe_run(
+                        campaign, run, backend_adapter, attempt_id=attempt_id
+                    )
+            except subprocess.TimeoutExpired:
+                print(json.dumps({
+                    "event": "watch_poll_timeout",
+                    "poll": polls,
+                    "run_id": run_id,
+                    "poll_timeout_seconds": poll_budget,
+                    "action": "RETRY_OBSERVATION",
+                }, ensure_ascii=False, sort_keys=True), flush=True)
+                continue
             scheduler_state = str(observation["scheduler"].get("state", "UNKNOWN"))
             model = observation.get("model") or {}
             metric_observed = has_model_metric(model)
@@ -1130,6 +1182,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="watch timeout; zero waits without a deadline",
     )
     parser.add_argument(
+        "--poll-timeout-seconds", type=float, default=60.0,
+        help="hard deadline for one watch observation poll",
+    )
+    parser.add_argument(
         "--until", choices=("terminal", "first-metric"), default="terminal",
         help="watch completion gate",
     )
@@ -1158,6 +1214,7 @@ def main(argv: list[str] | None = None) -> int:
             attempt_id=args.attempt_id,
             interval_seconds=args.interval_seconds,
             timeout_seconds=args.timeout_seconds,
+            poll_timeout_seconds=args.poll_timeout_seconds,
             until=args.until,
         )
     outputs: list[dict[str, Any]] = []

@@ -103,7 +103,7 @@ python tools/experimentctl.py experiments/campaigns/CAMPAIGN.yml submit --run RU
 python tools/experimentctl.py experiments/campaigns/CAMPAIGN.yml status --run RUN_ID
 python tools/experimentctl.py experiments/campaigns/CAMPAIGN.yml collect --run RUN_ID
 python tools/experimentctl.py experiments/campaigns/CAMPAIGN.yml observe --run RUN_ID
-python tools/experimentctl.py experiments/campaigns/CAMPAIGN.yml watch --run RUN_ID --until terminal
+python tools/experimentctl.py experiments/campaigns/CAMPAIGN.yml watch --run RUN_ID --until terminal --poll-timeout-seconds 60
 python tools/experimentctl.py experiments/campaigns/CAMPAIGN.yml logs --run RUN_ID --tail 100
 python tools/experimentctl.py experiments/campaigns/CAMPAIGN.yml decide --run RUN_ID
 python tools/experimentctl.py experiments/campaigns/CAMPAIGN.yml cancel --run RUN_ID
@@ -117,7 +117,11 @@ same durable four-layer refresh as `observe`; terminal runs are collected and
 passed through `decide` automatically. `--until first-metric` is the initial
 health gate, while the default `--until terminal` waits for completion.
 `--interval-seconds` controls polling and `--timeout-seconds 0` means no
-deadline. Watch never cancels or retries a job: `STOP_RECOMMENDED` and retry
+overall deadline. `--poll-timeout-seconds` is a hard monotonic deadline shared
+by every backend command in one observation. A blocked SSH, rsync, or SCO
+subprocess is terminated by the command runner; watch emits
+`watch_poll_timeout` and may retry observation without mutating the scheduler.
+Watch never cancels or retries a job: `STOP_RECOMMENDED` and retry
 recommendations remain explicit decisions for a separate authorized action.
 If a run becomes terminal before producing a metric, the `first-metric` gate
 reports `terminal-without-first-metric`, sets `gate_passed: false`, and exits
@@ -167,7 +171,7 @@ without network access:
 | `src/elf_experiments/overrides.py` | ELF's ordered environment-to-config override sequence. |
 | `src/elf_experiments/policy.py` | Classify failures and recommend bounded next actions without mutating a scheduler. |
 | `src/elf_experiments/controller.py` and `tools/experimentctl.py` | Repository integration layer and its thin controller CLI. |
-| Installed `experiment_control/runner.py` | Independently versioned injectable command boundary for production subprocesses and hermetic fakes. |
+| Installed `experiment_control/runner.py` | Independently versioned injectable command boundary with hard subprocess timeouts for production commands and hermetic fakes. |
 | Installed `experiment_control/preflight.py` | Independently versioned sanitized readiness checks and fail-closed reports. |
 | [`ml-experiment-control`](https://github.com/NotDesigned/ml-experiment-control) | Commit-pinned backend, preflight, runner, state, sanitizer, project protocol, and adapter template package. |
 | `src/elf_experiments/projects/elf.py` | The only adapter that knows ELF Config, `cloud_train.sh`, ELF checkpoints, metrics, and summaries. |
