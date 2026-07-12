@@ -12,8 +12,9 @@ conda activate elf
 pip install -r requirements.txt
 ```
 
-The independently versioned experiment backend package has its API and project
-adapter guide in
+The independently versioned experiment-control package owns backend adapters,
+durable Run/Attempt state, and mutation outboxes. Its API and project-adapter
+guide live in
 [`NotDesigned/ml-experiment-control`](https://github.com/NotDesigned/ml-experiment-control).
 `requirements.txt` pins its exact commit so container and source identities
 remain reproducible.

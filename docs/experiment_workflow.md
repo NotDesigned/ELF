@@ -37,7 +37,8 @@ lifecycle transition. Its durable store, atomic events, and submission outbox
 come from the installed `experiment_control.manifest` package.
 
 ELF config resolution and scientific-field selection belong to
-`src/elf_experiments/projects/elf.py`, not this backend-neutral state helper.
+`src/elf_experiments/projects/elf.py`, not the package-owned backend-neutral
+state primitives.
 Controller and runtime construct the shared manifest schema through
 `experiment_control.run_manifest.build_run_manifest`.
 
@@ -127,7 +128,7 @@ backend. `stage` and non-dry-run `submit` require the corresponding preflight
 to pass before remote mutation. Local-only `prepare`, `assets-plan`, and
 dry-run submission do not require an active platform login.
 
-`check-identity` combines local durable history with the backend package's
+`check-identity` combines local durable history with the control package's
 read-only scheduler/storage probe. It rejects a consumed identity and reports
 all matching job IDs when history is ambiguous. Non-dry-run submission repeats
 this gate immediately before recording its submission intent.
@@ -252,7 +253,7 @@ never downloads implicitly inside a GPU job.
 ELF pins `ml-experiment-control` by commit in `requirements.txt`; the pin is
 part of runtime source identity and the package is installed in the image/SIF.
 WYD verifies ELF's project entrypoint and training module in the staged source,
-while the container launcher imports the installed scheduler package before
+while the container launcher imports the installed experiment-control package before
 any training work and prints its resolved module path. Login nodes may not have
 `/dev/fuse` permission to mount the SIF for a true container-side preflight.
 

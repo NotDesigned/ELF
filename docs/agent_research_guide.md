@@ -18,7 +18,8 @@ contracts stay in the linked references.
 4. [`experiment_workflow.md`](experiment_workflow.md): durable state, campaign
    schema, backend behavior, artifacts, and failure policy.
 5. [`ml-experiment-control`](https://github.com/NotDesigned/ml-experiment-control):
-   only when modifying, upgrading, or reusing the backend package.
+   only when modifying, upgrading, or reusing package-owned backends, durable
+   state, or mutation outboxes.
 
 Repository documents define stable project intent. Discover mutable platform
 facts through the current operator runbook. Under Codex, use
