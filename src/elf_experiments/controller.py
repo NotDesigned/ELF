@@ -817,6 +817,16 @@ def annotate_collection(
     return annotated
 
 
+def status_for_decision(
+    status: dict[str, Any], collection: dict[str, Any]
+) -> dict[str, Any]:
+    """Prefer attempt diagnostics over a coarser scheduler classification."""
+    merged = dict(status)
+    if collection.get("failure_class"):
+        merged["failure_class"] = collection["failure_class"]
+    return merged
+
+
 PROJECTS = build_project_registry()
 BACKENDS = build_registry(backend_services())
 
@@ -993,8 +1003,12 @@ def main(argv: list[str] | None = None) -> int:
             attempts = [path for path in (local_dir / "attempts").glob("attempt-*") if path.is_dir()]
             retry = run.get("retry", {"max_infra_retries": 0})
             diagnostic = json.dumps(collection, ensure_ascii=False)
+            # Collection inspects process logs and can produce a more precise
+            # classification than the scheduler/status transport envelope.
+            # Decisions must use that latest attempt evidence when available.
+            decision_status = status_for_decision(status, collection)
             decision = decide_next_action(
-                status, retries_used=max(0, len(attempts) - 1),
+                decision_status, retries_used=max(0, len(attempts) - 1),
                 max_infra_retries=int(retry.get("max_infra_retries", 0)),
                 diagnostic_text=diagnostic,
                 completed_checkpoint=collection.get("latest_completed_checkpoint"),

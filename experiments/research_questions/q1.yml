@@ -1,0 +1,22 @@
+schema_version: 1
+id: Q1
+title: 句子级 plan 是否为全局 token denoising 提供有效信息？
+status: OPEN
+summary: >-
+  STAR-LDM 的 learned sentence encoder 在自回归解码器下坍缩到近常数
+  （emb_batch_var ≈ 9.85e-7），因为 teacher-forcing 前缀提供了局部旁路，
+  且 CE 是唯一训练信号。ELF 的全局去噪解码器移除了该旁路：plan 必须帮助
+  去噪有 grounding 的冻结 T5 token 场，从而获得稠密的抗坍缩全局梯度。
+  本假设检验在此拓扑下句子 plan 是否 (a) 可学、(b) 携带真实内容、
+  (c) 相对纯 ELF 基线不损害 token 指标。
+notes:
+  - >-
+    可关注 learned-plan 的 train_plan_emb_batch_var、oracle/shuffled plan PPL 差异，
+    以及相对 a0 的 train_ce_loss、g_ppl 和 token_recon_ppl；这些是分析线索，
+    不是 ResearchQuestion 的强制 schema gate。
+links:
+  campaigns:
+    - fusion-len256-gate-h100-20260711
+  runs: []
+  evidence: []
+assessments: []

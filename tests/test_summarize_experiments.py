@@ -104,6 +104,8 @@ def test_summary_exposes_artifacts_entropy_and_nonempty_generation(tmp_path):
     row = summarize_run(run_dir)
     assert row["generation_mean_entropy"] == 2.5
     assert row["generation_nonempty_fraction"] == 0.5
+    assert row["artifacts"]["train_metrics"] == {"matches": 1, "records": 2}
+    assert "nonempty_records" not in row["artifacts"]["evaluation_metrics"]
     assert row["artifacts"]["generated_samples"]["nonempty_records"] == 1
     assert row["artifacts"]["reconstructed_samples"]["records"] == 1
 

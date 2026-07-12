@@ -143,6 +143,12 @@ def test_instantiate_campaign_template_creates_fresh_reviewable_identities():
     authored = instantiate_campaign_template(template, "20260712-a")
     assert authored["campaign"] == "backend-smoke-slurm-20260712-a"
     assert authored["runs"][0]["run_id"] == "elf-smoke-slurm-l40s-20260712-a"
+    assert authored["defaults"]["image_id"] == (
+        "sha256:318b80ae8c1d188b1cf1bca2972cc27ffd8148faddd72c25104499bce04b4b1e"
+    )
+    assert authored["profiles"]["wyd-l40s"]["backend"]["sif_path"].endswith(
+        "/318b80ae8c1d188b1cf1bca2972cc27ffd8148faddd72c25104499bce04b4b1e.sif"
+    )
     assert authored["instance"] == "20260712-a"
     resolved = resolve_campaign(authored)
     assert resolved["runs"][0]["storage"]["run_dir"].endswith("/{run_id}")
@@ -188,6 +194,43 @@ def test_instantiate_campaign_cli_can_isolate_controller_state(tmp_path):
     )
     assert result.returncode == 0
     assert load_and_resolve_campaign(output)["local_root"] == str(local_root)
+
+
+def test_instantiate_campaign_cli_registers_atomically_without_duplicates(tmp_path):
+    project_file = tmp_path / "research_project.yaml"
+    project_file.write_text(
+        yaml.safe_dump({"schema_version": 1, "project": "elf", "campaigns": []}),
+        encoding="utf-8",
+    )
+    output = tmp_path / "campaigns" / "fresh.yml"
+    command = [
+        sys.executable,
+        str(REPO_ROOT / "tools/instantiate_campaign.py"),
+        str(REPO_ROOT / "experiments/templates/backend_smoke_slurm.yml"),
+        "--instance", "registered-a",
+        "--output", str(output),
+        "--register",
+        "--project-file", str(project_file),
+    ]
+    first = subprocess.run(command, text=True, capture_output=True, check=False)
+    assert first.returncode == 0, first.stderr
+    project = yaml.safe_load(project_file.read_text(encoding="utf-8"))
+    assert project["campaigns"] == [{
+        "name": "backend-smoke-slurm-registered-a",
+        "file": str(output),
+    }]
+    assert output.is_file()
+
+    duplicate_output = tmp_path / "campaigns" / "duplicate.yml"
+    duplicate = subprocess.run(
+        [*command[:6], str(duplicate_output), *command[7:]],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert duplicate.returncode != 0
+    assert "already registered by name" in duplicate.stderr
+    assert not duplicate_output.exists()
 
 
 @pytest.mark.parametrize(

@@ -611,6 +611,35 @@ def test_collection_classifies_pretraining_import_failure():
     assert result["failure_class"] == "configuration"
 
 
+def test_decision_prefers_collected_import_failure_over_transport_status():
+    from elf_experiments.controller import status_for_decision
+    from elf_experiments.policy import decide_next_action
+
+    collection = annotate_collection(
+        {
+            "state": "UNKNOWN",
+            "process_evidence": {
+                "observed": True,
+                "stderr_tail": [
+                    "ModuleNotFoundError: No module named 'experiment_control'"
+                ],
+            },
+        },
+        {"state": "FAILED", "failure_class": "transport"},
+    )
+    decision = decide_next_action(
+        status_for_decision(
+            {"state": "FAILED", "failure_class": "transport"}, collection
+        ),
+        retries_used=0,
+        max_infra_retries=2,
+        diagnostic_text=json.dumps(collection),
+    )
+    assert collection["failure_class"] == "configuration"
+    assert decision.failure_class == "configuration"
+    assert decision.action == "DO_NOT_RETRY"
+
+
 def test_collection_marks_expired_external_evidence_inconclusive():
     result = annotate_collection(
         {

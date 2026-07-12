@@ -225,21 +225,35 @@ def collect_eval_metrics(run_dir: Path) -> tuple[dict[str, Any], list[str]]:
     return metrics, warnings
 
 
-def _artifact_summary(paths: list[Path]) -> dict[str, Any]:
+def _jsonl_artifact_summary(
+    paths: list[Path], *, nonempty_text_field: str | None = None
+) -> dict[str, Any]:
+    """Summarize JSONL files without inventing content semantics.
+
+    ``records`` counts valid JSON objects for every JSONL artifact.  A
+    ``nonempty_records`` count is included only when the caller names a text
+    field whose non-empty content is meaningful (for example generated sample
+    text).  Metric records intentionally do not expose that sample-specific
+    field.
+    """
     records = 0
     nonempty = 0
     for path in paths:
         payloads = read_jsonl(path)
         records += len(payloads)
-        nonempty += sum(
-            isinstance(item.get("generated"), str) and bool(item["generated"].strip())
-            for item in payloads
-        )
-    return {
+        if nonempty_text_field is not None:
+            nonempty += sum(
+                isinstance(item.get(nonempty_text_field), str)
+                and bool(item[nonempty_text_field].strip())
+                for item in payloads
+            )
+    summary = {
         "matches": len(paths),
         "records": records,
-        "nonempty_records": nonempty,
     }
+    if nonempty_text_field is not None:
+        summary["nonempty_records"] = nonempty
+    return summary
 
 
 def collect_artifact_evidence(run_dir: Path) -> dict[str, dict[str, Any]]:
@@ -249,10 +263,14 @@ def collect_artifact_evidence(run_dir: Path) -> dict[str, dict[str, Any]]:
     generated = sorted(run_dir.rglob("all_generated_*.jsonl"))
     reconstructed = sorted(run_dir.rglob("all_token_reconstructed_*.jsonl"))
     return {
-        "train_metrics": _artifact_summary(train),
-        "evaluation_metrics": _artifact_summary(evaluation),
-        "generated_samples": _artifact_summary(generated),
-        "reconstructed_samples": _artifact_summary(reconstructed),
+        "train_metrics": _jsonl_artifact_summary(train),
+        "evaluation_metrics": _jsonl_artifact_summary(evaluation),
+        "generated_samples": _jsonl_artifact_summary(
+            generated, nonempty_text_field="generated"
+        ),
+        "reconstructed_samples": _jsonl_artifact_summary(
+            reconstructed, nonempty_text_field="generated"
+        ),
     }
 
 

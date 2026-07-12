@@ -248,6 +248,11 @@ class ExperimentStateStore:
         return self.run_dir / "manifest.yaml"
 
     @property
+    def legacy_manifest_path(self) -> Path:
+        """Pre identity-v2 run manifest, accepted for observation only."""
+        return self.run_dir / "control_manifest.yaml"
+
+    @property
     def events_path(self) -> Path:
         return self.run_dir / "events.jsonl"
 
@@ -265,6 +270,23 @@ class ExperimentStateStore:
 
     def attempt_path(self, attempt_id: str) -> Path:
         return self.attempt_dir(attempt_id) / "attempt.yaml"
+
+    def legacy_attempt_path(self, attempt_id: str) -> Path:
+        """Pre identity-v2 attempt manifest, accepted for observation only."""
+        return self.attempt_dir(attempt_id) / "control_attempt.yaml"
+
+    def readable_manifest_path(self) -> Path:
+        """Resolve canonical state first, then the immutable legacy snapshot."""
+        if self.manifest_path.is_file():
+            return self.manifest_path
+        return self.legacy_manifest_path
+
+    def readable_attempt_path(self, attempt_id: str) -> Path:
+        """Resolve canonical state first, then the immutable legacy snapshot."""
+        path = self.attempt_path(attempt_id)
+        if path.is_file():
+            return path
+        return self.legacy_attempt_path(attempt_id)
 
     def submission_path(self, attempt_id: str) -> Path:
         return self.attempt_dir(attempt_id) / "submission.json"
@@ -371,9 +393,10 @@ class ExperimentStateStore:
         return normalized
 
     def load_manifest(self) -> dict[str, Any]:
-        if not self.manifest_path.is_file():
+        path = self.readable_manifest_path()
+        if not path.is_file():
             raise FileNotFoundError(f"run manifest does not exist: {self.manifest_path}")
-        return yaml.safe_load(self.manifest_path.read_text(encoding="utf-8"))
+        return yaml.safe_load(path.read_text(encoding="utf-8"))
 
     def ensure_manifest(self, manifest: Mapping[str, Any]) -> dict[str, Any]:
         """Publish one immutable run identity or validate the existing identity."""
@@ -383,6 +406,11 @@ class ExperimentStateStore:
             if comparable_manifest(existing) != comparable_manifest(candidate):
                 raise ValueError("existing run manifest conflicts")
             return existing
+        if self.legacy_manifest_path.is_file():
+            raise ValueError(
+                "legacy control_manifest.yaml is observation-only; migrate to a new "
+                "run_id before preparing or submitting another attempt"
+            )
         try:
             atomic_create(self.manifest_path, candidate, yaml_format=True)
         except FileExistsError:
@@ -390,9 +418,11 @@ class ExperimentStateStore:
         return candidate
 
     def load_attempt(self, attempt_id: str) -> dict[str, Any]:
-        path = self.attempt_path(attempt_id)
+        path = self.readable_attempt_path(attempt_id)
         if not path.is_file():
-            raise FileNotFoundError(f"attempt manifest does not exist: {path}")
+            raise FileNotFoundError(
+                f"attempt manifest does not exist: {self.attempt_path(attempt_id)}"
+            )
         return yaml.safe_load(path.read_text(encoding="utf-8"))
 
     def create_attempt(self, attempt: Mapping[str, Any]) -> Path:
@@ -481,7 +511,7 @@ class ExperimentStateStore:
                 updated_at=payload.get("updated_at"),
                 exit_code=payload.get("exit_code"),
             )
-        if attempt_id and self.attempt_path(attempt_id).is_file():
+        if attempt_id and self.readable_attempt_path(attempt_id).is_file():
             attempt = self.load_attempt(attempt_id)
             return LifecycleStatus(
                 project=attempt.get("project"),
@@ -489,10 +519,10 @@ class ExperimentStateStore:
                 attempt_id=attempt_id,
                 state=RunState.CREATED,
             )
+        manifest_path = self.readable_manifest_path()
         manifest = (
-            yaml.safe_load(self.manifest_path.read_text(encoding="utf-8"))
-            if self.manifest_path.is_file()
-            else {}
+            yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
+            if manifest_path.is_file() else {}
         )
         return LifecycleStatus(
             project=manifest.get("project"),

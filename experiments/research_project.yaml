@@ -12,4 +12,18 @@ controller:
     run_identity_v2: true
     cancel_outbox: true
     evaluate: false
-hypotheses_dir: experiments/hypotheses
+campaigns:
+  - name: backend-smoke-slurm-20260712T052559Z
+    file: experiments/campaigns/backend_smoke_slurm_20260712T052559Z.yml
+  - name: backend-smoke-slurm-20260712T051912Z
+    file: experiments/campaigns/backend_smoke_slurm_20260712T051912Z.yml
+  - name: backend-smoke-slurm-20260712T050714Z
+    file: experiments/campaigns/backend_smoke_slurm_20260712T050714Z.yml
+  - name: fusion-len256-gate-h100-20260711
+    file: experiments/campaigns/fusion_len256_gate_h100_20260711.yml
+    role_notes:
+      a0: pure ELF baseline（无 plan 对照）
+      a1: frozen Sentence-T5 teacher（plan 通路 sanity / 上界参考）
+      a2: learned plan + 1 detached aux pass（主实验）
+      a3: learned plan without aux（aux 必要性消融）
+research_questions_dir: experiments/research_questions
