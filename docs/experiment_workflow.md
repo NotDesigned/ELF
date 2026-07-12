@@ -116,6 +116,9 @@ health gate, while the default `--until terminal` waits for completion.
 `--interval-seconds` controls polling and `--timeout-seconds 0` means no
 deadline. Watch never cancels or retries a job: `STOP_RECOMMENDED` and retry
 recommendations remain explicit decisions for a separate authorized action.
+If a run becomes terminal before producing a metric, the `first-metric` gate
+reports `terminal-without-first-metric`, sets `gate_passed: false`, and exits
+nonzero after persisting the terminal observation and decision.
 
 `preflight` performs sanitized, read-only checks against the selected compute
 backend. `stage` and non-dry-run `submit` require the corresponding preflight

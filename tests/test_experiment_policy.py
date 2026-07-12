@@ -24,7 +24,7 @@ def test_retry_decision_carries_only_observed_completed_checkpoint():
     decision = decide_next_action(
         {"state": "PREEMPTED", "failure_class": "preemption"},
         retries_used=0, max_infra_retries=1,
-        completed_checkpoint="/data/project/run/checkpoint_21",
+        completed_checkpoint="/runs/project/run/checkpoint_21",
     )
     assert decision.action == "RETRY_ALLOWED"
     assert decision.resume_checkpoint.endswith("checkpoint_21")

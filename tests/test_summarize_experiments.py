@@ -152,7 +152,7 @@ def test_legacy_manifest_schema_is_rejected(tmp_path):
                 "status": "waiting_for_spot_capacity",
                 "source": {"git_commit": "deadbeef"},
                 "image": {"uri": "registry/elf:old"},
-                "backend": {"kind": "sensecore"},
+                "backend": {"kind": "legacy-backend"},
                 "scientific_parameters": {
                     "seed": 42,
                     "max_length": 256,

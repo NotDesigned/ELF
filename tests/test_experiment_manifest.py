@@ -25,7 +25,7 @@ def prepare_args(run_dir: Path, attempt_id: str = "attempt-001") -> list[str]:
         "--attempt-id",
         attempt_id,
         "--backend",
-        "sensecore",
+        "test-backend",
         "--backend-job-id",
         "job-123",
         "--config",
@@ -41,7 +41,7 @@ def prepare_args(run_dir: Path, attempt_id: str = "attempt-001") -> list[str]:
         "--gpus",
         "4",
         "--quota",
-        "spot",
+        "test-quota",
         "--require-immutable-identities",
         "--",
         "bash",
@@ -61,7 +61,7 @@ def test_legacy_control_records_are_observable_but_not_mutable(tmp_path):
         "run_id": "legacy-run",
         "attempt_id": "attempt-001",
         "created_at": "2026-07-11T00:00:00Z",
-        "backend": {"kind": "slurm"},
+        "backend": {"kind": "legacy-backend"},
     }
     (run_dir / "control_manifest.yaml").write_text(yaml.safe_dump(legacy))
     (attempt_dir / "control_attempt.yaml").write_text(yaml.safe_dump(legacy))
@@ -92,13 +92,13 @@ def test_prepare_writes_durable_run_and_attempt_records(tmp_path):
     assert manifest["resolved_config"]["output_dir"] == str(run_dir)
     assert manifest["seed"] == 42
     assert manifest["identity_version"] == 2
-    assert manifest["backend"]["kind"] == "sensecore"
+    assert manifest["backend"]["kind"] == "test-backend"
     assert manifest["resources"]["gpus"] == 4
     assert manifest["command"][-1] == str(CONFIG)
     assert manifest["assets"]
     assert "save_freq" in manifest["checkpoint"]
     assert attempt["attempt_id"] == "attempt-001"
-    assert attempt["resources"]["quota"] == "spot"
+    assert attempt["resources"]["quota"] == "test-quota"
     assert status["state"] == "CREATED"
     assert events[-1]["event"] == "attempt_created"
 

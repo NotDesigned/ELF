@@ -34,7 +34,7 @@ def prepare(
             "--attempt-id",
             attempt_id,
             "--backend",
-            "slurm",
+            "test-backend",
             "--config",
             str(CONFIG),
             *override_args,
@@ -86,14 +86,14 @@ def test_submission_intent_is_idempotent_and_redacted(tmp_path):
         project="elf",
         run_id="store-test-s0",
         attempt_id="attempt-001",
-        backend="slurm",
+        backend="test-backend",
         request=request,
     )
     second = store.begin_submission(
         project="elf",
         run_id="store-test-s0",
         attempt_id="attempt-001",
-        backend="slurm",
+        backend="test-backend",
         request=request,
     )
 
@@ -110,7 +110,7 @@ def test_repeating_intent_repairs_derived_state_after_crash(tmp_path):
         "project": "elf",
         "run_id": "store-test-s0",
         "attempt_id": "attempt-001",
-        "backend": "slurm",
+        "backend": "test-backend",
         "request": {"argv": ["sbatch", "run.sbatch"]},
     }
     store.begin_submission(**kwargs)
@@ -130,7 +130,7 @@ def test_repeating_intent_repairs_derived_state_after_crash(tmp_path):
 
     store.begin_submission(**kwargs)
     assert store.read_status().state == RunState.SUBMITTING
-    assert json.loads(store.backend_path.read_text())["backend"] == "slurm"
+    assert json.loads(store.backend_path.read_text())["backend"] == "test-backend"
     assert [event["event"] for event in events(store)].count("submission_intent_created") == 1
 
 
@@ -140,7 +140,7 @@ def test_reconcile_is_idempotent_and_rejects_a_different_job(tmp_path):
         project="elf",
         run_id="store-test-s0",
         attempt_id="attempt-001",
-        backend="slurm",
+        backend="test-backend",
         request={"argv": ["sbatch", "run.sbatch"]},
     )
     kwargs = {
@@ -189,7 +189,7 @@ def test_attempt_records_are_canonical_and_root_is_only_current_mirror(tmp_path)
     store = prepare(run_dir)
     store.begin_submission(
         project="elf", run_id="store-test-s0", attempt_id="attempt-001",
-        backend="slurm", request={"argv": ["sbatch", "first.sbatch"]},
+        backend="test-backend", request={"argv": ["submit", "first.job"]},
     )
     store.reconcile_submission(
         project="elf", run_id="store-test-s0", attempt_id="attempt-001",

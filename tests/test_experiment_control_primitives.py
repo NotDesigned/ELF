@@ -35,7 +35,7 @@ def test_failure_classifier_does_not_hide_resource_or_model_failures():
 
 
 @pytest.mark.parametrize("message", [
-    "ssh: connect to host wyd-l40s port 22: Connection timed out",
+    "ssh: connect to host compute.example port 22: Connection timed out",
     "Connection timed out during banner exchange",
     "TLS ClientHello handshake timeout",
 ])

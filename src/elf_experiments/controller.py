@@ -1057,6 +1057,7 @@ def watch_runs(
         raise ValueError("--until must be terminal or first-metric")
     started = time.monotonic()
     pending = {str(run["run_id"]): run for run in runs}
+    failed_gate_run_ids: list[str] = []
     polls = 0
     while pending:
         polls += 1
@@ -1083,11 +1084,21 @@ def watch_runs(
             reached = terminal or (until == "first-metric" and metric_observed)
             if reached:
                 decision = decide_run(campaign, run, attempt_id=attempt_id)
-                reason = "terminal" if terminal else "first-metric"
+                gate_passed = not (
+                    until == "first-metric" and terminal and not metric_observed
+                )
+                reason = (
+                    "terminal-without-first-metric" if not gate_passed
+                    else "terminal" if terminal
+                    else "first-metric"
+                )
+                if not gate_passed:
+                    failed_gate_run_ids.append(run_id)
                 print(json.dumps({
                     "event": "watch_run_complete",
                     "run_id": run_id,
                     "reason": reason,
+                    "gate_passed": gate_passed,
                     "scheduler_state": scheduler_state,
                     "worker_state": observation["worker"]["state"],
                     "process_state": observation["process"]["state"],
@@ -1114,11 +1125,13 @@ def watch_runs(
         time.sleep(sleep_for)
     print(json.dumps({
         "event": "watch_complete",
+        "failed_gate_run_ids": sorted(failed_gate_run_ids),
+        "gate_passed": not failed_gate_run_ids,
         "polls": polls,
         "run_ids": sorted(str(run["run_id"]) for run in runs),
         "until": until,
     }, ensure_ascii=False, sort_keys=True), flush=True)
-    return 0
+    return 1 if failed_gate_run_ids else 0
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:

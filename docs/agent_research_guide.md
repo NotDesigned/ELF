@@ -95,7 +95,9 @@ ID and is never blindly reissued.
 progress, persists each observation, and runs `decide` after a terminal state.
 It deliberately does not turn a decision into scheduler mutation: cancellation
 or retry remains a separate, explicit command. Use `--timeout-seconds` when an
-outer Agent needs a bounded call; zero means no deadline.
+outer Agent needs a bounded call; zero means no deadline. When
+`--until first-metric` reaches a terminal state before any model metric, the
+run event reports `gate_passed: false` and the command exits nonzero.
 
 For WYD, `stage` also verifies the project-declared required files in the
 staged source tree. The ELF launcher performs the actual import check as its

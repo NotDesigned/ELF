@@ -27,7 +27,7 @@ def test_job_summary_is_allowlisted_and_normalized() -> None:
             "image_path": "https://user:password@registry/example@sha256:abc",
             "command": "echo access_key_secret=do-not-print",
             "env": {"TOKEN": "do-not-print"},
-            "resource_spec": [{"name": "gpu-h100", "password": "do-not-print"}],
+            "resource_spec": [{"name": "accelerator-pool", "password": "do-not-print"}],
         }],
         "mount": [{"id": "vol", "subdir": "elf", "mount_path": "/data", "token": "no"}],
     }
@@ -35,7 +35,7 @@ def test_job_summary_is_allowlisted_and_normalized() -> None:
     assert result.returncode == 0
     summary = json.loads(result.stdout)
     assert summary["normalized_state"] == "PREEMPTED"
-    assert summary["spec"] == "gpu-h100"
+    assert summary["spec"] == "accelerator-pool"
     assert summary["mounts"] == [{"id": "vol", "mount_path": "/data", "subdir": "elf"}]
     assert "do-not-print" not in result.stdout
     assert "user:password" not in result.stdout

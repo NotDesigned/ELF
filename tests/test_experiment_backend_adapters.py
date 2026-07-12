@@ -23,7 +23,7 @@ from elf_experiments.controller import (
     record_submission_intent,
     set_command_runner,
 )
-from test_experimentctl import slurm_campaign
+from backend_fixtures import slurm_campaign
 
 
 class QueueRunner:

@@ -40,7 +40,7 @@ def complete_collection(contract: dict, role: str) -> dict:
         "shuffled_plan_ppl": 18.0,
         "train_plan_emb_batch_var": 0.1,
         "train_plan_emb_norm": 27.0,
-        "latest_completed_checkpoint": "/data/run/checkpoint_10",
+        "latest_completed_checkpoint": "/runs/run/checkpoint_10",
         "artifacts": {
             "train_metrics": {"records": 1},
             "evaluation_metrics": {"records": 1},
