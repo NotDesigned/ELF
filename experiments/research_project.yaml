@@ -13,6 +13,11 @@ controller:
     cancel_outbox: true
     evaluate: false
 campaigns:
+  - name: fusion-a1-warmstart-a0-h100-20260712-c2
+    file: experiments/campaigns/fusion_a1_warmstart_a0_h100_20260712.yml
+    role_notes:
+      a0_warm: pure-ELF control warm-started from A0 checkpoint 19017
+      a1_warm: frozen Sentence-T5 treatment from the same A0 checkpoint
   - name: backend-smoke-slurm-20260712T052559Z
     file: experiments/campaigns/backend_smoke_slurm_20260712T052559Z.yml
   - name: backend-smoke-slurm-20260712T051912Z

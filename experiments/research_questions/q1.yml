@@ -17,6 +17,7 @@ notes:
 links:
   campaigns:
     - fusion-len256-gate-h100-20260711
+    - fusion-a1-warmstart-a0-h100-20260712-c2
   runs: []
   evidence: []
 assessments: []
