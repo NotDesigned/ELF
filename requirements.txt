@@ -12,4 +12,4 @@ rouge-score>=0.1.2
 wandb>=0.16.6
 muon-optimizer>=0.1.0
 pytest>=8.0.0
-ml-experiment-control @ git+https://github.com/NotDesigned/ml-experiment-control.git@41dd74fb9c15fb2060f63f7ffbc179c0c290fec5
+ml-experiment-control @ git+https://github.com/NotDesigned/ml-experiment-control.git@f45cf92a553047450ca1f4abb4187a7f93bdb746

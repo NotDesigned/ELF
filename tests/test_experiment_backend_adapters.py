@@ -36,7 +36,7 @@ class QueueRunner:
 
 
 def test_elf_controller_registers_installed_package_backends():
-    assert experimentctl.BACKENDS.kinds == frozenset({"sensecore", "slurm"})
+    assert experimentctl.BACKENDS.kinds == frozenset({"local", "sensecore", "slurm"})
 
 
 def test_slurm_backend_submits_an_elf_prepared_manifest(tmp_path, monkeypatch):

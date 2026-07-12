@@ -271,6 +271,10 @@ Names beginning with `_` and unlisted module internals are not ELF contracts.
 Advancing the commit pin requires the package's gates plus ELF's backend,
 project-adapter, manifest, and sanitizer integration tests.
 
+The installed registry exposes `local`, `sensecore`, and `slurm`. `local` is a
+Linux development and smoke-test backend with durable process identity; ELF's
+cluster campaign profiles continue to select `sensecore` or `slurm` explicitly.
+
 ### Codex documentation-sync hook
 
 The repository-level `.codex/hooks.json` records the starting commits of ELF,
