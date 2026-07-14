@@ -247,7 +247,11 @@ def _local_tree_manifest_at(
         if stat.S_ISLNK(item.st_mode):
             raise ValueError(f"local evidence rejects symlink: {display}/{relative}")
         if stat.S_ISDIR(item.st_mode):
-            records.append({"path": relative + "/", "kind": "directory"})
+            records.append({
+                "path": relative + "/", "kind": "directory",
+                "mode": stat.S_IMODE(item.st_mode),
+                "mtime_ns": item.st_mtime_ns,
+            })
             child_fd = os.open(
                 name,
                 os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0),
@@ -267,6 +271,13 @@ def _local_tree_manifest_at(
                     child_fd, display=display, snapshot_fd=destination_fd,
                     prefix=relative + "/",
                 ))
+                if destination_fd is not None:
+                    os.fchmod(destination_fd, stat.S_IMODE(item.st_mode))
+                    os.utime(
+                        destination_fd,
+                        ns=(item.st_atime_ns, item.st_mtime_ns),
+                    )
+                    os.fsync(destination_fd)
             finally:
                 if destination_fd is not None:
                     os.close(destination_fd)
@@ -286,14 +297,70 @@ def _local_tree_manifest_at(
                 while view:
                     written = os.write(copied_fd, view)
                     view = view[written:]
+                os.fchmod(copied_fd, stat.S_IMODE(item.st_mode))
+                os.utime(
+                    copied_fd, ns=(item.st_atime_ns, item.st_mtime_ns),
+                )
                 os.fsync(copied_fd)
             finally:
                 os.close(copied_fd)
         records.append({
             "path": relative, "kind": "file", "size": item.st_size,
+            "mode": stat.S_IMODE(item.st_mode),
+            "mtime_ns": item.st_mtime_ns,
             "sha256": _sha256_bytes(payload),
         })
     return records
+
+
+def _stable_local_evidence_paths(
+    value: Any, *, logical_root: Path, snapshot_roots: tuple[str, ...],
+) -> Any:
+    """Project private snapshot paths back to one reviewed logical run root."""
+    def project(relative: str) -> str:
+        path = Path(relative)
+        if path.is_absolute() or ".." in path.parts:
+            raise ValueError(
+                "local evidence summary contains an unsafe private path"
+            )
+        return str(logical_root / path)
+
+    if isinstance(value, dict):
+        return {
+            str(_stable_local_evidence_paths(
+                str(key), logical_root=logical_root,
+                snapshot_roots=snapshot_roots,
+            )): _stable_local_evidence_paths(
+                item, logical_root=logical_root, snapshot_roots=snapshot_roots,
+            )
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [
+            _stable_local_evidence_paths(
+                item, logical_root=logical_root, snapshot_roots=snapshot_roots,
+            )
+            for item in value
+        ]
+    if not isinstance(value, str):
+        return value
+    for root in snapshot_roots:
+        if value == root:
+            return str(logical_root)
+        prefix = root.rstrip("/") + "/"
+        if value.startswith(prefix):
+            return project(value[len(prefix):])
+    proc_match = re.fullmatch(r"/proc/self/fd/[0-9]+(?:/(.*))?", value)
+    if proc_match is not None:
+        relative = proc_match.group(1)
+        return str(logical_root) if not relative else project(relative)
+    if (
+        value.startswith("/proc/")
+        or "elf-local-evidence-" in value
+        or "{controller_snapshot}" in value
+    ):
+        raise ValueError("local evidence summary contains an unmappable private path")
+    return value
 
 
 def _local_evidence_input_digest(
@@ -514,6 +581,12 @@ def rebuild_local_evidence(args: argparse.Namespace) -> dict[str, Any]:
                     summary = PROJECTS.get(
                         str(campaign["project"])
                     ).summarize(summary_root)
+                    summary = _stable_local_evidence_paths(
+                        summary,
+                        logical_root=collected_run,
+                        snapshot_roots=(str(summary_root), str(snapshot_path)),
+                    )
+                    summary["run_dir"] = str(collected_run)
                     if summary.get("project") != campaign["project"]:
                         raise ValueError(
                             "local summary project conflicts with reviewed identity"
@@ -542,6 +615,11 @@ def rebuild_local_evidence(args: argparse.Namespace) -> dict[str, Any]:
                         "project": campaign["project"], "run_id": run_id,
                         "attempt_id": attempt_id,
                     })
+                    rebuilt = _stable_local_evidence_paths(
+                        rebuilt,
+                        logical_root=collected_run,
+                        snapshot_roots=(str(summary_root), str(snapshot_path)),
+                    )
                     durable_after = _local_tree_manifest_at(
                         collected_fd, display=str(collected_run),
                     )

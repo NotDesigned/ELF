@@ -301,6 +301,84 @@ def test_refresh_evidence_local_survives_attempt_directory_rename_swap(
     assert result["new_digest"] == preview["expected_new_collection_digest"]
 
 
+def test_refresh_evidence_local_is_deterministic_across_independent_processes(
+    tmp_path,
+):
+    arguments, _identity, attempt_dir, collection = local_evidence_fixture(tmp_path)
+    collected = attempt_dir / "collected_run"
+    evaluation = collected / "train_sampling_eval" / "generation"
+    evaluation.mkdir(parents=True)
+    dimensions = {
+        "sampling_method": "sde", "num_sampling_steps": 32, "cfg": 1.0,
+        "self_cond_cfg_scale": 3.0, "time_schedule": "logit_normal",
+        "time_warp_gamma": 1.5,
+    }
+    metrics = evaluation / "metrics.jsonl"
+    metrics.write_text(json.dumps({
+        "epoch": 1, "step": 4, "mode": "generation_refine_decode",
+        "g_ppl": 31.0, "sampling_config": dimensions,
+    }) + "\n", encoding="utf-8")
+    reviewed_mtime_ns = 1_784_029_337_104_056_800
+    os.utime(metrics, ns=(reviewed_mtime_ns, reviewed_mtime_ns))
+    checkpoint = collected / "checkpoint_4"
+    checkpoint.write_bytes(b"stable checkpoint")
+    (collected / "checkpoint_4.complete").write_text(json.dumps({
+        "step": 4, "bytes": checkpoint.stat().st_size,
+        "completed_at": "2026-07-14T00:00:00Z",
+    }) + "\n", encoding="utf-8")
+    snapshot_digest = "sha256:" + "9" * 64
+    environment = os.environ.copy()
+    environment["ML_EXPD_CONTROLLER_SNAPSHOT_SHA256"] = snapshot_digest
+    environment["PYTHONPATH"] = os.pathsep.join((
+        str(REPO_ROOT / "src"), environment.get("PYTHONPATH", ""),
+    ))
+
+    def invoke(extra: list[str]) -> dict:
+        completed = subprocess.run(
+            [sys.executable, "tools/experimentctl.py", *arguments, *extra],
+            cwd=REPO_ROOT, env=environment, text=True, capture_output=True,
+            check=False,
+        )
+        assert completed.returncode == 0, completed.stderr
+        payload = json.loads(completed.stdout)
+        assert isinstance(payload, list) and len(payload) == 1
+        return payload[0]
+
+    first = invoke(["--dry-run"])
+    second = invoke(["--dry-run"])
+
+    assert second == first
+    assert first["new_digest"] == first["expected_new_collection_digest"]
+    result = invoke([
+        "--expected-input-digest", first["input_digest"],
+    ])
+    assert result["new_digest"] == first["expected_new_collection_digest"]
+    assert experimentctl._regular_file_digest(collection) == result["new_digest"]
+    rebuilt = json.loads(collection.read_text(encoding="utf-8"))
+    assert rebuilt["run_dir"] == str(collected)
+    assert rebuilt["latest_completed_checkpoint"] == str(checkpoint)
+    observations = rebuilt["metric_evidence"]["observations"]
+    assert {item["observed_at"] for item in observations} == {
+        reviewed_mtime_ns / 1_000_000_000,
+    }
+
+    def strings(value):
+        if isinstance(value, dict):
+            for key, item in value.items():
+                yield str(key)
+                yield from strings(item)
+        elif isinstance(value, list):
+            for item in value:
+                yield from strings(item)
+        elif isinstance(value, str):
+            yield value
+
+    assert all(
+        "/proc/self/fd/" not in value and "elf-local-evidence-" not in value
+        for value in strings(rebuilt)
+    )
+
+
 def test_refresh_evidence_local_rejects_collection_cas_and_artifact_drift(
     tmp_path, monkeypatch, capsys,
 ):
