@@ -20,7 +20,6 @@ controller:
       - src/elf_experiments
       - src/configs
     python_packages:
-      - experiment_control
       - yaml
     require_clean_git: true
 campaigns:
