@@ -13,6 +13,10 @@ controller:
     cancel_outbox: true
     evaluate: false
 campaigns:
+  - name: backend-smoke-sensecore-20260714-1419
+    file: experiments/campaigns/backend_smoke_sensecore_20260714_1419.yml
+    role_notes:
+      smoke: operational-only one-GPU spot validation with microbatch 8; excluded from scientific comparisons
   - name: backend-smoke-sensecore-20260714-1325
     file: experiments/campaigns/backend_smoke_sensecore_20260714_1325.yml
     role_notes:
