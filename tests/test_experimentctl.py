@@ -96,6 +96,238 @@ def test_cli_formats_expected_operational_error_without_traceback(monkeypatch, c
     assert error == {"error": "FileExistsError", "message": "identity consumed"}
 
 
+def local_evidence_fixture(tmp_path: Path):
+    """Create separate reviewed identity copies and original local data."""
+    campaign_id = "local-evidence-study"
+    run_id = "run-local"
+    attempt_id = "attempt-001"
+    local_root = tmp_path / "local-root"
+    attempt_dir = local_root / campaign_id / run_id / "attempts" / attempt_id
+    collected = attempt_dir / "collected_run"
+    collected.mkdir(parents=True)
+    campaign = {
+        "schema_version": 1, "project": "elf", "campaign": campaign_id,
+        "runs": [{"run_id": run_id}],
+    }
+    identity = tmp_path / "private" / "inputs"
+    (identity / "run").mkdir(parents=True)
+    (identity / "attempt").mkdir(parents=True)
+    campaign_path = identity / "campaign.yml"
+    campaign_path.write_text(yaml.safe_dump(campaign), encoding="utf-8")
+    run_manifest = {
+        "schema_version": 1, "project": "elf", "campaign": campaign_id,
+        "run_id": run_id, "source_id": "source-fixed", "image_id": "image-fixed",
+        "resolved_config": {"seed": 7, "max_length": 256},
+    }
+    (identity / "run" / "manifest.yaml").write_text(
+        yaml.safe_dump(run_manifest), encoding="utf-8",
+    )
+    attempt = {
+        **run_manifest, "attempt_id": attempt_id,
+    }
+    (identity / "attempt" / "attempt.yaml").write_text(
+        yaml.safe_dump(attempt), encoding="utf-8",
+    )
+    backend = {
+        "project": "elf", "run_id": run_id, "attempt_id": attempt_id,
+        "backend": "slurm", "backend_job_id": "123",
+    }
+    (identity / "attempt" / "backend.json").write_text(
+        json.dumps(backend), encoding="utf-8",
+    )
+    previous = {
+        "project": "elf", "run_id": run_id, "attempt_id": attempt_id,
+        "state": "SUCCEEDED", "train_loss": 9.0,
+    }
+    collection = attempt_dir / "collection.json"
+    collection.write_text(json.dumps(previous) + "\n", encoding="utf-8")
+    (identity / "attempt" / "collection.json").write_bytes(collection.read_bytes())
+    (collected / "manifest.yaml").write_text(
+        yaml.safe_dump(run_manifest), encoding="utf-8",
+    )
+    (collected / "status.json").write_text(
+        json.dumps({"state": "SUCCEEDED", "attempt_id": attempt_id}) + "\n",
+        encoding="utf-8",
+    )
+    (collected / "backend.json").write_text(
+        json.dumps(backend) + "\n", encoding="utf-8",
+    )
+    (collected / "train_metrics.jsonl").write_text(
+        json.dumps({"step": 4, "train_loss": 1.25}) + "\n",
+        encoding="utf-8",
+    )
+    (attempt_dir / "attempt.yaml").write_text(
+        yaml.safe_dump(attempt), encoding="utf-8",
+    )
+    (attempt_dir / "backend.json").write_text(
+        json.dumps(backend) + "\n", encoding="utf-8",
+    )
+    (attempt_dir / "status.json").write_text(
+        json.dumps({"state": "SUCCEEDED", "attempt_id": attempt_id}) + "\n",
+        encoding="utf-8",
+    )
+    (attempt_dir / "events.jsonl").write_text(
+        json.dumps({"event": "finished", "attempt_id": attempt_id}) + "\n",
+        encoding="utf-8",
+    )
+    arguments = [
+        str(campaign_path), "refresh-evidence-local", "--run", run_id,
+        "--attempt-id", attempt_id, "--local-root", str(local_root),
+        "--identity-root", str(identity),
+    ]
+    return arguments, identity, attempt_dir, collection
+
+
+def test_refresh_evidence_local_has_no_backend_or_command_boundary(
+    tmp_path, monkeypatch, capsys,
+):
+    arguments, _identity, attempt_dir, collection = local_evidence_fixture(tmp_path)
+    snapshot_digest = "sha256:" + "d" * 64
+    monkeypatch.setenv("ML_EXPD_CONTROLLER_SNAPSHOT_SHA256", snapshot_digest)
+
+    class ForbiddenBackends:
+        @property
+        def kinds(self):
+            raise AssertionError("backend registry must not be inspected")
+
+        def get(self, _kind):
+            raise AssertionError("backend adapter must not be selected")
+
+    class ForbiddenRunner:
+        def run(self, *args, **kwargs):
+            raise AssertionError("scheduler/local command runner must not be called")
+
+    monkeypatch.setattr(experimentctl, "BACKENDS", ForbiddenBackends())
+    monkeypatch.setattr(experimentctl, "_COMMAND_RUNNER", ForbiddenRunner())
+    immutable_paths = [
+        attempt_dir / "attempt.yaml", attempt_dir / "backend.json",
+        attempt_dir / "status.json", attempt_dir / "events.jsonl",
+        *(path for path in (attempt_dir / "collected_run").rglob("*") if path.is_file()),
+    ]
+    before = {path: (path.read_bytes(), path.stat().st_mtime_ns) for path in immutable_paths}
+
+    assert experimentctl.main([*arguments, "--dry-run"]) == 0
+    preview = json.loads(capsys.readouterr().out)[0]
+    assert preview["dry_run"] is True
+    assert preview["local_only"] is True
+    assert preview["backend_accessed"] is False
+    assert preview["scheduler_accessed"] is False
+    assert preview["controller_snapshot_sha256"] == snapshot_digest
+    old_bytes = collection.read_bytes()
+
+    assert experimentctl.main([
+        *arguments, "--expected-input-digest", preview["input_digest"],
+    ]) == 0
+    result = json.loads(capsys.readouterr().out)[0]
+
+    assert result["old_digest"] == preview["old_digest"]
+    assert result["new_digest"] == experimentctl._regular_file_digest(collection)
+    assert result["new_digest"] != result["old_digest"]
+    assert collection.read_bytes() != old_bytes
+    rebuilt = json.loads(collection.read_text(encoding="utf-8"))
+    assert rebuilt["project"] == "elf"
+    assert rebuilt["run_id"] == "run-local"
+    assert rebuilt["attempt_id"] == "attempt-001"
+    assert rebuilt["train_loss"] == 1.25
+    assert {path: (path.read_bytes(), path.stat().st_mtime_ns) for path in immutable_paths} == before
+
+
+def test_refresh_evidence_local_rejects_collection_cas_and_artifact_drift(
+    tmp_path, monkeypatch, capsys,
+):
+    arguments, identity, attempt_dir, collection = local_evidence_fixture(tmp_path)
+    monkeypatch.setenv(
+        "ML_EXPD_CONTROLLER_SNAPSHOT_SHA256", "sha256:" + "e" * 64,
+    )
+    assert experimentctl.main([*arguments, "--dry-run"]) == 0
+    preview = json.loads(capsys.readouterr().out)[0]
+    collection.write_text('{"raced":true}\n', encoding="utf-8")
+    with pytest.raises(ValueError, match="changed after private review"):
+        experimentctl.main([
+            *arguments, "--expected-input-digest", preview["input_digest"],
+        ])
+
+    # Restore reviewed collection, then drift one durable artifact.
+    collection.write_bytes((identity / "attempt" / "collection.json").read_bytes())
+    (attempt_dir / "collected_run" / "train_metrics.jsonl").write_text(
+        json.dumps({"step": 5, "train_loss": 0.5}) + "\n", encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="input digest changed"):
+        experimentctl.main([
+            *arguments, "--expected-input-digest", preview["input_digest"],
+        ])
+
+
+def test_refresh_evidence_local_rejects_wrong_identity_and_nonterminal_summary(
+    tmp_path, monkeypatch,
+):
+    arguments, identity, attempt_dir, _collection = local_evidence_fixture(tmp_path)
+    monkeypatch.setenv(
+        "ML_EXPD_CONTROLLER_SNAPSHOT_SHA256", "sha256:" + "f" * 64,
+    )
+    backend = json.loads((identity / "attempt" / "backend.json").read_text())
+    backend["attempt_id"] = "attempt-999"
+    (identity / "attempt" / "backend.json").write_text(json.dumps(backend))
+    with pytest.raises(ValueError, match="attempt_id conflicts"):
+        experimentctl.main([*arguments, "--dry-run"])
+
+    backend["attempt_id"] = "attempt-001"
+    (identity / "attempt" / "backend.json").write_text(json.dumps(backend))
+    (attempt_dir / "collected_run" / "status.json").write_text(
+        json.dumps({"state": "RUNNING", "attempt_id": "attempt-001"}) + "\n"
+    )
+    with pytest.raises(ValueError, match="terminal Attempt"):
+        experimentctl.main([*arguments, "--dry-run"])
+
+
+def test_refresh_evidence_local_is_content_idempotent_for_a_fresh_review(
+    tmp_path, monkeypatch, capsys,
+):
+    arguments, identity, _attempt_dir, collection = local_evidence_fixture(tmp_path)
+    monkeypatch.setenv(
+        "ML_EXPD_CONTROLLER_SNAPSHOT_SHA256", "sha256:" + "1" * 64,
+    )
+    assert experimentctl.main([*arguments, "--dry-run"]) == 0
+    preview = json.loads(capsys.readouterr().out)[0]
+    assert experimentctl.main([
+        *arguments, "--expected-input-digest", preview["input_digest"],
+    ]) == 0
+    first = json.loads(capsys.readouterr().out)[0]
+    first_bytes = collection.read_bytes()
+
+    # A later Action snapshots the new collection preimage and recomputes it.
+    (identity / "attempt" / "collection.json").write_bytes(first_bytes)
+    assert experimentctl.main([*arguments, "--dry-run"]) == 0
+    second_preview = json.loads(capsys.readouterr().out)[0]
+    assert experimentctl.main([
+        *arguments, "--expected-input-digest", second_preview["input_digest"],
+    ]) == 0
+    second = json.loads(capsys.readouterr().out)[0]
+
+    assert collection.read_bytes() == first_bytes
+    assert second["old_digest"] == first["new_digest"]
+    assert second["new_digest"] == first["new_digest"]
+
+
+def test_refresh_evidence_local_rejects_missing_or_linked_durable_evidence(
+    tmp_path, monkeypatch,
+):
+    arguments, _identity, attempt_dir, _collection = local_evidence_fixture(tmp_path)
+    monkeypatch.setenv(
+        "ML_EXPD_CONTROLLER_SNAPSHOT_SHA256", "sha256:" + "2" * 64,
+    )
+    manifest = attempt_dir / "collected_run" / "manifest.yaml"
+    manifest.unlink()
+    with pytest.raises(FileNotFoundError, match="manifest.yaml"):
+        experimentctl.main([*arguments, "--dry-run"])
+
+    outside = tmp_path / "outside.txt"
+    outside.write_text("not reviewed local evidence\n", encoding="utf-8")
+    (attempt_dir / "collected_run" / "linked.txt").symlink_to(outside)
+    with pytest.raises(ValueError, match="rejects symlink"):
+        experimentctl.main([*arguments, "--dry-run"])
+
+
 def controller_campaign(tmp_path: Path) -> dict:
     """Return a deployment-neutral campaign for controller tests."""
     return {

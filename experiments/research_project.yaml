@@ -12,6 +12,17 @@ controller:
     run_identity_v2: true
     cancel_outbox: true
     evaluate: false
+    refresh_evidence_local: true
+  execution_bundle:
+    entry_module: elf_experiments.controller
+    paths:
+      - tools/experimentctl.py
+      - src/elf_experiments
+      - src/configs
+    python_packages:
+      - experiment_control
+      - yaml
+    require_clean_git: true
 campaigns:
   - name: backend-smoke-sensecore-20260714-1419
     file: experiments/campaigns/backend_smoke_sensecore_20260714_1419.yml

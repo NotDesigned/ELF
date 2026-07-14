@@ -8,9 +8,12 @@ import base64
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import asdict
+import fcntl
+import hashlib
 import json
 import os
 import re
+import stat
 import subprocess
 import sys
 import time
@@ -31,7 +34,7 @@ from experiment_control import (  # noqa: E402
     utc_now,
     validate_identity,
 )
-from .campaign import load_and_resolve_campaign  # noqa: E402
+from .campaign import load_and_resolve_campaign, resolve_campaign  # noqa: E402
 from .policy import decide_next_action  # noqa: E402
 from .run_manifest import build_run_manifest  # noqa: E402
 from .research_contract import (  # noqa: E402
@@ -67,6 +70,7 @@ _CAMPAIGN_SECRET_KEY_RE = re.compile(
     re.IGNORECASE,
 )
 _URL_USERINFO_RE = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://[^/@\s]+@")
+_SHA256_DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 
 def _reject_embedded_credentials(value: Any, *, path: str) -> None:
@@ -163,6 +167,273 @@ def load_campaign(path: Path) -> dict[str, Any]:
     _reject_embedded_credentials(payload, path="campaign")
     validate_research_contract(payload)
     return payload
+
+
+def _sha256_bytes(payload: bytes) -> str:
+    return "sha256:" + hashlib.sha256(payload).hexdigest()
+
+
+def _regular_file_digest(path: Path) -> str:
+    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    digest = hashlib.sha256()
+    try:
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode):
+            raise ValueError(f"local evidence input is not a regular file: {path}")
+        while chunk := os.read(descriptor, 1024 * 1024):
+            digest.update(chunk)
+    finally:
+        os.close(descriptor)
+    return "sha256:" + digest.hexdigest()
+
+
+def _load_identity_mapping(path: Path) -> dict[str, Any]:
+    """Read one reviewed regular YAML/JSON identity file without following links."""
+    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode):
+            raise ValueError(f"reviewed identity input is not a regular file: {path}")
+        chunks: list[bytes] = []
+        while chunk := os.read(descriptor, 1024 * 1024):
+            chunks.append(chunk)
+    finally:
+        os.close(descriptor)
+    payload = yaml.safe_load(b"".join(chunks).decode("utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError(f"reviewed identity input must be a mapping: {path}")
+    return payload
+
+
+def _local_tree_manifest(root: Path) -> list[dict[str, Any]]:
+    """Merkle inputs for the exact already-local artifact tree."""
+    metadata = root.lstat()
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+        raise ValueError(f"collected_run must be a real directory: {root}")
+    records: list[dict[str, Any]] = []
+    for path in sorted(root.rglob("*")):
+        relative = path.relative_to(root).as_posix()
+        item = path.lstat()
+        if stat.S_ISLNK(item.st_mode):
+            raise ValueError(f"local evidence rejects symlink: {path}")
+        if stat.S_ISDIR(item.st_mode):
+            records.append({"path": relative + "/", "kind": "directory"})
+            continue
+        if not stat.S_ISREG(item.st_mode):
+            raise ValueError(f"local evidence rejects special file: {path}")
+        records.append({
+            "path": relative, "kind": "file", "size": item.st_size,
+            "sha256": _regular_file_digest(path),
+        })
+    if not any(record["kind"] == "file" for record in records):
+        raise ValueError(f"collected_run has no durable regular files: {root}")
+    return records
+
+
+def _local_evidence_input_digest(
+    *, identity_root: Path, collected_run: Path,
+    old_digest: str | None, controller_snapshot_sha256: str,
+) -> tuple[str, list[dict[str, Any]]]:
+    identity_files = (
+        "campaign.yml", "run/manifest.yaml", "attempt/attempt.yaml",
+        "attempt/backend.json",
+    )
+    identity_digests = {
+        name: _regular_file_digest(identity_root / name) for name in identity_files
+    }
+    collection_preimage = identity_root / "attempt" / "collection.json"
+    if collection_preimage.exists():
+        identity_digests["attempt/collection.json"] = _regular_file_digest(
+            collection_preimage
+        )
+    durable = _local_tree_manifest(collected_run)
+    encoded = json.dumps({
+        "schema_version": 1,
+        "controller_snapshot_sha256": controller_snapshot_sha256,
+        "identity_files": identity_digests,
+        "durable_artifacts": durable,
+        "old_collection_sha256": old_digest,
+    }, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return _sha256_bytes(encoded), durable
+
+
+@contextmanager
+def _locked_attempt_directory(attempt_dir: Path):
+    descriptor = os.open(
+        attempt_dir,
+        os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0),
+    )
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        yield
+    finally:
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        os.close(descriptor)
+
+
+def _validate_local_evidence_identity(
+    *, campaign_path: Path, identity_root: Path,
+    run_id: str, attempt_id: str,
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    authored = _load_identity_mapping(campaign_path)
+    campaign = resolve_campaign(authored)
+    project = str(campaign.get("project") or "")
+    campaign_id = str(campaign.get("campaign") or "")
+    if campaign.get("schema_version") != 1 or not project or not campaign_id:
+        raise ValueError("reviewed campaign identity is incomplete")
+    matches = [
+        item for item in campaign.get("runs", [])
+        if isinstance(item, dict) and item.get("run_id") == run_id
+    ]
+    if len(matches) != 1:
+        raise ValueError("reviewed campaign does not select exactly one requested Run")
+    run_manifest = _load_identity_mapping(identity_root / "run" / "manifest.yaml")
+    attempt = _load_identity_mapping(identity_root / "attempt" / "attempt.yaml")
+    backend = _load_identity_mapping(identity_root / "attempt" / "backend.json")
+    expectations = (
+        (run_manifest, "project", project),
+        (run_manifest, "run_id", run_id),
+        (run_manifest, "campaign", campaign_id),
+        (attempt, "project", project),
+        (attempt, "run_id", run_id),
+        (attempt, "attempt_id", attempt_id),
+        (backend, "project", project),
+        (backend, "run_id", run_id),
+        (backend, "attempt_id", attempt_id),
+    )
+    for payload, key, expected in expectations:
+        if str(payload.get(key) or "") != expected:
+            raise ValueError(
+                f"reviewed {key} conflicts with exact local evidence identity"
+            )
+    collection_path = identity_root / "attempt" / "collection.json"
+    previous = (
+        _load_identity_mapping(collection_path) if collection_path.is_file() else None
+    )
+    if previous is not None:
+        for key, expected in (
+            ("project", project), ("run_id", run_id),
+            ("attempt_id", attempt_id),
+        ):
+            value = previous.get(key)
+            if value is not None and str(value) != expected:
+                raise ValueError(
+                    f"reviewed collection {key} conflicts with exact Attempt"
+                )
+    return campaign, previous
+
+
+def rebuild_local_evidence(args: argparse.Namespace) -> dict[str, Any]:
+    """Rebuild only exact-Attempt collection.json from reviewed local inputs."""
+    if len(args.run) != 1:
+        raise ValueError("refresh-evidence-local requires exactly one --run")
+    if args.local_root is None or not args.local_root.is_absolute():
+        raise ValueError("refresh-evidence-local requires an absolute --local-root")
+    if args.identity_root is None or not args.identity_root.is_absolute():
+        raise ValueError("refresh-evidence-local requires an absolute --identity-root")
+    if args.campaign.resolve() != (args.identity_root / "campaign.yml").resolve():
+        raise ValueError("campaign must be the reviewed private identity copy")
+    if (
+        args.expected_input_digest is not None
+        and _SHA256_DIGEST_RE.fullmatch(args.expected_input_digest) is None
+    ):
+        raise ValueError("--expected-input-digest must be a sha256 digest")
+    controller_digest = os.environ.get("ML_EXPD_CONTROLLER_SNAPSHOT_SHA256", "")
+    if _SHA256_DIGEST_RE.fullmatch(controller_digest) is None:
+        raise ValueError("reviewed controller snapshot identity is unavailable")
+    run_id = str(args.run[0])
+    attempt_id = str(args.attempt_id)
+    validate_identity("run_id", run_id)
+    validate_identity("attempt_id", attempt_id)
+    campaign, previous = _validate_local_evidence_identity(
+        campaign_path=args.campaign, identity_root=args.identity_root,
+        run_id=run_id, attempt_id=attempt_id,
+    )
+    local_root = args.local_root
+    if local_root.is_symlink() or not local_root.is_dir():
+        raise ValueError("local_root must be a real already-local data directory")
+    run_dir = local_root / str(campaign["campaign"]) / run_id
+    attempt_dir = run_dir / "attempts" / attempt_id
+    collected_run = attempt_dir / "collected_run"
+    collection_path = attempt_dir / "collection.json"
+    for directory in (
+        local_root / str(campaign["campaign"]), run_dir,
+        run_dir / "attempts", attempt_dir,
+    ):
+        metadata = directory.lstat()
+        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+            raise ValueError(f"local evidence path is not a real directory: {directory}")
+    with _locked_attempt_directory(attempt_dir):
+        old_digest = (
+            _regular_file_digest(collection_path) if collection_path.is_file() else None
+        )
+        reviewed_collection = args.identity_root / "attempt" / "collection.json"
+        reviewed_old_digest = (
+            _regular_file_digest(reviewed_collection)
+            if reviewed_collection.is_file() else None
+        )
+        if old_digest != reviewed_old_digest:
+            raise ValueError("original collection changed after private review snapshot")
+        input_digest, durable_before = _local_evidence_input_digest(
+            identity_root=args.identity_root, collected_run=collected_run,
+            old_digest=old_digest,
+            controller_snapshot_sha256=controller_digest,
+        )
+        if (
+            args.expected_input_digest is not None
+            and args.expected_input_digest != input_digest
+        ):
+            raise ValueError("local evidence input digest changed after Action review")
+        summary = PROJECTS.get(str(campaign["project"])).summarize(collected_run)
+        if summary.get("project") != campaign["project"]:
+            raise ValueError("local summary project conflicts with reviewed identity")
+        if summary.get("run_id") != run_id:
+            raise ValueError("local summary run_id conflicts with reviewed identity")
+        if summary.get("attempt_id") not in {None, attempt_id}:
+            raise ValueError("local summary attempt_id conflicts with reviewed identity")
+        if str(summary.get("state") or "").upper() not in _TERMINAL_STATES:
+            raise ValueError("local summary does not prove an exact terminal Attempt")
+        summary.update({
+            "project": campaign["project"], "run_id": run_id,
+            "attempt_id": attempt_id,
+        })
+        rebuilt = merge_terminal_observation(previous, summary)
+        rebuilt.update({
+            "project": campaign["project"], "run_id": run_id,
+            "attempt_id": attempt_id,
+        })
+        stable_digest, durable_after = _local_evidence_input_digest(
+            identity_root=args.identity_root, collected_run=collected_run,
+            old_digest=old_digest,
+            controller_snapshot_sha256=controller_digest,
+        )
+        if stable_digest != input_digest or durable_after != durable_before:
+            raise ValueError("local durable evidence changed while rebuilding")
+        proposed_bytes = (
+            json.dumps(
+                rebuilt, ensure_ascii=False, sort_keys=True, allow_nan=False,
+            ) + "\n"
+        ).encode("utf-8")
+        if not args.dry_run:
+            actual_old_digest = (
+                _regular_file_digest(collection_path)
+                if collection_path.is_file() else None
+            )
+            if actual_old_digest != old_digest:
+                raise ValueError("collection changed before atomic rebuild write")
+            atomic_write(collection_path, rebuilt)
+            new_digest = _regular_file_digest(collection_path)
+        else:
+            new_digest = _sha256_bytes(proposed_bytes)
+    return {
+        "project": campaign["project"], "run_id": run_id,
+        "attempt_id": attempt_id, "collection_path": str(collection_path),
+        "input_digest": input_digest, "old_digest": old_digest,
+        "new_digest": new_digest, "dry_run": bool(args.dry_run),
+        "local_only": True, "backend_accessed": False,
+        "scheduler_accessed": False,
+        "controller_snapshot_sha256": controller_digest,
+    }
 
 
 def validate_run(run: Any, *, project: str | None = None) -> None:
@@ -1192,11 +1463,24 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "command", choices=(
             "prepare", "preflight", "stage", "submit", "status", "collect", "cancel",
             "observe", "watch", "logs", "decide", "assets-plan", "assets-verify", "check-identity",
+            "refresh-evidence-local",
         )
     )
     parser.add_argument("--run", action="append", default=[], help="limit to this run ID; repeatable")
     parser.add_argument("--attempt-id", default="attempt-001")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument(
+        "--local-root", type=Path,
+        help="original already-local campaign data root (local evidence rebuild only)",
+    )
+    parser.add_argument(
+        "--identity-root", type=Path,
+        help="reviewed private campaign/run/Attempt identity root",
+    )
+    parser.add_argument(
+        "--expected-input-digest",
+        help="reviewed local evidence digest required before atomic replacement",
+    )
     parser.add_argument(
         "--scope", choices=("stage", "submit", "observe"), default="submit",
         help="readiness scope used by the preflight command",
@@ -1224,6 +1508,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> int:
     """Execute one deterministic controller operation for selected campaign runs."""
     args = parse_args(argv)
+    if args.command == "refresh-evidence-local":
+        output = rebuild_local_evidence(args)
+        print(json.dumps([output], ensure_ascii=False, indent=2, sort_keys=True))
+        return 0
     campaign = load_campaign(args.campaign)
     campaign.update(provenance_identity(args.campaign))
     default_identity = source_identity(campaign)
