@@ -745,6 +745,74 @@ def test_logs_fall_back_to_attempt_collection_when_live_probe_is_unavailable(
     assert result["backend_job_id"] == "1234"
 
 
+def test_sensecore_cancel_terminal_collection_retains_first_metric(
+    tmp_path, monkeypatch,
+):
+    from elf_experiments.controller import status_for_decision
+    from elf_experiments.policy import decide_next_action
+
+    monkeypatch.chdir(REPO_ROOT)
+    campaign = controller_campaign(tmp_path)
+    run = materialize_run(campaign, campaign["runs"][0], "source-fixed")
+    prepare_run(campaign, run, "source-fixed", attempt_id="attempt-001")
+    record_submission_intent(campaign, run, "attempt-001")
+    record_submission(campaign, run, "attempt-001", "sensecore-exact-job")
+    selected = experimentctl.select_attempt(run, "attempt-001")
+    running = annotate_collection(
+        {
+            "run_id": run["run_id"],
+            "state": "RUNNING",
+            "model_observed": True,
+            "latest_metric": {
+                "step": 1539, "train_loss": 3.5847, "steps_per_sec": 16.42,
+            },
+            "metric_source": "/data/run/train_metrics.jsonl",
+            "process_evidence": {
+                "observed": True,
+                "sources": {"stdout": "sensecore_stream_logs"},
+                "stdout_tail": ["Step 1539 train_loss=3.5847"],
+                "stderr_tail": [],
+            },
+        },
+        {"state": "RUNNING"},
+    )
+    experimentctl.write_local_collection(campaign, selected, running)
+
+    terminal = annotate_collection(
+        {
+            "run_id": run["run_id"],
+            "state": None,
+            "model_observed": False,
+            "worker_state": "RELEASED",
+            "worker_phases": ["Deleted"],
+            "process_evidence": {
+                "observed": False, "stdout_tail": [], "stderr_tail": [],
+            },
+        },
+        {"state": "CANCELLED"},
+    )
+    merged = experimentctl.write_local_collection(campaign, selected, terminal)
+    decision = decide_next_action(
+        status_for_decision({"state": "CANCELLED"}, merged),
+        retries_used=0,
+        max_infra_retries=0,
+        diagnostic_text=json.dumps(merged),
+    )
+
+    assert merged["scheduler_state"] == "CANCELLED"
+    assert merged["worker_state"] == "RELEASED"
+    assert merged["process_state"] == "UNKNOWN"
+    assert merged["latest_metric"]["step"] == 1539
+    assert merged["metric_source"] == "/data/run/train_metrics.jsonl"
+    assert merged["model_state"] == "OBSERVED"
+    assert merged["process_evidence"]["stdout_tail"] == [
+        "Step 1539 train_loss=3.5847"
+    ]
+    assert merged["retained_evidence"]["retained"] is True
+    assert decision.action == "DO_NOT_RETRY"
+    assert decision.failure_class == "none"
+
+
 def test_watch_streams_first_metric_and_persists_decision(
     tmp_path, monkeypatch, capsys,
 ):

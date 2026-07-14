@@ -52,6 +52,7 @@ from experiment_control.outbox import (  # noqa: E402
     cancel_intent_path as package_cancel_intent_path,
     execute_cancel_outbox,
 )
+from experiment_control.observations import merge_terminal_observation  # noqa: E402
 
 
 _COMMAND_RUNNER: CommandRunner = SubprocessRunner()
@@ -728,15 +729,23 @@ def update_observed_status(campaign: dict[str, Any], run: dict[str, Any], status
     )
 
 
-def write_local_collection(campaign: dict[str, Any], run: dict[str, Any], summary: dict[str, Any]) -> None:
-    """Persist the latest collected scientific/process observation locally."""
+def write_local_collection(
+    campaign: dict[str, Any], run: dict[str, Any], summary: dict[str, Any],
+) -> dict[str, Any]:
+    """Persist one observation without erasing stronger exact-Attempt evidence."""
     root = run_root_dir(campaign, run)
     attempt_id = selected_attempt_id(run) or str(backend_record(campaign, run)["attempt_id"])
     attempt_path = root / "attempts" / attempt_id / "collection.json"
-    atomic_write(attempt_path, summary)
+    previous = (
+        json.loads(attempt_path.read_text(encoding="utf-8"))
+        if attempt_path.is_file() else None
+    )
+    merged = merge_terminal_observation(previous, summary)
+    atomic_write(attempt_path, merged)
     current = ExperimentStateStore(root).load_backend()
     if current and current.get("attempt_id") == attempt_id:
-        atomic_write(root / "collection.json", summary)
+        atomic_write(root / "collection.json", merged)
+    return merged
 
 
 def campaign_research_block(
@@ -970,7 +979,7 @@ def observe_run(
         collection = annotate_collection(
             backend_adapter.collect(campaign, run), status
         )
-        write_local_collection(campaign, run, collection)
+        collection = write_local_collection(campaign, run, collection)
     else:
         status, collection = unsubmitted_status(campaign, run), None
     return {
@@ -1317,7 +1326,7 @@ def main(argv: list[str] | None = None) -> int:
             status = backend_adapter.status(campaign, run)
             update_observed_status(campaign, run, status)
             summary = annotate_collection(backend_adapter.collect(campaign, run), status)
-            write_local_collection(campaign, run, summary)
+            summary = write_local_collection(campaign, run, summary)
             outputs.append(summary)
         elif args.command == "logs":
             if args.tail < 1 or args.tail > 10000:
