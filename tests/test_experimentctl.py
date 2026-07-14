@@ -1005,6 +1005,38 @@ def test_decision_prefers_collected_import_failure_over_transport_status():
     assert decision.action == "DO_NOT_RETRY"
 
 
+def test_decision_prefers_collected_oom_over_transport_and_blocks_retry():
+    from elf_experiments.controller import status_for_decision
+    from elf_experiments.policy import decide_next_action
+
+    collection = annotate_collection(
+        {
+            "state": "UNKNOWN",
+            "live_logs_expired": False,
+            "process_evidence": {
+                "observed": True,
+                "stdout_tail": [
+                    "502 log stream closed after process exit",
+                    "torch.OutOfMemoryError: CUDA out of memory",
+                ],
+                "stderr_tail": [],
+            },
+        },
+        {"state": "FAILED", "failure_class": "transport"},
+    )
+    decision = decide_next_action(
+        status_for_decision(
+            {"state": "FAILED", "failure_class": "transport"}, collection
+        ),
+        retries_used=0,
+        max_infra_retries=2,
+        diagnostic_text=json.dumps(collection),
+    )
+    assert collection["failure_class"] == "resource"
+    assert decision.failure_class == "resource"
+    assert decision.action == "DO_NOT_RETRY"
+
+
 def test_collection_marks_expired_external_evidence_inconclusive():
     result = annotate_collection(
         {
