@@ -213,6 +213,9 @@ def test_refresh_evidence_local_has_no_backend_or_command_boundary(
     assert preview["backend_accessed"] is False
     assert preview["scheduler_accessed"] is False
     assert preview["controller_snapshot_sha256"] == snapshot_digest
+    assert preview["expected_new_collection_digest"] == preview["new_digest"]
+    assert preview["atomic_collection_replace"] is True
+    assert preview["write_protocol"] == "dirfd-fsync-rename-v1"
     old_bytes = collection.read_bytes()
 
     assert experimentctl.main([
@@ -222,6 +225,11 @@ def test_refresh_evidence_local_has_no_backend_or_command_boundary(
 
     assert result["old_digest"] == preview["old_digest"]
     assert result["new_digest"] == experimentctl._regular_file_digest(collection)
+    assert (
+        result["expected_new_collection_digest"]
+        == preview["expected_new_collection_digest"]
+        == result["new_digest"]
+    )
     assert result["new_digest"] != result["old_digest"]
     assert collection.read_bytes() != old_bytes
     rebuilt = json.loads(collection.read_text(encoding="utf-8"))
@@ -230,6 +238,67 @@ def test_refresh_evidence_local_has_no_backend_or_command_boundary(
     assert rebuilt["attempt_id"] == "attempt-001"
     assert rebuilt["train_loss"] == 1.25
     assert {path: (path.read_bytes(), path.stat().st_mtime_ns) for path in immutable_paths} == before
+
+
+def test_controller_import_does_not_construct_backend_registry(tmp_path):
+    environment = os.environ.copy()
+    environment["PYTHONPATH"] = os.pathsep.join((
+        str(REPO_ROOT / "src"),
+        str(REPO_ROOT.parent / "ml-experiment-control-local-evidence" / "src"),
+        environment.get("PYTHONPATH", ""),
+    ))
+    code = """
+import experiment_control.backends as backends
+def forbidden(*args, **kwargs):
+    raise AssertionError('backend registry constructed during controller import')
+backends.build_registry = forbidden
+import elf_experiments.controller as controller
+assert controller.BACKENDS._registry is None
+"""
+    completed = subprocess.run(
+        [sys.executable, "-c", code], cwd=tmp_path, env=environment,
+        text=True, capture_output=True, check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+
+
+def test_refresh_evidence_local_survives_attempt_directory_rename_swap(
+    tmp_path, monkeypatch, capsys,
+):
+    arguments, _identity, attempt_dir, collection = local_evidence_fixture(tmp_path)
+    monkeypatch.setenv(
+        "ML_EXPD_CONTROLLER_SNAPSHOT_SHA256", "sha256:" + "a" * 64,
+    )
+    assert experimentctl.main([*arguments, "--dry-run"]) == 0
+    preview = json.loads(capsys.readouterr().out)[0]
+    original_projects = experimentctl.PROJECTS
+    moved_attempt = attempt_dir.with_name(attempt_dir.name + "-anchored")
+    replacement_payload = b'{"attacker":"replacement"}\n'
+
+    class SwapAdapter:
+        def __init__(self, wrapped):
+            self.wrapped = wrapped
+
+        def summarize(self, run_dir):
+            attempt_dir.rename(moved_attempt)
+            attempt_dir.mkdir()
+            (attempt_dir / "collection.json").write_bytes(replacement_payload)
+            return self.wrapped.summarize(run_dir)
+
+    class SwapProjects:
+        def get(self, project):
+            return SwapAdapter(original_projects.get(project))
+
+    monkeypatch.setattr(experimentctl, "PROJECTS", SwapProjects())
+    assert experimentctl.main([
+        *arguments, "--expected-input-digest", preview["input_digest"],
+    ]) == 0
+    result = json.loads(capsys.readouterr().out)[0]
+
+    assert collection.read_bytes() == replacement_payload
+    anchored_collection = moved_attempt / "collection.json"
+    assert experimentctl._regular_file_digest(anchored_collection) == result["new_digest"]
+    assert result["new_digest"] == preview["expected_new_collection_digest"]
 
 
 def test_refresh_evidence_local_rejects_collection_cas_and_artifact_drift(

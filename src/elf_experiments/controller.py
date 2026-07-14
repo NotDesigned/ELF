@@ -16,6 +16,7 @@ import re
 import stat
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 from typing import Any, Iterable
@@ -205,48 +206,100 @@ def _load_identity_mapping(path: Path) -> dict[str, Any]:
     return payload
 
 
-def _local_tree_manifest(root: Path) -> list[dict[str, Any]]:
-    """Merkle inputs for the exact already-local artifact tree."""
-    metadata = root.lstat()
-    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
-        raise ValueError(f"collected_run must be a real directory: {root}")
+def _read_regular_at(directory_fd: int, name: str, *, display: str) -> bytes:
+    descriptor = os.open(
+        name, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0), dir_fd=directory_fd,
+    )
+    try:
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode):
+            raise ValueError(f"local evidence input is not a regular file: {display}")
+        chunks: list[bytes] = []
+        while chunk := os.read(descriptor, 1024 * 1024):
+            chunks.append(chunk)
+        return b"".join(chunks)
+    finally:
+        os.close(descriptor)
+
+
+def _regular_file_digest_at(directory_fd: int, name: str, *, display: str) -> str:
+    return _sha256_bytes(_read_regular_at(directory_fd, name, display=display))
+
+
+def _optional_regular_digest_at(
+    directory_fd: int, name: str, *, display: str,
+) -> str | None:
+    try:
+        return _regular_file_digest_at(directory_fd, name, display=display)
+    except FileNotFoundError:
+        return None
+
+
+def _local_tree_manifest_at(
+    root_fd: int, *, display: str, snapshot_fd: int | None = None,
+    prefix: str = "",
+) -> list[dict[str, Any]]:
+    """Read an anchored tree without following links, optionally snapshotting it."""
     records: list[dict[str, Any]] = []
-    for path in sorted(root.rglob("*")):
-        relative = path.relative_to(root).as_posix()
-        item = path.lstat()
+    for name in sorted(os.listdir(root_fd)):
+        relative = f"{prefix}{name}"
+        item = os.stat(name, dir_fd=root_fd, follow_symlinks=False)
         if stat.S_ISLNK(item.st_mode):
-            raise ValueError(f"local evidence rejects symlink: {path}")
+            raise ValueError(f"local evidence rejects symlink: {display}/{relative}")
         if stat.S_ISDIR(item.st_mode):
             records.append({"path": relative + "/", "kind": "directory"})
+            child_fd = os.open(
+                name,
+                os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0),
+                dir_fd=root_fd,
+            )
+            destination_fd: int | None = None
+            try:
+                if snapshot_fd is not None:
+                    os.mkdir(name, mode=0o700, dir_fd=snapshot_fd)
+                    destination_fd = os.open(
+                        name,
+                        os.O_RDONLY | os.O_DIRECTORY
+                        | getattr(os, "O_NOFOLLOW", 0),
+                        dir_fd=snapshot_fd,
+                    )
+                records.extend(_local_tree_manifest_at(
+                    child_fd, display=display, snapshot_fd=destination_fd,
+                    prefix=relative + "/",
+                ))
+            finally:
+                if destination_fd is not None:
+                    os.close(destination_fd)
+                os.close(child_fd)
             continue
         if not stat.S_ISREG(item.st_mode):
-            raise ValueError(f"local evidence rejects special file: {path}")
+            raise ValueError(f"local evidence rejects special file: {display}/{relative}")
+        payload = _read_regular_at(root_fd, name, display=f"{display}/{relative}")
+        if snapshot_fd is not None:
+            copied_fd = os.open(
+                name, os.O_WRONLY | os.O_CREAT | os.O_EXCL
+                | getattr(os, "O_NOFOLLOW", 0),
+                0o600, dir_fd=snapshot_fd,
+            )
+            try:
+                view = memoryview(payload)
+                while view:
+                    written = os.write(copied_fd, view)
+                    view = view[written:]
+                os.fsync(copied_fd)
+            finally:
+                os.close(copied_fd)
         records.append({
             "path": relative, "kind": "file", "size": item.st_size,
-            "sha256": _regular_file_digest(path),
+            "sha256": _sha256_bytes(payload),
         })
-    if not any(record["kind"] == "file" for record in records):
-        raise ValueError(f"collected_run has no durable regular files: {root}")
     return records
 
 
 def _local_evidence_input_digest(
-    *, identity_root: Path, collected_run: Path,
+    *, identity_digests: dict[str, str], durable: list[dict[str, Any]],
     old_digest: str | None, controller_snapshot_sha256: str,
-) -> tuple[str, list[dict[str, Any]]]:
-    identity_files = (
-        "campaign.yml", "run/manifest.yaml", "attempt/attempt.yaml",
-        "attempt/backend.json",
-    )
-    identity_digests = {
-        name: _regular_file_digest(identity_root / name) for name in identity_files
-    }
-    collection_preimage = identity_root / "attempt" / "collection.json"
-    if collection_preimage.exists():
-        identity_digests["attempt/collection.json"] = _regular_file_digest(
-            collection_preimage
-        )
-    durable = _local_tree_manifest(collected_run)
+) -> str:
     encoded = json.dumps({
         "schema_version": 1,
         "controller_snapshot_sha256": controller_snapshot_sha256,
@@ -254,7 +307,7 @@ def _local_evidence_input_digest(
         "durable_artifacts": durable,
         "old_collection_sha256": old_digest,
     }, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    return _sha256_bytes(encoded), durable
+    return _sha256_bytes(encoded)
 
 
 @contextmanager
@@ -265,10 +318,44 @@ def _locked_attempt_directory(attempt_dir: Path):
     )
     try:
         fcntl.flock(descriptor, fcntl.LOCK_EX)
-        yield
+        yield descriptor
     finally:
         fcntl.flock(descriptor, fcntl.LOCK_UN)
         os.close(descriptor)
+
+
+def _atomic_replace_at(
+    directory_fd: int, name: str, payload: bytes, *, display: str,
+) -> None:
+    temp_name = f".{name}.{os.getpid()}.{time.time_ns()}.tmp"
+    descriptor = os.open(
+        temp_name,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+        0o600,
+        dir_fd=directory_fd,
+    )
+    published = False
+    try:
+        view = memoryview(payload)
+        while view:
+            written = os.write(descriptor, view)
+            view = view[written:]
+        os.fsync(descriptor)
+        os.close(descriptor)
+        descriptor = -1
+        os.rename(
+            temp_name, name, src_dir_fd=directory_fd, dst_dir_fd=directory_fd,
+        )
+        published = True
+        os.fsync(directory_fd)
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        if not published:
+            try:
+                os.unlink(temp_name, dir_fd=directory_fd)
+            except FileNotFoundError:
+                pass
 
 
 def _validate_local_evidence_identity(
@@ -349,6 +436,21 @@ def rebuild_local_evidence(args: argparse.Namespace) -> dict[str, Any]:
         campaign_path=args.campaign, identity_root=args.identity_root,
         run_id=run_id, attempt_id=attempt_id,
     )
+    identity_files = (
+        "campaign.yml", "run/manifest.yaml", "attempt/attempt.yaml",
+        "attempt/backend.json",
+    )
+    identity_digests = {
+        name: _regular_file_digest(args.identity_root / name)
+        for name in identity_files
+    }
+    reviewed_collection = args.identity_root / "attempt" / "collection.json"
+    reviewed_old_digest = (
+        _regular_file_digest(reviewed_collection)
+        if reviewed_collection.is_file() else None
+    )
+    if reviewed_old_digest is not None:
+        identity_digests["attempt/collection.json"] = reviewed_old_digest
     local_root = args.local_root
     if local_root.is_symlink() or not local_root.is_dir():
         raise ValueError("local_root must be a real already-local data directory")
@@ -363,73 +465,140 @@ def rebuild_local_evidence(args: argparse.Namespace) -> dict[str, Any]:
         metadata = directory.lstat()
         if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
             raise ValueError(f"local evidence path is not a real directory: {directory}")
-    with _locked_attempt_directory(attempt_dir):
-        old_digest = (
-            _regular_file_digest(collection_path) if collection_path.is_file() else None
+    with tempfile.TemporaryDirectory(prefix="elf-local-evidence-") as temporary:
+        snapshot_path = Path(temporary) / "collected_run"
+        snapshot_path.mkdir(mode=0o700)
+        snapshot_fd = os.open(
+            snapshot_path,
+            os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0),
         )
-        reviewed_collection = args.identity_root / "attempt" / "collection.json"
-        reviewed_old_digest = (
-            _regular_file_digest(reviewed_collection)
-            if reviewed_collection.is_file() else None
-        )
-        if old_digest != reviewed_old_digest:
-            raise ValueError("original collection changed after private review snapshot")
-        input_digest, durable_before = _local_evidence_input_digest(
-            identity_root=args.identity_root, collected_run=collected_run,
-            old_digest=old_digest,
-            controller_snapshot_sha256=controller_digest,
-        )
-        if (
-            args.expected_input_digest is not None
-            and args.expected_input_digest != input_digest
-        ):
-            raise ValueError("local evidence input digest changed after Action review")
-        summary = PROJECTS.get(str(campaign["project"])).summarize(collected_run)
-        if summary.get("project") != campaign["project"]:
-            raise ValueError("local summary project conflicts with reviewed identity")
-        if summary.get("run_id") != run_id:
-            raise ValueError("local summary run_id conflicts with reviewed identity")
-        if summary.get("attempt_id") not in {None, attempt_id}:
-            raise ValueError("local summary attempt_id conflicts with reviewed identity")
-        if str(summary.get("state") or "").upper() not in _TERMINAL_STATES:
-            raise ValueError("local summary does not prove an exact terminal Attempt")
-        summary.update({
-            "project": campaign["project"], "run_id": run_id,
-            "attempt_id": attempt_id,
-        })
-        rebuilt = merge_terminal_observation(previous, summary)
-        rebuilt.update({
-            "project": campaign["project"], "run_id": run_id,
-            "attempt_id": attempt_id,
-        })
-        stable_digest, durable_after = _local_evidence_input_digest(
-            identity_root=args.identity_root, collected_run=collected_run,
-            old_digest=old_digest,
-            controller_snapshot_sha256=controller_digest,
-        )
-        if stable_digest != input_digest or durable_after != durable_before:
-            raise ValueError("local durable evidence changed while rebuilding")
-        proposed_bytes = (
-            json.dumps(
-                rebuilt, ensure_ascii=False, sort_keys=True, allow_nan=False,
-            ) + "\n"
-        ).encode("utf-8")
-        if not args.dry_run:
-            actual_old_digest = (
-                _regular_file_digest(collection_path)
-                if collection_path.is_file() else None
-            )
-            if actual_old_digest != old_digest:
-                raise ValueError("collection changed before atomic rebuild write")
-            atomic_write(collection_path, rebuilt)
-            new_digest = _regular_file_digest(collection_path)
-        else:
-            new_digest = _sha256_bytes(proposed_bytes)
+        try:
+            with _locked_attempt_directory(attempt_dir) as attempt_fd:
+                old_digest = _optional_regular_digest_at(
+                    attempt_fd, "collection.json", display=str(collection_path),
+                )
+                if old_digest != reviewed_old_digest:
+                    raise ValueError(
+                        "original collection changed after private review snapshot"
+                    )
+                collected_fd = os.open(
+                    "collected_run",
+                    os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0),
+                    dir_fd=attempt_fd,
+                )
+                try:
+                    durable_before = _local_tree_manifest_at(
+                        collected_fd, display=str(collected_run),
+                        snapshot_fd=snapshot_fd,
+                    )
+                    if not any(
+                        record["kind"] == "file" for record in durable_before
+                    ):
+                        raise ValueError(
+                            f"collected_run has no durable regular files: {collected_run}"
+                        )
+                    input_digest = _local_evidence_input_digest(
+                        identity_digests=identity_digests,
+                        durable=durable_before,
+                        old_digest=old_digest,
+                        controller_snapshot_sha256=controller_digest,
+                    )
+                    if (
+                        args.expected_input_digest is not None
+                        and args.expected_input_digest != input_digest
+                    ):
+                        raise ValueError(
+                            "local evidence input digest changed after Action review"
+                        )
+                    summary_root = Path(f"/proc/self/fd/{snapshot_fd}")
+                    summary = PROJECTS.get(
+                        str(campaign["project"])
+                    ).summarize(summary_root)
+                    if summary.get("project") != campaign["project"]:
+                        raise ValueError(
+                            "local summary project conflicts with reviewed identity"
+                        )
+                    if summary.get("run_id") != run_id:
+                        raise ValueError(
+                            "local summary run_id conflicts with reviewed identity"
+                        )
+                    if summary.get("attempt_id") not in {None, attempt_id}:
+                        raise ValueError(
+                            "local summary attempt_id conflicts with reviewed identity"
+                        )
+                    if (
+                        str(summary.get("state") or "").upper()
+                        not in _TERMINAL_STATES
+                    ):
+                        raise ValueError(
+                            "local summary does not prove an exact terminal Attempt"
+                        )
+                    summary.update({
+                        "project": campaign["project"], "run_id": run_id,
+                        "attempt_id": attempt_id,
+                    })
+                    rebuilt = merge_terminal_observation(previous, summary)
+                    rebuilt.update({
+                        "project": campaign["project"], "run_id": run_id,
+                        "attempt_id": attempt_id,
+                    })
+                    durable_after = _local_tree_manifest_at(
+                        collected_fd, display=str(collected_run),
+                    )
+                    stable_digest = _local_evidence_input_digest(
+                        identity_digests=identity_digests,
+                        durable=durable_after,
+                        old_digest=old_digest,
+                        controller_snapshot_sha256=controller_digest,
+                    )
+                    if (
+                        stable_digest != input_digest
+                        or durable_after != durable_before
+                    ):
+                        raise ValueError(
+                            "local durable evidence changed while rebuilding"
+                        )
+                finally:
+                    os.close(collected_fd)
+                proposed_bytes = (
+                    json.dumps(
+                        rebuilt, ensure_ascii=False, sort_keys=True,
+                        allow_nan=False,
+                    ) + "\n"
+                ).encode("utf-8")
+                expected_new_digest = _sha256_bytes(proposed_bytes)
+                if not args.dry_run:
+                    actual_old_digest = _optional_regular_digest_at(
+                        attempt_fd, "collection.json", display=str(collection_path),
+                    )
+                    if actual_old_digest != old_digest:
+                        raise ValueError(
+                            "collection changed before atomic rebuild write"
+                        )
+                    _atomic_replace_at(
+                        attempt_fd, "collection.json", proposed_bytes,
+                        display=str(collection_path),
+                    )
+                    new_digest = _regular_file_digest_at(
+                        attempt_fd, "collection.json", display=str(collection_path),
+                    )
+                    if new_digest != expected_new_digest:
+                        raise ValueError(
+                            "atomic rebuild produced an unexpected collection digest"
+                        )
+                else:
+                    new_digest = expected_new_digest
+        finally:
+            os.close(snapshot_fd)
     return {
         "project": campaign["project"], "run_id": run_id,
         "attempt_id": attempt_id, "collection_path": str(collection_path),
         "input_digest": input_digest, "old_digest": old_digest,
-        "new_digest": new_digest, "dry_run": bool(args.dry_run),
+        "new_digest": new_digest,
+        "expected_new_collection_digest": expected_new_digest,
+        "atomic_collection_replace": True,
+        "write_protocol": "dirfd-fsync-rename-v1",
+        "dry_run": bool(args.dry_run),
         "local_only": True, "backend_accessed": False,
         "scheduler_accessed": False,
         "controller_snapshot_sha256": controller_digest,
@@ -1219,7 +1388,28 @@ def status_for_decision(
 
 
 PROJECTS = build_project_registry()
-BACKENDS = build_registry(backend_services())
+
+
+class _LazyBackendRegistry:
+    """Construct scheduler adapters only when a backend verb actually needs them."""
+
+    def __init__(self) -> None:
+        self._registry = None
+
+    def _get_registry(self):
+        if self._registry is None:
+            self._registry = build_registry(backend_services())
+        return self._registry
+
+    @property
+    def kinds(self):
+        return self._get_registry().kinds
+
+    def get(self, kind: str):
+        return self._get_registry().get(kind)
+
+
+BACKENDS = _LazyBackendRegistry()
 
 
 def unsubmitted_status(campaign: dict[str, Any], run: dict[str, Any]) -> dict[str, Any]:
