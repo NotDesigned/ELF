@@ -46,6 +46,7 @@ from .research_contract import (  # noqa: E402
 from experiment_control.backends import build_registry  # noqa: E402
 from experiment_control.backends.services import BackendServices  # noqa: E402
 from .projects import build_project_registry  # noqa: E402
+from .summary import merge_local_scientific_evidence  # noqa: E402
 from experiment_control.runner import (  # noqa: E402
     CommandResult,
     CommandRunner,
@@ -637,11 +638,7 @@ def rebuild_local_evidence(args: argparse.Namespace) -> dict[str, Any]:
                         "project": campaign["project"], "run_id": run_id,
                         "attempt_id": attempt_id,
                     })
-                    rebuilt = merge_terminal_observation(previous, summary)
-                    rebuilt.update({
-                        "project": campaign["project"], "run_id": run_id,
-                        "attempt_id": attempt_id,
-                    })
+                    rebuilt = merge_local_scientific_evidence(previous, summary)
                     rebuilt = _stable_local_evidence_paths(
                         rebuilt,
                         logical_root=collected_run,

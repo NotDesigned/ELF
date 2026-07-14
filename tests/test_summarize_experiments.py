@@ -12,6 +12,7 @@ from elf_experiments.summary import (
     collect_eval_evidence,
     collect_eval_metrics,
     discover_run_dirs,
+    merge_local_scientific_evidence,
     read_jsonl,
     summarize_run,
 )
@@ -81,6 +82,106 @@ def test_discovers_and_summarizes_run(tmp_path):
     assert row["train_loss"] == 1.5
     assert row["g_ppl"] == 31.0
     assert row["plan_ppl_gap"] == 5.5
+
+
+def test_local_scientific_merge_preserves_exact_operational_preimage():
+    previous = {
+        "project": "elf",
+        "run_id": "run-a",
+        "attempt_id": "attempt-001",
+        "source_id": "source-abc",
+        "image_id": "image-def",
+        "state": "SUCCEEDED",
+        "backend": "slurm",
+        "run_dir": "/remote/run-a",
+        "collected_from": "/remote/run-a",
+        "scheduler_state": "SUCCEEDED",
+        "worker_state": "RELEASED",
+        "process_state": "SUCCEEDED",
+        "runtime_state": "SUCCEEDED",
+        "model_state": "OBSERVED",
+        "process_evidence": {
+            "observed": True,
+            "stdout_tail": ["checkpoint committed"],
+            "sources": {"stdout": "/remote/run-a/stdout.log"},
+        },
+        "evidence_outcome": "OBSERVED",
+        "evidence_unavailable_reason": None,
+        "latest_completed_checkpoint": "/remote/run-a/checkpoint_38035",
+        "latest_completed_checkpoint_step": 38035,
+        "collection_provenance": {"collector": "slurm", "job": "123"},
+        "train_loss": 9.0,
+        "g_ppl": 50.0,
+        "oracle_plan_ppl": 40.0,
+        "shuffled_plan_ppl": 45.0,
+        "plan_ppl_gap": 5.0,
+        "metric_evidence": {"g_ppl": {"step": 38035, "value": 50.0}},
+        "evidence_conflicts": [{"metric": "g_ppl"}],
+        "warnings": ["stale conflict"],
+    }
+    summary = {
+        "project": "elf",
+        "run_id": "run-a",
+        "attempt_id": "attempt-001",
+        "source_id": "source-abc",
+        "image_id": "image-def",
+        # These are deliberately different; a scientific rebuild does not own
+        # any of them and therefore cannot rewrite the exact observation.
+        "state": "FAILED",
+        "backend": "local",
+        "run_dir": "/local/collected_run",
+        "train_loss": 1.25,
+        "metric_evidence": {
+            "family_state": "UNRESOLVED",
+            "by_variant": {"generation": {"binding": {"status": "UNRESOLVED"}}},
+        },
+        "evaluation_metrics_by_variant": {
+            "generation": {"binding": {"status": "UNRESOLVED"}},
+        },
+        "evaluation_family_state": "UNRESOLVED",
+        "canonical_evaluation_family_id": None,
+        "warnings": ["family identity is incomplete"],
+        "artifacts": {"train_metrics": {"records": 1}},
+    }
+
+    rebuilt = merge_local_scientific_evidence(previous, summary)
+
+    preserved = (
+        "project", "run_id", "attempt_id", "source_id", "image_id",
+        "state", "backend", "run_dir", "collected_from",
+        "scheduler_state", "worker_state", "process_state", "runtime_state",
+        "model_state", "process_evidence", "evidence_outcome",
+        "evidence_unavailable_reason", "latest_completed_checkpoint",
+        "latest_completed_checkpoint_step", "collection_provenance",
+    )
+    assert {key: rebuilt[key] for key in preserved} == {
+        key: previous[key] for key in preserved
+    }
+    assert rebuilt["train_loss"] == 1.25
+    assert rebuilt["evaluation_family_state"] == "UNRESOLVED"
+    assert rebuilt["evaluation_metrics_by_variant"] == summary[
+        "evaluation_metrics_by_variant"
+    ]
+    assert "g_ppl" not in rebuilt
+    assert "oracle_plan_ppl" not in rebuilt
+    assert "shuffled_plan_ppl" not in rebuilt
+    assert "plan_ppl_gap" not in rebuilt
+    assert "evidence_conflicts" not in rebuilt
+    assert rebuilt["warnings"] == ["family identity is incomplete"]
+
+
+@pytest.mark.parametrize(
+    "key", ["project", "run_id", "attempt_id", "source_id", "image_id"],
+)
+def test_local_scientific_merge_rejects_identity_rewrite(key):
+    previous = {
+        "project": "elf", "run_id": "run-a", "attempt_id": "attempt-001",
+        "source_id": "source-a", "image_id": "image-a",
+    }
+    summary = {**previous, key: "different"}
+
+    with pytest.raises(ValueError, match=rf"summary {key} conflicts"):
+        merge_local_scientific_evidence(previous, summary)
 
 
 def test_eval_conflict_is_reported_and_deterministic(tmp_path):

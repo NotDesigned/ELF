@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from copy import deepcopy
 import csv
 import hashlib
 import json
@@ -73,6 +74,71 @@ SCIENTIFIC_CONFIG_KEYS = (
     "plan_aux_passes",
     "plan_aux_token_context",
 )
+
+# ``summarize_run`` owns only scientific and evaluation projections when it is
+# used to refresh an existing exact-Attempt collection.  Lifecycle,
+# checkpoint, identity, and collection provenance remain owned by the original
+# backend observation and must not be replaced by a local scientific rebuild.
+LOCAL_SCIENCE_EVIDENCE_KEYS = frozenset({
+    *TRAIN_KEYS,
+    *EVAL_KEYS,
+    *SCIENTIFIC_CONFIG_KEYS,
+    "metric_evidence",
+    "evaluation_metrics_by_variant",
+    "evaluation_variants",
+    "evaluation_family_state",
+    "canonical_evaluation_family_id",
+    "artifacts",
+    "generation_nonempty_fraction",
+    "generation_mean_entropy",
+    "plan_ppl_gap",
+    "nonfinite_metrics",
+    "warnings",
+    "evidence_conflicts",
+})
+
+LOCAL_EVIDENCE_IDENTITY_KEYS = (
+    "project",
+    "run_id",
+    "attempt_id",
+    "source_id",
+    "image_id",
+)
+
+
+def merge_local_scientific_evidence(
+    previous: dict[str, Any] | None,
+    summary: dict[str, Any],
+) -> dict[str, Any]:
+    """Replace only summary-owned science on one exact Attempt.
+
+    A local summary is not a scheduler or process observation.  For an
+    existing collection, start from the reviewed preimage, remove every
+    summary-owned key (including stale conflicts and flat evaluation values),
+    and then install only the newly computed summary-owned values.  All other
+    fields retain their exact previous values.
+
+    A missing previous collection has no operational evidence to preserve, so
+    the complete summary remains the initial collection representation.
+    """
+    if previous is None:
+        return deepcopy(summary)
+
+    for key in LOCAL_EVIDENCE_IDENTITY_KEYS:
+        old_value = previous.get(key)
+        new_value = summary.get(key)
+        if old_value is not None and new_value is not None and old_value != new_value:
+            raise ValueError(
+                f"local scientific summary {key} conflicts with reviewed collection"
+            )
+
+    result = deepcopy(previous)
+    for key in LOCAL_SCIENCE_EVIDENCE_KEYS:
+        result.pop(key, None)
+    for key in LOCAL_SCIENCE_EVIDENCE_KEYS:
+        if key in summary:
+            result[key] = deepcopy(summary[key])
+    return result
 
 
 def load_mapping(path: Path) -> dict[str, Any]:

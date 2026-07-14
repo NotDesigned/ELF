@@ -240,6 +240,88 @@ def test_refresh_evidence_local_has_no_backend_or_command_boundary(
     assert {path: (path.read_bytes(), path.stat().st_mtime_ns) for path in immutable_paths} == before
 
 
+def test_refresh_evidence_local_keeps_exact_execution_and_checkpoint_evidence(
+    tmp_path, monkeypatch, capsys,
+):
+    arguments, identity, _attempt_dir, collection = local_evidence_fixture(tmp_path)
+    previous = {
+        "project": "elf",
+        "run_id": "run-local",
+        "attempt_id": "attempt-001",
+        "source_id": "source-fixed",
+        "image_id": "image-fixed",
+        "state": "SUCCEEDED",
+        "backend": "slurm",
+        "run_dir": "/remote/run-local",
+        "collected_from": "/remote/run-local",
+        "scheduler_state": "SUCCEEDED",
+        "worker_state": "RELEASED",
+        "process_state": "SUCCEEDED",
+        "runtime_state": "SUCCEEDED",
+        "model_state": "OBSERVED",
+        "process_evidence": {
+            "observed": True,
+            "stdout_tail": ["Final checkpoint saved"],
+            "stderr_tail": [],
+        },
+        "evidence_outcome": "OBSERVED",
+        "evidence_unavailable_reason": None,
+        "latest_completed_checkpoint": "/remote/run-local/checkpoint_38035",
+        "latest_completed_checkpoint_step": 38035,
+        "collection_provenance": {"backend_job_id": "123"},
+        "train_loss": 9.0,
+        "g_ppl": 30.0,
+        "oracle_plan_ppl": 20.0,
+        "shuffled_plan_ppl": 25.0,
+        "token_recon_ppl": 10.0,
+        "plan_ppl_gap": 5.0,
+        "generation_mean_entropy": 4.5,
+        "metric_evidence": {"g_ppl": {"step": 38035, "value": 30.0}},
+        "evidence_conflicts": [{"metric": "g_ppl"}],
+        "warnings": ["stale conflict"],
+    }
+    encoded = (json.dumps(previous, sort_keys=True) + "\n").encode("utf-8")
+    collection.write_bytes(encoded)
+    (identity / "attempt" / "collection.json").write_bytes(encoded)
+    monkeypatch.setenv(
+        "ML_EXPD_CONTROLLER_SNAPSHOT_SHA256", "sha256:" + "6" * 64,
+    )
+
+    assert experimentctl.main([*arguments, "--dry-run"]) == 0
+    preview = json.loads(capsys.readouterr().out)[0]
+    assert experimentctl.main([
+        *arguments, "--expected-input-digest", preview["input_digest"],
+    ]) == 0
+    capsys.readouterr()
+    rebuilt = json.loads(collection.read_text(encoding="utf-8"))
+
+    operational = (
+        "state", "backend", "run_dir", "collected_from", "scheduler_state",
+        "worker_state", "process_state", "runtime_state", "model_state",
+        "process_evidence", "evidence_outcome", "evidence_unavailable_reason",
+        "latest_completed_checkpoint", "latest_completed_checkpoint_step",
+        "collection_provenance",
+    )
+    assert {key: rebuilt[key] for key in operational} == {
+        key: previous[key] for key in operational
+    }
+    # These exact fields are the inputs used by ml-expd's execution-layer and
+    # checkpoint gates, so the rebuilt collection remains fully observed.
+    assert rebuilt["scheduler_state"] == "SUCCEEDED"
+    assert rebuilt["process_state"] == "SUCCEEDED"
+    assert rebuilt["model_state"] == "OBSERVED"
+    assert rebuilt["latest_completed_checkpoint_step"] == 38035
+    assert rebuilt["train_loss"] == 1.25
+    assert "g_ppl" not in rebuilt
+    assert "oracle_plan_ppl" not in rebuilt
+    assert "shuffled_plan_ppl" not in rebuilt
+    assert "token_recon_ppl" not in rebuilt
+    assert "plan_ppl_gap" not in rebuilt
+    assert "generation_mean_entropy" not in rebuilt
+    assert "evidence_conflicts" not in rebuilt
+    assert "warnings" not in rebuilt
+
+
 def test_controller_import_does_not_construct_backend_registry(tmp_path):
     environment = os.environ.copy()
     environment["PYTHONPATH"] = os.pathsep.join((
@@ -355,8 +437,11 @@ def test_refresh_evidence_local_is_deterministic_across_independent_processes(
     assert result["new_digest"] == first["expected_new_collection_digest"]
     assert experimentctl._regular_file_digest(collection) == result["new_digest"]
     rebuilt = json.loads(collection.read_text(encoding="utf-8"))
-    assert rebuilt["run_dir"] == str(collected)
-    assert rebuilt["latest_completed_checkpoint"] == str(checkpoint)
+    # An existing collection owns operational and checkpoint provenance.  A
+    # scientific refresh cannot manufacture either from its local snapshot.
+    assert "run_dir" not in rebuilt
+    assert "latest_completed_checkpoint" not in rebuilt
+    assert "latest_completed_checkpoint_step" not in rebuilt
     observations = rebuilt["metric_evidence"]["observations"]
     assert {item["observed_at"] for item in observations} == {
         reviewed_mtime_ns / 1_000_000_000,
