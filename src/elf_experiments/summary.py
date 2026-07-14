@@ -213,6 +213,40 @@ def _family_id(dimensions: dict[str, Any]) -> str:
     return "sha256:" + hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
+def _valid_identity_text(value: Any) -> bool:
+    return isinstance(value, str) and bool(value.strip()) and value == value.strip()
+
+
+def _exact_observation_errors(observation: dict[str, Any]) -> list[str]:
+    """Return fields that make one purported exact observation non-exact."""
+    errors: list[str] = []
+    for field in ("project", "run_id", "attempt_id", "variant_id", "source"):
+        if not _valid_identity_text(observation.get(field)):
+            errors.append(field)
+    for field in ("epoch", "step"):
+        value = observation.get(field)
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            errors.append(field)
+    family_id = observation.get("family_id")
+    binding = observation.get("binding")
+    binding = binding if isinstance(binding, dict) else {}
+    dimensions = binding.get("sampling_dimensions")
+    if (
+        not isinstance(family_id, str)
+        or re.fullmatch(r"sha256:[0-9a-f]{64}", family_id) is None
+        or not isinstance(dimensions, dict)
+        or _sampling_dimensions({"sampling_dimensions": dimensions}) != dimensions
+        or _family_id(dimensions) != family_id
+    ):
+        errors.append("family_id")
+    source = observation.get("source")
+    if isinstance(source, str):
+        source_path = Path(source)
+        if source_path.is_absolute() or ".." in source_path.parts:
+            errors.append("source")
+    return sorted(set(errors))
+
+
 def _record_binding(record: dict[str, Any]) -> dict[str, Any]:
     mode = record.get("mode")
     if mode == "clean_token_reconstruction":
@@ -303,7 +337,7 @@ def collect_eval_evidence(
     project = manifest.get("project")
     run_id = manifest.get("run_id")
     attempt_id = status.get("attempt_id")
-    observations: list[dict[str, Any]] = []
+    candidates: list[dict[str, Any]] = []
     warnings: list[str] = []
     conflicts: list[dict[str, Any]] = []
     for path in sorted(run_dir.rglob("metrics.jsonl")):
@@ -329,12 +363,72 @@ def collect_eval_evidence(
                     "variant_id": variant_id,
                     "family_id": binding.get("family_id"), "metric": metric,
                 }
-                observations.append({
+                candidates.append({
                     **exact_binding,
                     "mode": binding.get("mode"), "value": value,
                     "source": source, "observed_at": observed_at,
                     "binding": dict(binding),
                 })
+
+    family_dimensions: dict[str, dict[str, Any]] = {}
+    for item in candidates:
+        binding = item["binding"]
+        family_id = binding.get("family_id")
+        dimensions = binding.get("sampling_dimensions")
+        if (
+            binding.get("scope") == "SAMPLING_FAMILY"
+            and isinstance(family_id, str)
+            and isinstance(dimensions, dict)
+        ):
+            family_dimensions[family_id] = dimensions
+
+    expanded: list[dict[str, Any]] = []
+    for item in candidates:
+        binding = item["binding"]
+        if binding.get("scope") != "FAMILY_INDEPENDENT_RECONSTRUCTION":
+            expanded.append(item)
+            continue
+        if not family_dimensions:
+            expanded.append(item)
+            continue
+        # Reconstruction is explicitly family-independent, so materialize one
+        # exact binding per producer-authored family instead of publishing a
+        # family-less observation or inferring a family from a label.
+        for family_id, dimensions in sorted(family_dimensions.items()):
+            expanded.append({
+                **item,
+                "family_id": family_id,
+                "binding": {
+                    **binding,
+                    "family_id": family_id,
+                    "sampling_dimensions": dimensions,
+                },
+            })
+
+    observations: list[dict[str, Any]] = []
+    diagnostics: list[dict[str, Any]] = []
+    for item in expanded:
+        errors = _exact_observation_errors(item)
+        if not errors:
+            observations.append(item)
+            continue
+        diagnostic = {
+            "type": "incomplete_exact_evaluation_identity",
+            "invalid_fields": errors,
+            **{
+                key: item.get(key) for key in (
+                    "project", "run_id", "attempt_id", "epoch", "step",
+                    "variant_id", "family_id", "mode", "metric", "source",
+                    "observed_at",
+                )
+            },
+            "binding": dict(item.get("binding") or {}),
+        }
+        diagnostics.append(diagnostic)
+        warnings.append(
+            "excluded non-exact evaluation observation for "
+            f"variant {item.get('variant_id')!r}: {', '.join(errors)}"
+        )
 
     by_key: dict[tuple[Any, ...], list[dict[str, Any]]] = {}
     for item in observations:
@@ -373,12 +467,15 @@ def collect_eval_evidence(
 
     variant_bindings: dict[str, dict[str, Any]] = {}
     unresolved: set[str] = set()
-    for item in observations:
+    for item in candidates:
         variant_id = str(item["variant_id"])
         binding = item["binding"]
         previous = variant_bindings.setdefault(variant_id, binding)
         if previous != binding or binding.get("status") != "RESOLVED":
             unresolved.add(variant_id)
+    unresolved.update(
+        str(item.get("variant_id") or "unknown") for item in diagnostics
+    )
     reconstruction = sorted(
         variant_id for variant_id, binding in variant_bindings.items()
         if binding.get("scope") == "FAMILY_INDEPENDENT_RECONSTRUCTION"
@@ -439,14 +536,20 @@ def collect_eval_evidence(
                 }
                 for metric, item in sorted(latest_by_metric.items())
             },
+            "diagnostics": [
+                item for item in diagnostics if item.get("variant_id") == variant_id
+            ],
         }
 
     metrics: dict[str, Any] = {}
-    if selected_family is not None and len(reconstruction) == 1:
+    if selected_family is not None and len(reconstruction) == 1 and not unresolved:
         selected_variants = set(families[selected_family]) | set(reconstruction)
         by_checkpoint: dict[tuple[int | None, int | None], dict[str, list[dict[str, Any]]]] = {}
         for item in observations:
-            if item["variant_id"] not in selected_variants:
+            if (
+                item["variant_id"] not in selected_variants
+                or item.get("family_id") != selected_family
+            ):
                 continue
             identity = (item.get("epoch"), item.get("step"))
             key = tuple(item.get(name) for name in (
@@ -506,6 +609,7 @@ def collect_eval_evidence(
             ),
         } for family_id, variant_ids in sorted(families.items())],
         "observations": observations,
+        "diagnostics": diagnostics,
         "by_variant": by_variant,
     }
     return metrics, evidence, warnings, conflicts

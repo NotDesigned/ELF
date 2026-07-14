@@ -7,6 +7,8 @@ import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 from elf_experiments.summary import (
+    _exact_observation_errors,
+    _family_id,
     collect_eval_evidence,
     collect_eval_metrics,
     discover_run_dirs,
@@ -161,6 +163,85 @@ def test_missing_sampling_dimensions_are_unresolved_and_never_flat(tmp_path):
     assert row["evaluation_metrics_by_variant"]["generation"]["binding"][
         "status"
     ] == "UNRESOLVED"
+    assert row["evaluation_metrics_by_variant"]["generation"]["diagnostics"][0][
+        "invalid_fields"
+    ] == ["family_id"]
+
+
+@pytest.mark.parametrize(
+    ("mutation", "invalid_field", "variant"),
+    [
+        ("missing_status", "attempt_id", None),
+        ("empty_project", "project", None),
+        ("none_run", "run_id", None),
+        ("missing_epoch", "epoch", "generation"),
+        ("missing_step", "step", "generation"),
+        ("invalid_variant", "variant_id", " "),
+    ],
+)
+def test_incomplete_eval_identity_is_diagnostic_only_and_never_flat(
+    tmp_path, mutation, invalid_field, variant,
+):
+    run_dir = make_run(tmp_path)
+    if mutation == "missing_status":
+        (run_dir / "status.json").unlink()
+    elif mutation in {"empty_project", "none_run"}:
+        manifest_path = run_dir / "manifest.yaml"
+        manifest = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
+        manifest["project" if mutation == "empty_project" else "run_id"] = (
+            "" if mutation == "empty_project" else None
+        )
+        manifest_path.write_text(yaml.safe_dump(manifest), encoding="utf-8")
+    elif mutation in {"missing_epoch", "missing_step"}:
+        metrics_path = run_dir / "train_sampling_eval" / "generation" / "metrics.jsonl"
+        record = json.loads(metrics_path.read_text(encoding="utf-8"))
+        record.pop("epoch" if mutation == "missing_epoch" else "step")
+        metrics_path.write_text(json.dumps(record) + "\n", encoding="utf-8")
+    else:
+        source = run_dir / "train_sampling_eval" / "generation"
+        source.rename(source.with_name(" "))
+
+    row = summarize_run(run_dir)
+
+    for metric in (
+        "token_recon_ppl", "g_ppl", "oracle_plan_ppl",
+        "shuffled_plan_ppl", "plan_ppl_gap",
+    ):
+        assert metric not in row
+    diagnostics = row["metric_evidence"]["diagnostics"]
+    assert diagnostics
+    assert any(invalid_field in item["invalid_fields"] for item in diagnostics)
+    observations = row["metric_evidence"]["observations"]
+    assert all(not any(
+        all(observation.get(key) == item.get(key) for key in (
+            "variant_id", "metric", "source",
+        ))
+        for observation in observations
+    ) for item in diagnostics)
+    if variant is not None:
+        assert variant in row["metric_evidence"]["unresolved_variant_ids"]
+
+
+def test_exact_observation_source_and_family_identity_are_validated():
+    dimensions = {
+        "sampling_method": "sde", "num_sampling_steps": 32, "cfg": 1.0,
+        "self_cond_cfg_scale": 3.0, "time_schedule": "logit_normal",
+        "time_warp_gamma": 1.5,
+    }
+    observation = {
+        "project": "elf", "run_id": "run-a", "attempt_id": "attempt-001",
+        "epoch": 1, "step": 200, "variant_id": "generation",
+        "family_id": _family_id(dimensions), "source": "eval/metrics.jsonl",
+        "binding": {"sampling_dimensions": dimensions},
+    }
+    assert _exact_observation_errors(observation) == []
+
+    observation["source"] = "../metrics.jsonl"
+    assert _exact_observation_errors(observation) == ["source"]
+
+    observation["source"] = "eval/metrics.jsonl"
+    observation["family_id"] = "sha256:" + "0" * 64
+    assert _exact_observation_errors(observation) == ["family_id"]
 
 
 def test_two_real_sampling_families_remain_distinct_without_flat_conflicts(tmp_path):
@@ -237,7 +318,7 @@ def test_two_real_sampling_families_remain_distinct_without_flat_conflicts(tmp_p
         assert metric not in row
     evidence = row["metric_evidence"]
     assert len(evidence["families"]) == 2
-    assert len(evidence["observations"]) == 9
+    assert len(evidence["observations"]) == 10
     assert {item["observed_at"] for item in evidence["observations"]} == {
         observed_at,
     }
@@ -250,8 +331,8 @@ def test_two_real_sampling_families_remain_distinct_without_flat_conflicts(tmp_p
     assert {
         item["binding"]["sampling_dimensions"]["num_sampling_steps"]
         for item in evidence["observations"]
-        if item["binding"].get("scope") == "SAMPLING_FAMILY"
     } == {32, 64}
+    assert all(item["family_id"].startswith("sha256:") for item in evidence["observations"])
 
 
 def test_nonfinite_metrics_remain_json_safe_and_visible_to_policy(tmp_path):
