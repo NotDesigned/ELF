@@ -427,6 +427,32 @@ def test_refresh_evidence_local_rejects_wrong_identity_and_nonterminal_summary(
         experimentctl.main([*arguments, "--dry-run"])
 
 
+def test_refresh_evidence_local_accepts_minimal_backend_contract_and_rejects_spoof(
+    tmp_path, monkeypatch, capsys,
+):
+    arguments, identity, _attempt_dir, _collection = local_evidence_fixture(tmp_path)
+    monkeypatch.setenv(
+        "ML_EXPD_CONTROLLER_SNAPSHOT_SHA256", "sha256:" + "7" * 64,
+    )
+    backend_path = identity / "attempt" / "backend.json"
+    minimal_backend = {
+        "attempt_id": "attempt-001", "backend": "slurm",
+        "backend_job_id": "7433",
+    }
+    backend_path.write_text(json.dumps(minimal_backend) + "\n", encoding="utf-8")
+
+    assert experimentctl.main([*arguments, "--dry-run"]) == 0
+    preview = json.loads(capsys.readouterr().out)[0]
+    assert preview["local_only"] is True
+    assert preview["attempt_id"] == "attempt-001"
+
+    backend_path.write_text(json.dumps({
+        **minimal_backend, "project": "spoofed",
+    }) + "\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="backend project conflicts"):
+        experimentctl.main([*arguments, "--dry-run"])
+
+
 def test_refresh_evidence_local_is_content_idempotent_for_a_fresh_review(
     tmp_path, monkeypatch, capsys,
 ):

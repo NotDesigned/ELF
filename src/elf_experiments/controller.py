@@ -451,15 +451,37 @@ def _validate_local_evidence_identity(
         (attempt, "project", project),
         (attempt, "run_id", run_id),
         (attempt, "attempt_id", attempt_id),
-        (backend, "project", project),
-        (backend, "run_id", run_id),
-        (backend, "attempt_id", attempt_id),
     )
     for payload, key, expected in expectations:
         if str(payload.get(key) or "") != expected:
             raise ValueError(
                 f"reviewed {key} conflicts with exact local evidence identity"
             )
+    for required in ("attempt_id", "backend", "backend_job_id"):
+        if required not in backend:
+            raise ValueError(f"reviewed backend is missing required {required}")
+    if str(backend.get("attempt_id") or "") != attempt_id:
+        raise ValueError(
+            "reviewed backend attempt_id conflicts with exact local evidence identity"
+        )
+    if not isinstance(backend.get("backend"), str) or not backend["backend"].strip():
+        raise ValueError("reviewed backend backend must be a non-empty string")
+    for key, expected in (("project", project), ("run_id", run_id)):
+        if key in backend and str(backend.get(key) or "") != expected:
+            raise ValueError(
+                f"reviewed backend {key} conflicts with exact local evidence identity"
+            )
+    status_path = identity_root / "attempt" / "status.json"
+    if status_path.is_file():
+        status = _load_identity_mapping(status_path)
+        for key, expected in (
+            ("project", project), ("run_id", run_id),
+            ("attempt_id", attempt_id),
+        ):
+            if str(status.get(key) or "") != expected:
+                raise ValueError(
+                    f"reviewed status {key} conflicts with exact local evidence identity"
+                )
     collection_path = identity_root / "attempt" / "collection.json"
     previous = (
         _load_identity_mapping(collection_path) if collection_path.is_file() else None
@@ -512,6 +534,11 @@ def rebuild_local_evidence(args: argparse.Namespace) -> dict[str, Any]:
         for name in identity_files
     }
     reviewed_collection = args.identity_root / "attempt" / "collection.json"
+    reviewed_status = args.identity_root / "attempt" / "status.json"
+    if reviewed_status.is_file():
+        identity_digests["attempt/status.json"] = _regular_file_digest(
+            reviewed_status
+        )
     reviewed_old_digest = (
         _regular_file_digest(reviewed_collection)
         if reviewed_collection.is_file() else None
