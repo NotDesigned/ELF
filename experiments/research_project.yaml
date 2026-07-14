@@ -13,6 +13,36 @@ controller:
     cancel_outbox: true
     evaluate: false
 campaigns:
+  - name: backend-smoke-sensecore-20260714-1325
+    file: experiments/campaigns/backend_smoke_sensecore_20260714_1325.yml
+    role_notes:
+      smoke: one-GPU spot validation of AFS mount, offline assets, process startup, and first metric
+  - name: fusion-aux-ratio-ga2-h100-20260714-c1
+    file: experiments/campaigns/fusion_aux_ratio_ga2_h100_20260714.yml
+    role_notes:
+      aux0: matched H100 control; no detached learned-plan denoiser pass
+      aux1: matched H100 treatment; one detached learned-plan denoiser pass
+      aux2: matched H100 treatment; two detached learned-plan denoiser passes
+  - name: fusion-aux-ratio-ga2-h200-20260714-c2
+    file: experiments/campaigns/fusion_aux_ratio_ga2_h200_20260714.yml
+    role_notes:
+      aux0: clean r2 replacement; no detached learned-plan denoiser pass
+      aux1: clean r2 replacement; one detached learned-plan denoiser pass
+      aux2: clean r2 replacement; two detached learned-plan denoiser passes
+  - name: fusion-a2-mb64-ga2-h100-20260712-c1
+    file: experiments/campaigns/fusion_a2_mb64_ga2_h100_20260712.yml
+    role_notes:
+      a2: learned-plan recovery run at effective global batch 512 with microbatch 64 and GA2
+  - name: fusion-a2-mb64-ga2-h100-smoke-20260712-c1
+    file: experiments/campaigns/fusion_a2_mb64_ga2_h100_smoke_20260712.yml
+  - name: fusion-aux-ratio-ga2-h200-20260712-c1
+    file: experiments/campaigns/fusion_aux_ratio_ga2_h200_20260712.yml
+    role_notes:
+      aux0: no detached learned-plan denoiser pass
+      aux1: one detached learned-plan denoiser pass
+      aux2: two detached learned-plan denoiser passes
+  - name: fusion-aux-ratio-ga2-h200-smoke-20260712-c1
+    file: experiments/campaigns/fusion_aux_ratio_ga2_h200_smoke_20260712.yml
   - name: fusion-a1-warmstart-a0-h100-20260712-c2
     file: experiments/campaigns/fusion_a1_warmstart_a0_h100_20260712.yml
     role_notes:

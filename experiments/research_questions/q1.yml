@@ -18,6 +18,9 @@ links:
   campaigns:
     - fusion-len256-gate-h100-20260711
     - fusion-a1-warmstart-a0-h100-20260712-c2
+    - fusion-a2-mb64-ga2-h100-20260712-c1
+    - fusion-aux-ratio-ga2-h100-20260714-c1
+    - fusion-aux-ratio-ga2-h200-20260712-c1
+    - fusion-aux-ratio-ga2-h200-20260714-c2
   runs: []
   evidence: []
-assessments: []

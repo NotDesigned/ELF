@@ -202,6 +202,23 @@ def test_controller_manifest_is_accepted_unchanged_by_runtime(tmp_path, monkeypa
     assert (remote_dir / "attempts/attempt-001/attempt.yaml").is_file()
 
 
+def test_prepared_run_keeps_frozen_provenance_when_submit_checkout_moves(tmp_path):
+    campaign = controller_campaign(tmp_path)
+    campaign.update({"git_commit": "commit-before", "campaign_id": "campaign-before"})
+    run = materialize_run(campaign, campaign["runs"][0], "source-fixed")
+    prepared = prepare_run(campaign, run, "source-fixed", attempt_id="attempt-001")
+
+    moved = dict(campaign)
+    moved.update({"git_commit": "commit-after", "campaign_id": "campaign-after"})
+    submitted = prepare_run(moved, run, "source-fixed", attempt_id="attempt-001")
+
+    assert submitted == prepared
+    assert submitted["git_commit"] == "commit-before"
+    assert submitted["campaign_id"] == "campaign-before"
+    assert "GIT_COMMIT=commit-before" in submitted["command"]
+    assert "CAMPAIGN_ID=campaign-before" in submitted["command"]
+
+
 def test_render_supports_alternate_storage_mount(tmp_path, monkeypatch):
     """Jobs bind and cache on their explicitly declared filesystem."""
     monkeypatch.chdir(REPO_ROOT)
@@ -250,6 +267,52 @@ def test_rejects_mixed_slurm_storage_profiles(tmp_path):
     path.write_text(yaml.safe_dump(campaign), encoding="utf-8")
     with pytest.raises(ValueError, match="must be under declared mount_root"):
         load_campaign(path)
+
+
+def test_load_campaign_validates_controller_tokens_after_materialization(tmp_path):
+    source = REPO_ROOT / "experiments/campaigns/backend_smoke_sensecore_20260711.yml"
+    authored = yaml.safe_load(source.read_text(encoding="utf-8"))
+    authored["local_root"] = str(tmp_path / "state")
+    authored["runs"].append({
+        "run_id": "elf-smoke-sco-0711-1618-b",
+        "profile": "sensecore-4gpu-spot",
+    })
+    path = tmp_path / "sensecore-tokens.yml"
+    path.write_text(yaml.safe_dump(authored, sort_keys=False), encoding="utf-8")
+
+    campaign = load_campaign(path)
+    first, second = campaign["runs"]
+
+    # The authored document remains reviewable and unresolved, while load has
+    # already validated the exact recursively materialized backend shape.
+    assert first["backend"]["job_name"] == second["backend"]["job_name"] == "{run_id}"
+    assert first["backend"]["display_name"] == second["backend"]["display_name"] == "{run_id}"
+    first_materialized = materialize_run(campaign, first, "source-fixed")
+    second_materialized = materialize_run(campaign, second, "source-fixed")
+    assert first_materialized["backend"]["job_name"] == first["run_id"]
+    assert first_materialized["backend"]["display_name"] == first["run_id"]
+    assert second_materialized["backend"]["job_name"] == second["run_id"]
+    assert second_materialized["backend"]["display_name"] == second["run_id"]
+    assert first_materialized["backend"]["job_name"] != second_materialized["backend"]["job_name"]
+    assert first_materialized["backend"]["display_name"] != second_materialized["backend"]["display_name"]
+
+    first_manifest = prepare_run(
+        campaign, first_materialized, "source-fixed", attempt_id="attempt-001"
+    )
+    second_manifest = prepare_run(
+        campaign, second_materialized, "source-fixed", attempt_id="attempt-001"
+    )
+    serialized_outputs = (
+        yaml.safe_dump(campaign, sort_keys=True),
+        yaml.safe_dump(first_materialized, sort_keys=True),
+        yaml.safe_dump(second_materialized, sort_keys=True),
+        json.dumps(first_manifest, sort_keys=True),
+        json.dumps(second_manifest, sort_keys=True),
+    )
+    assert all("validation-source" not in output for output in serialized_outputs)
+    assert first_manifest["backend"]["job_name"] == first["run_id"]
+    assert second_manifest["backend"]["job_name"] == second["run_id"]
+    assert first_manifest["run_id"] != second_manifest["run_id"]
 
 
 def test_load_campaign_rejects_unreviewed_or_secret_env(tmp_path):

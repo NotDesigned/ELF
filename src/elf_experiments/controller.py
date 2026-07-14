@@ -151,7 +151,11 @@ def load_campaign(path: Path) -> dict[str, Any]:
         raise ValueError("campaign runs must be a non-empty list")
     seen: set[str] = set()
     for run in payload["runs"]:
-        validate_run(run, project=str(payload["project"]))
+        # Campaign authoring deliberately retains controller-time placeholders
+        # (including backend.job_name={run_id}) until immutable source and Run
+        # identities are known.  Validate the recursively materialized shape,
+        # while returning the authored unresolved payload for real execution.
+        materialize_run(payload, run, "validation-source")
         if run["run_id"] in seen:
             raise ValueError(f"duplicate run_id: {run['run_id']}")
         seen.add(run["run_id"])
@@ -401,11 +405,20 @@ def prepare_run(
     """Freeze local control metadata before any scheduler mutation occurs."""
     local_dir = run_root_dir(campaign, run)
     store = ExperimentStateStore(local_dir)
+    identity_campaign = dict(campaign)
+    if store.manifest_path.is_file():
+        # Preparation freezes controller provenance before scheduler mutation.
+        # A later submit may run from a newer checkout, but must render the
+        # already-reviewed Attempt with the original immutable identities.
+        frozen_manifest = store.load_manifest()
+        for key in ("git_commit", "campaign_id"):
+            if frozen_manifest.get(key) is not None:
+                identity_campaign[key] = frozen_manifest[key]
     remote_run_dir = str(run["storage"]["run_dir"])
     project = PROJECTS.get(str(campaign["project"]))
     overrides = resolved_run_overrides(campaign, run, remote_run_dir)
     resolved = project.resolve_config(str(run["config"]), overrides)
-    command = launcher_command(campaign, run, source_id, attempt_id)
+    command = launcher_command(identity_campaign, run, source_id, attempt_id)
     bundle = project.source_bundle(REPO_ROOT)
     identity_run = dict(run)
     identity_run["env"] = {
@@ -413,7 +426,7 @@ def prepare_run(
         if str(key).upper() not in {"RESUME", "RESUME_FROM", "CHECKPOINT_PATH"}
     }
     command_template = sanitize_command(
-        launcher_command(campaign, identity_run, source_id, "{attempt_id}")
+        launcher_command(identity_campaign, identity_run, source_id, "{attempt_id}")
     )
     retry = run.get("retry", {"max_infra_retries": 0})
     execution_identity = {
@@ -431,7 +444,8 @@ def prepare_run(
         project=str(campaign["project"]), run_id=str(run["run_id"]),
         created_at=utc_now(), config_path=str(run["config"]), resolved_config=resolved,
         source_id=source_id, runtime_tree_id=source_id,
-        git_commit=campaign.get("git_commit"), campaign_id=campaign.get("campaign_id"),
+        git_commit=identity_campaign.get("git_commit"),
+        campaign_id=identity_campaign.get("campaign_id"),
         campaign=str(campaign["campaign"]), image_id=str(run["image_id"]),
         run_dir=remote_run_dir,
         max_infra_retries=int(retry.get("max_infra_retries", 0)),
@@ -485,10 +499,8 @@ def record_submission_intent(
 ) -> dict[str, Any]:
     """Durably record scheduler mutation intent before crossing the API boundary."""
     local_dir = run_root_dir(campaign, run)
-    token = f"{campaign['campaign']}/{run['run_id']}/{attempt_id}"
     backend = BACKENDS.get(str(run["backend"]["kind"]))
-    request = {"submission_token": token}
-    request.update(backend.submission_request(campaign, run, attempt_id))
+    request = backend.submission_request(campaign, run, attempt_id)
     return ExperimentStateStore(local_dir).begin_submission(
         project=str(campaign["project"]), run_id=str(run["run_id"]),
         attempt_id=attempt_id, backend=str(run["backend"]["kind"]),
@@ -1248,6 +1260,7 @@ def main(argv: list[str] | None = None) -> int:
             staged = backend_adapter.stage(campaign, run, identity, bundle)
             outputs.append({"run_id": run["run_id"], "staged": staged})
         elif args.command == "submit":
+            intent = None
             if not args.dry_run:
                 backend_adapter.preflight(run, scope="submit").require_ready()
                 recovered = reconcile_submission(campaign, run, args.attempt_id)
@@ -1259,9 +1272,11 @@ def main(argv: list[str] | None = None) -> int:
                     campaign, run, identity, attempt_id=args.attempt_id
                 )
                 ensure_attempt_not_submitted(campaign, run, args.attempt_id)
-                record_submission_intent(campaign, run, args.attempt_id)
+                intent = record_submission_intent(campaign, run, args.attempt_id)
             assert manifest is not None
-            job_id = backend_adapter.submit(campaign, run, manifest, dry_run=args.dry_run)
+            job_id = backend_adapter.submit(
+                campaign, run, manifest, dry_run=args.dry_run, intent=intent
+            )
             if args.dry_run:
                 root = run_root_dir(campaign, run)
                 attempt_dir = root / "attempts" / args.attempt_id

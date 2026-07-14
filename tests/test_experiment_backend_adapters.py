@@ -44,6 +44,7 @@ def test_slurm_backend_submits_an_elf_prepared_manifest(tmp_path, monkeypatch):
     campaign = slurm_campaign(tmp_path)
     run = materialize_run(campaign, campaign["runs"][0], "source-fixed")
     manifest = prepare_run(campaign, run, "source-fixed", attempt_id="attempt-001")
+    intent = record_submission_intent(campaign, run, "attempt-001")
     fake = QueueRunner([
         CommandResult(
             ("validate-live",), 0,
@@ -57,7 +58,7 @@ def test_slurm_backend_submits_an_elf_prepared_manifest(tmp_path, monkeypatch):
     set_command_runner(fake)
     try:
         job_id = WydSlurmBackend(backend_services()).submit(
-            campaign, run, manifest, dry_run=False
+            campaign, run, manifest, dry_run=False, intent=intent
         )
     finally:
         set_command_runner(SubprocessRunner())
@@ -75,13 +76,16 @@ def test_controller_reconciles_attempt_identity_through_package_backend(
     run = materialize_run(campaign, campaign["runs"][0], "source-fixed")
     prepare_run(campaign, run, "source-fixed", attempt_id="attempt-009")
     intent = record_submission_intent(campaign, run, "attempt-009")
-    token = intent["request"]["submission_token"]
+    token = intent["submission_token"]
     fake = QueueRunner([
         CommandResult(
             ("squeue",), 0,
-            f"9876|smoke-h100--attempt-009|{token}\n",
+            f"9876|smoke-h100--attempt-009|ml-exp-{token}\n",
         ),
-        CommandResult(("sacct",), 0, "9876|smoke-h100--attempt-009\n"),
+        CommandResult(
+            ("sacct",), 0,
+            f"9876|smoke-h100--attempt-009|ml-exp-{token}\n",
+        ),
     ])
     set_command_runner(fake)
     try:
