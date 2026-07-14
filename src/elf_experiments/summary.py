@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
 import math
 import re
@@ -38,6 +39,21 @@ EVAL_KEYS = (
     "oracle_plan_ppl",
     "shuffled_plan_ppl",
     "token_recon_ppl",
+)
+EVAL_PRIMARY_BY_MODE = {
+    "clean_token_reconstruction": "token_recon_ppl",
+    "generation_refine_decode": "g_ppl",
+    "oracle_plan_generation": "oracle_plan_ppl",
+    "shuffled_plan_generation": "shuffled_plan_ppl",
+}
+SAMPLING_MODES = {
+    "generation_refine_decode",
+    "oracle_plan_generation",
+    "shuffled_plan_generation",
+}
+FAMILY_DIMENSION_KEYS = (
+    "sampling_method", "num_sampling_steps", "cfg", "self_cond_cfg_scale",
+    "time_schedule", "time_warp_gamma",
 )
 _SAMPLE_FILE_RE = re.compile(r"_(?P<epoch>\d+)_(?P<step>\d+)\.jsonl$")
 
@@ -163,44 +179,334 @@ def latest_record(records: Iterable[dict[str, Any]]) -> dict[str, Any]:
     return winner
 
 
+def _checkpoint_value(value: Any) -> int | None:
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value
+    if isinstance(value, float) and math.isfinite(value) and value.is_integer():
+        return int(value)
+    return None
+
+
+def _sampling_dimensions(record: dict[str, Any]) -> dict[str, Any] | None:
+    raw = record.get("sampling_config")
+    if not isinstance(raw, dict):
+        raw = record.get("variant_dimensions")
+    if not isinstance(raw, dict):
+        raw = record.get("sampling_dimensions")
+    if not isinstance(raw, dict) or set(raw) != set(FAMILY_DIMENSION_KEYS):
+        return None
+    dimensions = dict(raw)
+    if any(
+        isinstance(value, bool)
+        or not isinstance(value, (str, int, float))
+        or isinstance(value, float) and not math.isfinite(value)
+        for value in dimensions.values()
+    ):
+        return None
+    return dimensions
+
+
+def _family_id(dimensions: dict[str, Any]) -> str:
+    encoded = json.dumps(
+        dimensions, sort_keys=True, separators=(",", ":"), ensure_ascii=True,
+    )
+    return "sha256:" + hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def _record_binding(record: dict[str, Any]) -> dict[str, Any]:
+    mode = record.get("mode")
+    if mode == "clean_token_reconstruction":
+        carries_sampling_dimensions = any(
+            key in record for key in (
+                "sampling_config", "variant_dimensions", "sampling_dimensions",
+            )
+        )
+        return {
+            "status": "RESOLVED",
+            "scope": "FAMILY_INDEPENDENT_RECONSTRUCTION",
+            "mode": mode,
+            "family_id": None,
+        } if not carries_sampling_dimensions else {
+            "status": "CONFLICTING",
+            "mode": mode,
+            "reason": "clean reconstruction carries sampling dimensions",
+        }
+    dimensions = _sampling_dimensions(record)
+    if mode in SAMPLING_MODES and dimensions is not None:
+        return {
+            "status": "RESOLVED", "scope": "SAMPLING_FAMILY",
+            "mode": mode, "family_id": _family_id(dimensions),
+            "sampling_dimensions": dimensions,
+        }
+    return {
+        "status": "UNRESOLVED",
+        "mode": mode if isinstance(mode, str) else None,
+        "family_id": None,
+        "reason": (
+            "sampling family dimensions are missing"
+            if mode in SAMPLING_MODES else "evaluation mode is missing or unrecognized"
+        ),
+    }
+
+
+def _metric_candidates(record: dict[str, Any]) -> list[tuple[str, Any]]:
+    candidates = [
+        (key, finite_metric_value(record[key])) for key in EVAL_KEYS if key in record
+    ]
+    mode = record.get("mode")
+    primary = EVAL_PRIMARY_BY_MODE.get(mode)
+    if primary is not None and "ppl" in record:
+        candidates.append((primary, finite_metric_value(record["ppl"])))
+    if mode == "generation_refine_decode":
+        for key in ("generation_mean_entropy", "mean_entropy"):
+            if key in record:
+                candidates.append((
+                    "generation_mean_entropy", finite_metric_value(record[key]),
+                ))
+    return candidates
+
+
+def _variant_id(run_dir: Path, path: Path) -> str:
+    """Use the durable metrics parent directory, never parse variant labels."""
+    del run_dir
+    return path.parent.name
+
+
+def _declared_family_id(manifest: dict[str, Any]) -> str | None:
+    candidates = [manifest]
+    for key in ("evaluation", "evaluation_contract", "research_contract"):
+        value = manifest.get(key)
+        if isinstance(value, dict):
+            candidates.append(value)
+            nested = value.get("evaluation")
+            if isinstance(nested, dict):
+                candidates.append(nested)
+    for value in candidates:
+        family_id = value.get("canonical_family_id")
+        if isinstance(family_id, str) and family_id:
+            return family_id
+        dimensions = value.get("canonical_family_dimensions")
+        if isinstance(dimensions, dict):
+            normalized = _sampling_dimensions({"sampling_dimensions": dimensions})
+            if normalized is not None:
+                return _family_id(normalized)
+    return None
+
+
 def collect_eval_evidence(
     run_dir: Path,
-) -> tuple[dict[str, Any], dict[str, dict[str, Any]], list[str], list[str]]:
-    """Collect canonical values with source/step evidence and hard conflicts."""
-    selected: dict[str, tuple[float, str, Any]] = {}
+) -> tuple[dict[str, Any], dict[str, Any], list[str], list[dict[str, Any]]]:
+    """Collect exact variant-bound evidence and publish only coherent flat science."""
+    manifest = load_mapping(run_dir / "manifest.yaml")
+    status_path = run_dir / "status.json"
+    status = load_mapping(status_path) if status_path.is_file() else {}
+    project = manifest.get("project")
+    run_id = manifest.get("run_id")
+    attempt_id = status.get("attempt_id")
+    observations: list[dict[str, Any]] = []
     warnings: list[str] = []
-    conflicts: list[str] = []
+    conflicts: list[dict[str, Any]] = []
     for path in sorted(run_dir.rglob("metrics.jsonl")):
+        source = str(path.relative_to(run_dir))
+        variant_id = _variant_id(run_dir, path)
+        try:
+            source_mtime = path.stat().st_mtime
+        except OSError:
+            source_mtime = None
         for record in read_jsonl(path):
-            try:
-                step = float(record.get("step", -1))
-            except (TypeError, ValueError):
-                step = -1.0
-            candidates = [
-                (key, finite_metric_value(record[key]))
-                for key in EVAL_KEYS if key in record
-            ]
-            if record.get("mode") == "generation_refine_decode" and "mean_entropy" in record:
-                candidates.append((
-                    "generation_mean_entropy",
-                    finite_metric_value(record["mean_entropy"]),
-                ))
-            for key, value in candidates:
-                candidate = (step, str(path.relative_to(run_dir)), value)
-                previous = selected.get(key)
-                if previous and previous[0] == step and previous[2] != value:
-                    message = (
-                        f"{key} has conflicting values at step {step:g}: "
-                        f"{previous[1]}={previous[2]!r}, {candidate[1]}={value!r}"
+            epoch = _checkpoint_value(record.get("epoch"))
+            step = _checkpoint_value(record.get("step"))
+            binding = _record_binding(record)
+            observed_at = record.get("observed_at")
+            if not isinstance(observed_at, (int, float)) \
+                    or isinstance(observed_at, bool) \
+                    or not math.isfinite(float(observed_at)):
+                observed_at = source_mtime
+            for metric, value in _metric_candidates(record):
+                exact_binding = {
+                    "project": project, "run_id": run_id,
+                    "attempt_id": attempt_id, "epoch": epoch, "step": step,
+                    "variant_id": variant_id,
+                    "family_id": binding.get("family_id"), "metric": metric,
+                }
+                observations.append({
+                    **exact_binding,
+                    "mode": binding.get("mode"), "value": value,
+                    "source": source, "observed_at": observed_at,
+                    "binding": dict(binding),
+                })
+
+    by_key: dict[tuple[Any, ...], list[dict[str, Any]]] = {}
+    for item in observations:
+        key = tuple(item.get(name) for name in (
+            "project", "run_id", "attempt_id", "epoch", "step",
+            "variant_id", "family_id", "metric",
+        ))
+        by_key.setdefault(key, []).append(item)
+    conflicting_keys: set[tuple[Any, ...]] = set()
+    for key, sources in sorted(by_key.items(), key=lambda item: repr(item[0])):
+        values = {json.dumps(item.get("value"), sort_keys=True) for item in sources}
+        if len(values) <= 1:
+            continue
+        conflicting_keys.add(key)
+        conflict = {
+            "type": "metric_value_conflict",
+            "project": key[0], "run_id": key[1], "attempt_id": key[2],
+            "epoch": key[3], "step": key[4], "variant_id": key[5],
+            "family_id": key[6], "metric": key[7],
+            "sources": [{
+                "source": item.get("source"), "value": item.get("value"),
+                "observed_at": item.get("observed_at"),
+                "binding": dict(item.get("binding") or {}) | {
+                    name: item.get(name) for name in (
+                        "project", "run_id", "attempt_id", "epoch", "step",
+                        "variant_id", "family_id", "metric",
                     )
-                    warnings.append(message)
-                    conflicts.append(message)
-                if previous is None or candidate[:2] >= previous[:2]:
-                    selected[key] = candidate
-    metrics = {key: value for key, (_, _, value) in selected.items()}
+                },
+            } for item in sources],
+        }
+        conflicts.append(conflict)
+        warnings.append(
+            f"{key[7]} has conflicting values for exact variant {key[5]} "
+            f"at epoch={key[3]} step={key[4]}"
+        )
+
+    variant_bindings: dict[str, dict[str, Any]] = {}
+    unresolved: set[str] = set()
+    for item in observations:
+        variant_id = str(item["variant_id"])
+        binding = item["binding"]
+        previous = variant_bindings.setdefault(variant_id, binding)
+        if previous != binding or binding.get("status") != "RESOLVED":
+            unresolved.add(variant_id)
+    reconstruction = sorted(
+        variant_id for variant_id, binding in variant_bindings.items()
+        if binding.get("scope") == "FAMILY_INDEPENDENT_RECONSTRUCTION"
+    )
+    families: dict[str, list[str]] = {}
+    for variant_id, binding in variant_bindings.items():
+        family_id = binding.get("family_id")
+        if binding.get("scope") == "SAMPLING_FAMILY" and isinstance(family_id, str):
+            families.setdefault(family_id, []).append(variant_id)
+        elif variant_id not in reconstruction:
+            unresolved.add(variant_id)
+    if len(reconstruction) != 1:
+        unresolved.update(reconstruction)
+
+    declared = _declared_family_id(manifest)
+    selected_family: str | None = None
+    if unresolved:
+        family_state = "UNRESOLVED"
+    elif declared is not None:
+        family_state = "DECLARED" if declared in families else "CANONICAL_NOT_FOUND"
+        selected_family = declared if declared in families else None
+    elif len(families) == 1:
+        family_state = "SINGLE_ELIGIBLE_FAMILY"
+        selected_family = next(iter(families))
+    elif len(families) > 1:
+        family_state = "CANONICAL_NOT_DECLARED"
+    else:
+        family_state = "NOT_OBSERVED"
+
+    by_variant: dict[str, dict[str, Any]] = {}
+    for variant_id, binding in sorted(variant_bindings.items()):
+        latest_by_metric: dict[str, dict[str, Any]] = {}
+        for item in observations:
+            if item["variant_id"] != variant_id:
+                continue
+            exact_key = tuple(item.get(name) for name in (
+                "project", "run_id", "attempt_id", "epoch", "step",
+                "variant_id", "family_id", "metric",
+            ))
+            if exact_key in conflicting_keys:
+                continue
+            current = latest_by_metric.get(item["metric"])
+            order = (item.get("epoch") or -1, item.get("step") or -1,
+                     str(item.get("source")))
+            previous_order = (
+                current.get("epoch") or -1, current.get("step") or -1,
+                str(current.get("source")),
+            ) if current else None
+            if current is None or order >= previous_order:
+                latest_by_metric[item["metric"]] = item
+        by_variant[variant_id] = {
+            "binding": binding,
+            "metrics": {
+                metric: {
+                    key: item.get(key) for key in (
+                        "epoch", "step", "value", "source", "observed_at",
+                    )
+                }
+                for metric, item in sorted(latest_by_metric.items())
+            },
+        }
+
+    metrics: dict[str, Any] = {}
+    if selected_family is not None and len(reconstruction) == 1:
+        selected_variants = set(families[selected_family]) | set(reconstruction)
+        by_checkpoint: dict[tuple[int | None, int | None], dict[str, list[dict[str, Any]]]] = {}
+        for item in observations:
+            if item["variant_id"] not in selected_variants:
+                continue
+            identity = (item.get("epoch"), item.get("step"))
+            key = tuple(item.get(name) for name in (
+                "project", "run_id", "attempt_id", "epoch", "step",
+                "variant_id", "family_id", "metric",
+            ))
+            if key in conflicting_keys:
+                continue
+            by_checkpoint.setdefault(identity, {}).setdefault(
+                item["metric"], [],
+            ).append(item)
+        for _, checkpoint in sorted(
+            by_checkpoint.items(),
+            key=lambda item: (item[0][0] or -1, item[0][1] or -1),
+            reverse=True,
+        ):
+            primary: dict[str, Any] = {}
+            complete = True
+            for metric in EVAL_KEYS:
+                expected_mode = next(
+                    mode for mode, semantic in EVAL_PRIMARY_BY_MODE.items()
+                    if semantic == metric
+                )
+                candidates = [
+                    item for item in checkpoint.get(metric, [])
+                    if item.get("mode") == expected_mode
+                ]
+                variants = {item["variant_id"] for item in candidates}
+                if len(variants) != 1:
+                    complete = False
+                    break
+                values = {json.dumps(item["value"]) for item in candidates}
+                if len(values) != 1:
+                    complete = False
+                    break
+                primary[metric] = candidates[0]["value"]
+            if complete:
+                entropy = checkpoint.get("generation_mean_entropy", [])
+                if entropy:
+                    primary["generation_mean_entropy"] = entropy[0]["value"]
+                primary["plan_ppl_gap"] = (
+                    primary["shuffled_plan_ppl"] - primary["oracle_plan_ppl"]
+                )
+                metrics = primary
+                break
+
     evidence = {
-        key: {"step": step, "path": path, "value": value}
-        for key, (step, path, value) in selected.items()
+        "schema_version": 2,
+        "family_state": family_state,
+        "canonical_family_id": selected_family,
+        "unresolved_variant_ids": sorted(unresolved),
+        "families": [{
+            "family_id": family_id,
+            "variant_ids": sorted(variant_ids),
+            "sampling_dimensions": variant_bindings[variant_ids[0]].get(
+                "sampling_dimensions",
+            ),
+        } for family_id, variant_ids in sorted(families.items())],
+        "observations": observations,
+        "by_variant": by_variant,
     }
     return metrics, evidence, warnings, conflicts
 
@@ -351,6 +657,11 @@ def summarize_run(run_dir: Path) -> dict[str, Any]:
     eval_metrics, metric_evidence, warnings, conflicts = collect_eval_evidence(run_dir)
     row.update(eval_metrics)
     row["metric_evidence"] = metric_evidence
+    row["evaluation_metrics_by_variant"] = metric_evidence["by_variant"]
+    row["evaluation_family_state"] = metric_evidence["family_state"]
+    row["canonical_evaluation_family_id"] = metric_evidence[
+        "canonical_family_id"
+    ]
     row["artifacts"] = collect_artifact_evidence(run_dir)
     nonempty_fraction = latest_generation_nonempty_fraction(run_dir)
     if nonempty_fraction is not None:
@@ -365,18 +676,6 @@ def summarize_run(run_dir: Path) -> dict[str, Any]:
     )
     if nonfinite:
         row["nonfinite_metrics"] = nonfinite
-    if (
-        isinstance(row.get("oracle_plan_ppl"), (int, float))
-        and isinstance(row.get("shuffled_plan_ppl"), (int, float))
-    ):
-        oracle = metric_evidence["oracle_plan_ppl"]
-        shuffled = metric_evidence["shuffled_plan_ppl"]
-        if oracle["step"] == shuffled["step"]:
-            row["plan_ppl_gap"] = row["shuffled_plan_ppl"] - row["oracle_plan_ppl"]
-        else:
-            message = "oracle_plan_ppl and shuffled_plan_ppl come from different steps"
-            warnings.append(message)
-            conflicts.append(message)
     if warnings:
         row["warnings"] = warnings
     if conflicts:
