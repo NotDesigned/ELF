@@ -322,6 +322,58 @@ def test_refresh_evidence_local_keeps_exact_execution_and_checkpoint_evidence(
     assert "warnings" not in rebuilt
 
 
+def test_refresh_evidence_local_uses_reviewed_recovery_baseline_with_live_cas(
+    tmp_path, monkeypatch, capsys,
+):
+    arguments, identity, _attempt_dir, collection = local_evidence_fixture(tmp_path)
+    baseline = {
+        "project": "elf", "run_id": "run-local", "attempt_id": "attempt-001",
+        "state": "SUCCEEDED", "backend": "slurm",
+        "scheduler_state": "SUCCEEDED", "worker_state": "RELEASED",
+        "process_state": "SUCCEEDED", "runtime_state": "SUCCEEDED",
+        "model_state": "OBSERVED", "evidence_outcome": "OBSERVED",
+        "latest_completed_checkpoint": "/remote/checkpoint_38035",
+        "latest_completed_checkpoint_step": 38035,
+        # Old science is intentionally untrusted during recovery.
+        "train_loss": 99.0, "g_ppl": 88.0,
+        "evidence_conflicts": [{"metric": "g_ppl"}],
+    }
+    baseline_bytes = (json.dumps(baseline, sort_keys=True) + "\n").encode()
+    (identity / "attempt" / "collection.json").write_bytes(baseline_bytes)
+    damaged = {
+        "project": "elf", "run_id": "run-local", "attempt_id": "attempt-001",
+        "state": "SUCCEEDED", "backend": "slurm",
+        "train_loss": 2.0,
+        "evaluation_family_state": "UNRESOLVED",
+    }
+    collection.write_text(json.dumps(damaged, sort_keys=True) + "\n")
+    current_digest = experimentctl._regular_file_digest(collection)
+    arguments.extend(["--expected-current-collection-digest", current_digest])
+    monkeypatch.setenv(
+        "ML_EXPD_CONTROLLER_SNAPSHOT_SHA256", "sha256:" + "5" * 64,
+    )
+
+    assert experimentctl.main([*arguments, "--dry-run"]) == 0
+    preview = json.loads(capsys.readouterr().out)[0]
+    assert preview["old_digest"] == current_digest
+    assert preview["recovery_baseline_digest"] == experimentctl._sha256_bytes(
+        baseline_bytes
+    )
+    assert experimentctl.main([
+        *arguments, "--expected-input-digest", preview["input_digest"],
+    ]) == 0
+    capsys.readouterr()
+
+    rebuilt = json.loads(collection.read_text())
+    assert rebuilt["scheduler_state"] == "SUCCEEDED"
+    assert rebuilt["process_state"] == "SUCCEEDED"
+    assert rebuilt["model_state"] == "OBSERVED"
+    assert rebuilt["latest_completed_checkpoint_step"] == 38035
+    assert rebuilt["train_loss"] == 1.25
+    assert "g_ppl" not in rebuilt
+    assert "evidence_conflicts" not in rebuilt
+
+
 def test_controller_import_does_not_construct_backend_registry(tmp_path):
     environment = os.environ.copy()
     environment["PYTHONPATH"] = os.pathsep.join((

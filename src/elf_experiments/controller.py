@@ -515,6 +515,15 @@ def rebuild_local_evidence(args: argparse.Namespace) -> dict[str, Any]:
         and _SHA256_DIGEST_RE.fullmatch(args.expected_input_digest) is None
     ):
         raise ValueError("--expected-input-digest must be a sha256 digest")
+    if (
+        args.expected_current_collection_digest is not None
+        and _SHA256_DIGEST_RE.fullmatch(
+            args.expected_current_collection_digest
+        ) is None
+    ):
+        raise ValueError(
+            "--expected-current-collection-digest must be a sha256 digest"
+        )
     controller_digest = os.environ.get("ML_EXPD_CONTROLLER_SNAPSHOT_SHA256", "")
     if _SHA256_DIGEST_RE.fullmatch(controller_digest) is None:
         raise ValueError("reviewed controller snapshot identity is unavailable")
@@ -544,6 +553,16 @@ def rebuild_local_evidence(args: argparse.Namespace) -> dict[str, Any]:
         _regular_file_digest(reviewed_collection)
         if reviewed_collection.is_file() else None
     )
+    expected_current_digest = (
+        args.expected_current_collection_digest
+        if args.expected_current_collection_digest is not None
+        else reviewed_old_digest
+    )
+    if (
+        args.expected_current_collection_digest is not None
+        and reviewed_old_digest is None
+    ):
+        raise ValueError("recovery baseline collection is required")
     if reviewed_old_digest is not None:
         identity_digests["attempt/collection.json"] = reviewed_old_digest
     local_root = args.local_root
@@ -572,7 +591,7 @@ def rebuild_local_evidence(args: argparse.Namespace) -> dict[str, Any]:
                 old_digest = _optional_regular_digest_at(
                     attempt_fd, "collection.json", display=str(collection_path),
                 )
-                if old_digest != reviewed_old_digest:
+                if old_digest != expected_current_digest:
                     raise ValueError(
                         "original collection changed after private review snapshot"
                     )
@@ -696,6 +715,10 @@ def rebuild_local_evidence(args: argparse.Namespace) -> dict[str, Any]:
         "project": campaign["project"], "run_id": run_id,
         "attempt_id": attempt_id, "collection_path": str(collection_path),
         "input_digest": input_digest, "old_digest": old_digest,
+        "recovery_baseline_digest": (
+            reviewed_old_digest
+            if args.expected_current_collection_digest is not None else None
+        ),
         "new_digest": new_digest,
         "expected_new_collection_digest": expected_new_digest,
         "atomic_collection_replace": True,
@@ -1772,6 +1795,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--expected-input-digest",
         help="reviewed local evidence digest required before atomic replacement",
+    )
+    parser.add_argument(
+        "--expected-current-collection-digest",
+        help=(
+            "reviewed live collection digest when the private collection input "
+            "is an operational recovery baseline"
+        ),
     )
     parser.add_argument(
         "--scope", choices=("stage", "submit", "observe"), default="submit",
