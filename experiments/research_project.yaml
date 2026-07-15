@@ -23,6 +23,18 @@ controller:
       - yaml
     require_clean_git: true
 campaigns:
+  - name: fusion-aux-ratio-eval-f32-h200-20260715-c1
+    file: experiments/campaigns/fusion_aux_ratio_eval_f32_h200_20260715.yml
+    role_notes:
+      aux0: completed H100 aux0 checkpoint, paired oracle/shuffled evaluation
+      aux1: completed H100 aux1 checkpoint, paired oracle/shuffled evaluation
+      aux2: completed H100 aux2 checkpoint, paired oracle/shuffled evaluation
+  - name: fusion-aux-ratio-eval-f64-h200-20260715-c1
+    file: experiments/campaigns/fusion_aux_ratio_eval_f64_h200_20260715.yml
+    role_notes:
+      aux0: completed H100 aux0 checkpoint, paired oracle/shuffled evaluation
+      aux1: completed H100 aux1 checkpoint, paired oracle/shuffled evaluation
+      aux2: completed H100 aux2 checkpoint, paired oracle/shuffled evaluation
   - name: backend-smoke-sensecore-20260714-1419
     file: experiments/campaigns/backend_smoke_sensecore_20260714_1419.yml
     role_notes:

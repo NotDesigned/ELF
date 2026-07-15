@@ -30,6 +30,12 @@ else
     CONFIG="${CONFIG:-$DEFAULT_CONFIG}"
 fi
 extra_args=("$@")
+ELF_RUN_MODE="${ELF_RUN_MODE:-train}"
+case "$ELF_RUN_MODE" in
+    train|eval) ;;
+    *) echo "[cloud_train] ELF_RUN_MODE must be train or eval, got: $ELF_RUN_MODE" >&2; exit 2 ;;
+esac
+evaluation_checkpoint_path=""
 preflight_config_overrides=()
 for ((preflight_index = 0; preflight_index < ${#extra_args[@]}; preflight_index++)); do
     preflight_arg="${extra_args[$preflight_index]}"
@@ -42,6 +48,15 @@ for ((preflight_index = 0; preflight_index < ${#extra_args[@]}; preflight_index+
         preflight_config_overrides+=("${extra_args[$preflight_index]}")
     elif [[ "$preflight_arg" == --config_override=* ]]; then
         preflight_config_overrides+=("${preflight_arg#--config_override=}")
+    elif [[ "$preflight_arg" == "--checkpoint_path" ]]; then
+        if ((preflight_index + 1 >= ${#extra_args[@]})); then
+            echo "[cloud_train] --checkpoint_path requires a path" >&2
+            exit 1
+        fi
+        preflight_index=$((preflight_index + 1))
+        evaluation_checkpoint_path="${extra_args[$preflight_index]}"
+    elif [[ "$preflight_arg" == --checkpoint_path=* ]]; then
+        evaluation_checkpoint_path="${preflight_arg#--checkpoint_path=}"
     fi
 done
 
@@ -332,6 +347,13 @@ if [[ "${DRY_RUN:-0}" != "1" ]]; then
         "$WANDB_CACHE_DIR" "$SAVE_DIR" "$CHECKPOINT_ROOT"
     hydrate_baked_assets
     fail_fast_for_offline_cache
+    if [[ "$ELF_RUN_MODE" == "eval" ]]; then
+        if [[ -z "$evaluation_checkpoint_path" ]]; then
+            echo "[cloud_train] eval requires --checkpoint_path" >&2
+            exit 1
+        fi
+        require_file "$evaluation_checkpoint_path"
+    fi
 fi
 
 if truthy "${USE_ELF_B_WARM_START:-0}" && [[ -z "${WARM_START:-}" ]]; then
@@ -386,7 +408,7 @@ echo "[cloud_train] checkpoint_root=$CHECKPOINT_ROOT"
 echo "[cloud_train] baked_hf_home=$BAKED_HF_HOME baked_checkpoint_root=$BAKED_CHECKPOINT_ROOT"
 echo "[cloud_train] NGPU=$NGPU NNODES=${NNODES:-1} NODE_RANK=${NODE_RANK:-0}"
 
-cmd=(bash scripts/launch.sh train "$CONFIG" "${overrides[@]}" "${extra_args[@]}")
+cmd=(bash scripts/launch.sh "$ELF_RUN_MODE" "$CONFIG" "${overrides[@]}" "${extra_args[@]}")
 printf '[cloud_train] command:'
 for command_arg in "${cmd[@]}"; do
     command_key="${command_arg%%=*}"
@@ -480,6 +502,6 @@ set -e
 if [[ "$exit_code" -eq 0 ]]; then
     record_lifecycle SUCCEEDED process_exited --exit-code "$exit_code"
 else
-    record_lifecycle FAILED process_exited --exit-code "$exit_code" --reason training_process_nonzero_exit
+    record_lifecycle FAILED process_exited --exit-code "$exit_code" --reason "${ELF_RUN_MODE}_process_nonzero_exit"
 fi
 exit "$exit_code"

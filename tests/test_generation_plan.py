@@ -11,7 +11,14 @@ sys.modules.setdefault(
     types.SimpleNamespace(corpus_bleu=lambda *args, **kwargs: types.SimpleNamespace(score=0.0)),
 )
 
-from generation import _IndexedSubset
+from generation import (
+    _IndexedSubset,
+    _capture_rng_state,
+    _evaluation_sampling_dimensions,
+    _restore_rng_state,
+)
+from configs.config import SamplingConfig
+from elf_experiments.summary import _exact_observation_errors, _record_binding
 from utils.generation_utils import _dlm_decode_batch, _generate_samples_single_batch
 
 
@@ -88,6 +95,66 @@ def test_indexed_subset_preserves_original_indices():
     assert subset[0] == {"text": "three", "index": 3}
     assert subset[1] == {"text": "one", "index": 99}
     assert subset[2] == {"text": "zero", "index": 0}
+
+
+def test_evaluation_sampling_dimensions_are_exact_normalized_scalars():
+    sampling_config = SamplingConfig(
+        sampling_method="sde",
+        num_sampling_steps=[32],
+        cfgs=[1],
+        self_cond_cfg_scales=[3],
+        time_schedule="logit_normal",
+        sde_gamma=1.5,
+    )
+
+    dimensions = _evaluation_sampling_dimensions(
+        sampling_config,
+        num_sampling_steps=32,
+        cfg_scale=1,
+        self_cond_cfg_scale=3,
+    )
+
+    assert dimensions == {
+        "sampling_method": "sde",
+        "num_sampling_steps": 32,
+        "cfg": 1.0,
+        "self_cond_cfg_scale": 3.0,
+        "time_schedule": "logit_normal",
+        "time_warp_gamma": 1.5,
+    }
+
+    binding = _record_binding({
+        "mode": "generation_refine_decode",
+        "sampling_dimensions": dimensions,
+    })
+    observation = {
+        "project": "elf",
+        "run_id": "run-a",
+        "attempt_id": "attempt-001",
+        "epoch": 1,
+        "step": 38035,
+        "variant_id": "steps32-generation",
+        "family_id": binding["family_id"],
+        "source": "steps32-generation/metrics.jsonl",
+        "binding": binding,
+    }
+    assert binding["status"] == "RESOLVED"
+    assert _exact_observation_errors(observation) == []
+
+
+def test_rng_state_restore_replays_paired_cpu_noise():
+    generator = torch.Generator(device="cpu").manual_seed(123)
+    torch.manual_seed(456)
+    state = _capture_rng_state(generator)
+
+    explicit_first = torch.randn(8, generator=generator)
+    global_first = torch.randn(8)
+    _restore_rng_state(generator, state)
+    explicit_second = torch.randn(8, generator=generator)
+    global_second = torch.randn(8)
+
+    assert torch.equal(explicit_first, explicit_second)
+    assert torch.equal(global_first, global_second)
 
 
 def test_dlm_decode_requires_plan_z_when_sentence_plan_enabled():

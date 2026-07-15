@@ -110,6 +110,7 @@ def test_slurm_stage_honors_elf_source_bundle_required_paths(tmp_path, monkeypat
         CommandResult(("sif-marker",), 0),
         CommandResult(("required-path",), 0),
         CommandResult(("required-path",), 0),
+        CommandResult(("required-path",), 0),
     ])
     set_command_runner(fake)
     try:
@@ -120,9 +121,10 @@ def test_slurm_stage_honors_elf_source_bundle_required_paths(tmp_path, monkeypat
     finally:
         set_command_runner(SubprocessRunner())
 
-    required = [" ".join(command) for command in fake.commands[-2:]]
+    required = [" ".join(command) for command in fake.commands[-3:]]
     assert "scripts/cloud_train.sh" in required[0]
     assert "src/train.py" in required[1]
+    assert "src/eval.py" in required[2]
 
 
 def test_package_process_evidence_feeds_elf_failure_classification(

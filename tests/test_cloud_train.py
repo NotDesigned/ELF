@@ -2,6 +2,8 @@ import os
 import subprocess
 from pathlib import Path
 
+import yaml
+
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = REPO_ROOT / "scripts/cloud_train.sh"
@@ -124,3 +126,66 @@ def test_launcher_uses_installed_experiment_control_dependency(tmp_path):
     assert result.returncode == 0, result.stderr
     assert "experiment_control=" in result.stdout
     assert "/packages/experiment-control/" not in result.stdout
+
+
+def test_evaluation_launcher_freezes_checkpoint_and_mode_in_manifest(tmp_path):
+    env = offline_env(tmp_path)
+    checkpoint = tmp_path / "checkpoint_42"
+    checkpoint.write_bytes(b"checkpoint")
+    env.update({
+        "ELF_RUN_MODE": "eval",
+        "HYDRATE_ONLY": "0",
+        "PREPARE_ONLY": "1",
+        "REQUIRE_IMMUTABLE_IDENTITIES": "0",
+        "RUN_ID": "evaluation-manifest-test",
+        "OUTPUT_DIR": str(tmp_path / "run"),
+    })
+
+    result = subprocess.run(
+        [
+            "bash", str(SCRIPT),
+            str(CONFIG_ROOT / "tier0_2_learned_main_len256.yml"),
+            "--checkpoint_path", str(checkpoint),
+            "--seeds", "42,123",
+        ],
+        cwd=REPO_ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    manifest = yaml.safe_load(
+        (tmp_path / "run" / "manifest.yaml").read_text(encoding="utf-8")
+    )
+    assert manifest["command"][:3] == ["bash", "scripts/launch.sh", "eval"]
+    assert str(checkpoint) in manifest["command"]
+    assert "42,123" in manifest["command"]
+
+
+def test_evaluation_launcher_fails_before_manifest_for_missing_checkpoint(tmp_path):
+    env = offline_env(tmp_path)
+    env.update({
+        "ELF_RUN_MODE": "eval",
+        "HYDRATE_ONLY": "0",
+        "REQUIRE_IMMUTABLE_IDENTITIES": "0",
+        "RUN_ID": "evaluation-missing-checkpoint",
+        "OUTPUT_DIR": str(tmp_path / "run"),
+    })
+
+    result = subprocess.run(
+        [
+            "bash", str(SCRIPT),
+            str(CONFIG_ROOT / "tier0_2_learned_main_len256.yml"),
+            "--checkpoint_path", str(tmp_path / "missing"),
+            "--seed", "42",
+        ],
+        cwd=REPO_ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode != 0
+    assert "required file is missing or empty" in result.stderr
+    assert not (tmp_path / "run" / "manifest.yaml").exists()

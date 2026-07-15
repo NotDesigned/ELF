@@ -22,5 +22,7 @@ links:
     - fusion-aux-ratio-ga2-h100-20260714-c1
     - fusion-aux-ratio-ga2-h200-20260712-c1
     - fusion-aux-ratio-ga2-h200-20260714-c2
+    - fusion-aux-ratio-eval-f32-h200-20260715-c1
+    - fusion-aux-ratio-eval-f64-h200-20260715-c1
   runs: []
   evidence: []

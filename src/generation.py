@@ -39,6 +39,52 @@ def _world() -> int:
     return dist.get_world_size() if dist.is_initialized() else 1
 
 
+def _evaluation_sampling_dimensions(
+    sampling_config: SamplingConfig,
+    *,
+    num_sampling_steps: int,
+    cfg_scale: float,
+    self_cond_cfg_scale: float,
+) -> dict:
+    """Return the exact sampling-family identity written with eval metrics.
+
+    These producer-authored dimensions are consumed by
+    ``elf_experiments.summary``.  Keep scalar normalization explicit so the
+    derived family digest is stable across YAML values such as ``1`` and
+    ``1.0``; never require a collector to reverse-engineer directory labels.
+    """
+    return {
+        "sampling_method": str(sampling_config.sampling_method),
+        "num_sampling_steps": int(num_sampling_steps),
+        "cfg": float(cfg_scale),
+        "self_cond_cfg_scale": float(self_cond_cfg_scale),
+        "time_schedule": str(sampling_config.time_schedule),
+        "time_warp_gamma": float(getattr(sampling_config, "sde_gamma", 0.0)),
+    }
+
+
+def _capture_rng_state(generator: torch.Generator) -> tuple:
+    """Capture all RNG streams used by evaluation generation."""
+    cuda_states = (
+        [state.clone() for state in torch.cuda.get_rng_state_all()]
+        if torch.cuda.is_available() else None
+    )
+    return (
+        generator.get_state().clone(),
+        torch.random.get_rng_state().clone(),
+        cuda_states,
+    )
+
+
+def _restore_rng_state(generator: torch.Generator, state: tuple) -> None:
+    """Restore evaluation RNG streams for a paired counterfactual."""
+    generator_state, cpu_state, cuda_states = state
+    generator.set_state(generator_state)
+    torch.random.set_rng_state(cpu_state)
+    if cuda_states is not None:
+        torch.cuda.set_rng_state_all(cuda_states)
+
+
 class _IndexedSubset:
     """Small map-style subset that preserves original dataset indices."""
 
@@ -200,7 +246,12 @@ def run_generation(
             for sc_idx, sc in enumerate(config.sampling_configs):
                 if len(config.sampling_configs) > 1:
                     log_for_0(f"\n--- Oracle/shuffled plan config {sc_idx + 1}/{len(config.sampling_configs)} ---")
+                # Oracle and shuffled are a paired intervention: restore the
+                # same token-noise streams before each mode so the plan is the
+                # only intended difference.
+                paired_rng_state = _capture_rng_state(generator)
                 for plan_mode in ("oracle", "shuffled"):
+                    _restore_rng_state(generator, paired_rng_state)
                     test_plan_conditioned_generation(
                         state=state, encoder=encoder, tokenizer=tokenizer,
                         generator=generator, config=config, sampling_config=sc,
@@ -410,6 +461,12 @@ def test_generation_uncond(
                     "mode": "generation_refine_decode",
                     "ppl": ppl_results["ppl"], "g_ppl": ppl_results["ppl"],
                     "mean_entropy": ppl_results["mean_entropy"],
+                    "sampling_dimensions": _evaluation_sampling_dimensions(
+                        sampling_config,
+                        num_sampling_steps=num_sampling_steps,
+                        cfg_scale=cfg_scale,
+                        self_cond_cfg_scale=self_cond_cfg_scale,
+                    ),
                 }
                 with open(os.path.join(config.output_dir, name, "metrics.jsonl"), "a", encoding="utf-8") as f:
                     f.write(json.dumps(metrics_line, ensure_ascii=False) + "\n")
@@ -623,7 +680,18 @@ def test_generation_cond(
                         f"generation/{name}/rougeL": cond_eval_results["rougeL"],
                     })
             if cond_eval_results is not None:
-                metrics_line = {"epoch": epoch_val, "step": step_val, **cond_eval_results}
+                metrics_line = {
+                    "epoch": epoch_val,
+                    "step": step_val,
+                    "mode": "generation_refine_decode",
+                    "sampling_dimensions": _evaluation_sampling_dimensions(
+                        sampling_config,
+                        num_sampling_steps=num_sampling_steps,
+                        cfg_scale=cfg_scale,
+                        self_cond_cfg_scale=self_cond_cfg_scale,
+                    ),
+                    **cond_eval_results,
+                }
                 with open(os.path.join(config.output_dir, name, "metrics.jsonl"), "a", encoding="utf-8") as f:
                     f.write(json.dumps(metrics_line, ensure_ascii=False) + "\n")
                 upload_output_dir_to_hf(config.output_dir, config.hf_repo_id, reason="generation metrics")
@@ -942,6 +1010,12 @@ def test_plan_conditioned_generation(
                 "epoch": epoch_val,
                 "step": step_val,
                 "mode": f"{plan_mode}_plan_generation",
+                "sampling_dimensions": _evaluation_sampling_dimensions(
+                    sampling_config,
+                    num_sampling_steps=num_sampling_steps,
+                    cfg_scale=cfg_scale,
+                    self_cond_cfg_scale=self_cond_cfg_scale,
+                ),
             }
             if ppl_results is not None:
                 metrics_line.update({

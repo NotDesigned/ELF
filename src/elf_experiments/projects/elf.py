@@ -76,6 +76,31 @@ class ElfProjectAdapter:
     def validate_run(self, run: dict[str, Any]) -> None:
         if not str(run["config"]).endswith((".yml", ".yaml")):
             raise ValueError(f"run {run['run_id']} ELF config must be YAML")
+        operation = str(run.get("operation", "train"))
+        if operation not in {"train", "evaluate"}:
+            raise ValueError(
+                f"run {run['run_id']} ELF operation must be 'train' or 'evaluate'"
+            )
+        if operation == "evaluate":
+            evaluation = run.get("evaluation")
+            if not isinstance(evaluation, dict):
+                raise ValueError(
+                    f"run {run['run_id']} evaluation must be a mapping"
+                )
+            checkpoint_path = evaluation.get("checkpoint_path")
+            if not isinstance(checkpoint_path, str) or not checkpoint_path.startswith("/"):
+                raise ValueError(
+                    f"run {run['run_id']} evaluation.checkpoint_path must be absolute"
+                )
+            seeds = evaluation.get("seeds")
+            if (
+                not isinstance(seeds, list)
+                or not seeds
+                or any(isinstance(seed, bool) or not isinstance(seed, int) for seed in seeds)
+            ):
+                raise ValueError(
+                    f"run {run['run_id']} evaluation.seeds must be a non-empty integer list"
+                )
 
     def operational_overrides(
         self, env: Mapping[str, str], output_dir: str
@@ -99,9 +124,19 @@ class ElfProjectAdapter:
         }
 
     def command(self, run: dict[str, Any]) -> list[str]:
-        command = ["bash", "scripts/cloud_train.sh", str(run["config"])]
+        operation = str(run.get("operation", "train"))
+        command = [
+            "env", f"ELF_RUN_MODE={'eval' if operation == 'evaluate' else 'train'}",
+            "bash", "scripts/cloud_train.sh", str(run["config"]),
+        ]
         for override in run.get("config_overrides", []):
             command.extend(["--config_override", str(override)])
+        if operation == "evaluate":
+            evaluation = run["evaluation"]
+            command.extend([
+                "--checkpoint_path", str(evaluation["checkpoint_path"]),
+                "--seeds", ",".join(str(seed) for seed in evaluation["seeds"]),
+            ])
         return command
 
     def plan_assets(
@@ -155,5 +190,6 @@ class ElfProjectAdapter:
             required_paths=(
                 "scripts/cloud_train.sh",
                 "src/train.py",
+                "src/eval.py",
             ),
         )

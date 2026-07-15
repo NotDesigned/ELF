@@ -1,3 +1,5 @@
+import pytest
+
 from elf_experiments.overrides import operational_overrides
 from elf_experiments.projects.elf import ElfProjectAdapter
 
@@ -42,3 +44,44 @@ def test_elf_source_bundle_excludes_local_secrets_caches_and_heavy_artifacts(tmp
         "checkpoints/", "wandb/", "runs/", "data/", "*.log", "*.tar.gz",
         "*.pt", "*.pth", "*.ckpt", "*.safetensors", ".DS_Store", "Thumbs.db",
     } <= excludes
+
+
+def test_elf_evaluation_command_freezes_checkpoint_and_seeds():
+    adapter = ElfProjectAdapter()
+    run = {
+        "run_id": "eval-a",
+        "config": "config.yml",
+        "operation": "evaluate",
+        "evaluation": {
+            "checkpoint_path": "/data/run/checkpoint_42",
+            "seeds": [42, 123],
+        },
+        "config_overrides": ["num_samples=256"],
+    }
+
+    adapter.validate_run(run)
+    assert adapter.command(run) == [
+        "env", "ELF_RUN_MODE=eval", "bash", "scripts/cloud_train.sh", "config.yml",
+        "--config_override", "num_samples=256",
+        "--checkpoint_path", "/data/run/checkpoint_42",
+        "--seeds", "42,123",
+    ]
+
+
+@pytest.mark.parametrize(
+    "evaluation",
+    [
+        {},
+        {"checkpoint_path": "relative", "seeds": [42]},
+        {"checkpoint_path": "/data/checkpoint", "seeds": []},
+        {"checkpoint_path": "/data/checkpoint", "seeds": [True]},
+    ],
+)
+def test_elf_evaluation_rejects_incomplete_identity(evaluation):
+    with pytest.raises(ValueError):
+        ElfProjectAdapter().validate_run({
+            "run_id": "eval-a",
+            "config": "config.yml",
+            "operation": "evaluate",
+            "evaluation": evaluation,
+        })
