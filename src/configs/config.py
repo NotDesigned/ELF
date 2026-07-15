@@ -468,6 +468,7 @@ def apply_config_overrides(config: Config, overrides: list) -> Config:
     if not overrides:
         return config
 
+    sampling_configs_path_overridden = False
     for override in overrides:
         if "=" not in override:
             raise ValueError(f"Invalid override format: '{override}'. Expected 'field_name=value'")
@@ -475,6 +476,8 @@ def apply_config_overrides(config: Config, overrides: list) -> Config:
         field_name, value_str = override.split("=", 1)
         field_name = field_name.strip()
         value_str = value_str.strip()
+        if field_name == "sampling_configs_path":
+            sampling_configs_path_overridden = True
 
         if field_name not in _CONFIG_FIELDS:
             raise ValueError(f"Config has no field named '{field_name}'")
@@ -513,6 +516,9 @@ def apply_config_overrides(config: Config, overrides: list) -> Config:
             converted_value = value_str
 
         setattr(config, field_name, converted_value)
+
+    if sampling_configs_path_overridden and config.sampling_configs_path:
+        config.sampling_configs = load_sampling_configs(config.sampling_configs_path)
 
     return validate_config(config)
 

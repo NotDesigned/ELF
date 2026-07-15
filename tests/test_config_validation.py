@@ -59,6 +59,28 @@ def test_float_override_uses_declared_type_after_integer_yaml_value():
     assert isinstance(cfg.save_freq, float)
 
 
+def test_sampling_path_override_reloads_resolved_sampling_family(tmp_path):
+    original_path = write_yaml(
+        tmp_path / "original.yml",
+        [{"sampling_method": "sde", "num_sampling_steps": [64]}],
+    )
+    override_path = write_yaml(
+        tmp_path / "override.yml",
+        [{"sampling_method": "sde", "num_sampling_steps": [32]}],
+    )
+    cfg = Config()
+    cfg.sampling_configs_path = str(original_path)
+    cfg.sampling_configs = load_sampling_configs(str(original_path))
+
+    cfg = apply_config_overrides(
+        cfg, [f"sampling_configs_path={override_path}"],
+    )
+
+    assert cfg.sampling_configs_path == str(override_path)
+    assert len(cfg.sampling_configs) == 1
+    assert cfg.sampling_configs[0].num_sampling_steps == [32]
+
+
 def test_wandb_run_name_does_not_imply_stable_run_id():
     cfg = Config()
     cfg.wandb_run_name = "shared-display-name"

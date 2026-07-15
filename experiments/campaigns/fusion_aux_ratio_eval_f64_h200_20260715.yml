@@ -1,9 +1,12 @@
 schema_version: 1
-campaign: fusion-aux-ratio-eval-f64-h200-20260715-c3
+campaign: fusion-aux-ratio-eval-f64-h200-20260715-c4
 project: elf
 source_id: auto
 local_root: outputs/experiment_campaigns
 
+# Clean replacement after c3 exposed stale resolved sampling configs after a
+# sampling_configs_path override. Evaluation also skips training RNG restore
+# and uses a fixed 256-row reconstruction subset instead of mapping 35GB.
 research_contract:
   schema_version: 1
   question: >-
@@ -115,7 +118,7 @@ runs:
           checkpoint: /datapool/liangluocheng/elf/runs/elf-aux2-mb64-ga2-h100-20260714-r1/checkpoint_38035
       seed: [42, 123, 456]
     template:
-      run_id: elf-{arm.name}-eval-f64-s{seed}-h200-20260715-r3
+      run_id: elf-{arm.name}-eval-f64-s{seed}-h200-20260715-r4
       research_role: '{arm.name}_s{seed}'
       profile: wyd-h200
       config: '{arm.config}'
