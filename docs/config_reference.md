@@ -120,10 +120,13 @@ schema rather than treating training flags as scheduler configuration.
 | `sampling_configs_path` | `None` | YAML file containing a sampling sweep. |
 | `sampling_configs` | one default entry | Inline list of sampling sweep mappings. |
 | `num_samples` | `100` | Number of generated samples. |
-| `online_eval` | `true` | Compute PPL for generated samples. |
-| `eval_ppl_model` | `gpt2-large` | Evaluation language model ID/path. |
+| `online_eval` | `true` | Compute online metrics for generated samples. |
+| `eval_ppl_model` | `gpt2-large` | Evaluation language model ID/path; its terminal hidden states are reused by MAUVE. |
 | `eval_ppl_batch_size` | `64` | PPL evaluation batch size. |
 | `eval_ppl_max_length` | `1024` | Maximum PPL evaluation sequence length. |
+| `eval_mauve` | `true` | Compute MAUVE between generated and real-reference distributions; writes the standard score on a 0--100 scale. |
+| `eval_mauve_model` | `gpt2-large` | Frozen language model used only to featurize real/generated text for MAUVE. It can differ from `eval_ppl_model`; equal values share one loaded evaluator. |
+| `eval_mauve_seed` | `25` | Deterministic PCA/k-means seed for `mauve-text`. |
 | `reconstruction_eval` | `false` | Enable oracle/shuffled-plan and clean-token reconstruction diagnostics. |
 | `reconstruction_num_samples` | `None` | Reconstruction sample count; `None` reuses `num_samples`. |
 | `train_sampling_eval_freq` | `0` | Microstep interval for lightweight generation diagnostics; zero disables. |

@@ -90,6 +90,10 @@ def main():
         f"max_length={config.eval_ppl_max_length}, batch={config.eval_ppl_batch_size}"
     )
     log_for_0(
+        f"Eval MAUVE: enabled={config.online_eval and config.eval_mauve}, "
+        f"featurizer={config.eval_mauve_model}, seed={config.eval_mauve_seed}"
+    )
+    log_for_0(
         f"Reconstruction diagnostics: enabled={config.reconstruction_eval}, "
         f"samples={config.reconstruction_num_samples or config.num_samples}"
     )
@@ -119,8 +123,15 @@ def main():
             log_for_0(f"Eval dataset size: {len(eval_dataset)}")
 
         train_dataset = None
-        if bool(getattr(config, "reconstruction_eval", False)) and eval_dataset is None and config.data_path is not None:
-            log_for_0("Loading train dataset subset source for clean reconstruction eval...")
+        needs_unconditional_references = (
+            config.online_eval and config.eval_mauve and eval_dataset is None
+        )
+        if (
+            (bool(getattr(config, "reconstruction_eval", False)) or needs_unconditional_references)
+            and eval_dataset is None
+            and config.data_path is not None
+        ):
+            log_for_0("Loading train dataset source for reconstruction/MAUVE references...")
             train_dataset = load_dataset_split(config.data_path)
             log_for_0(f"Train dataset size: {len(train_dataset)}")
 

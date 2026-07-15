@@ -17,8 +17,13 @@ from utils.checkpoint_utils import upload_output_dir_to_hf
 from utils.train_utils import unwrap_model
 from utils.data_utils import get_dataloader, get_pad_token_id
 from utils.encoder_utils import encode_text
-from utils.metrics_utils import Metrics as PPLMetrics, compute_bleu, compute_rouge
-from utils.sampling_utils import get_sampling_steps
+from utils.metrics_utils import (
+    Metrics as PPLMetrics,
+    compute_bleu,
+    compute_mauve_from_features,
+    compute_rouge,
+)
+from utils.sampling_utils import add_noise, _forward_sample, get_sampling_steps
 from utils.generation_utils import (
     mask_after_eos, shift_left,
     _generate_samples_single_batch, _dlm_decode_batch,
@@ -83,6 +88,125 @@ def _restore_rng_state(generator: torch.Generator, state: tuple) -> None:
     torch.random.set_rng_state(cpu_state)
     if cuda_states is not None:
         torch.cuda.set_rng_state_all(cuda_states)
+
+
+_PLAN_RNG_OFFSET = 1_000_000_007
+_RNG_MODULUS = 2**63 - 1
+
+
+def _evaluation_generators(
+    generator: torch.Generator,
+    device: torch.device,
+) -> tuple[torch.Generator, torch.Generator]:
+    """Build deterministic device-local token and plan RNG substreams."""
+    base_seed = int(generator.initial_seed())
+    token_generator = torch.Generator(device=device)
+    plan_generator = torch.Generator(device=device)
+    token_generator.manual_seed(base_seed % _RNG_MODULUS)
+    plan_generator.manual_seed((base_seed + _PLAN_RNG_OFFSET) % _RNG_MODULUS)
+    return token_generator, plan_generator
+
+
+def _evaluation_rng_metadata(generator: torch.Generator) -> dict:
+    return {
+        "evaluation_seed": int(generator.initial_seed()),
+        "rng_protocol": "split_token_plan_v1",
+        "plan_rng_offset": _PLAN_RNG_OFFSET,
+    }
+
+
+def _paired_nonempty_texts(generated_texts, reference_texts) -> tuple[list[str], list[str]]:
+    """Keep equal-size, non-empty generated/reference samples for MAUVE."""
+    generated, references = [], []
+    for generated_text, reference_text in zip(generated_texts, reference_texts):
+        if (
+            isinstance(generated_text, str)
+            and generated_text.strip()
+            and isinstance(reference_text, str)
+            and reference_text.strip()
+        ):
+            generated.append(generated_text)
+            references.append(reference_text)
+    return generated, references
+
+
+def _dataset_reference_texts(dataset, tokenizer, count: int, max_length: int) -> list[str]:
+    """Decode a deterministic real-text sample for unconditional MAUVE."""
+    if dataset is None:
+        return []
+    references = []
+    for idx in range(min(int(count), len(dataset))):
+        item = dataset[idx]
+        text = item.get("target") or item.get("text")
+        if not isinstance(text, str):
+            input_ids = item.get("input_ids")
+            if input_ids is None:
+                raise ValueError(
+                    "MAUVE reference dataset rows need target, text, or input_ids"
+                )
+            text = tokenizer.decode(
+                np.asarray(input_ids).reshape(-1)[:max_length].tolist(),
+                skip_special_tokens=True,
+            )
+        references.append(text)
+    return references
+
+
+def _compute_mauve_metrics(
+    evaluator: PPLMetrics,
+    generated_texts: list[str],
+    reference_texts: list[str],
+    config,
+    *,
+    generated_features=None,
+):
+    """Compute reproducible MAUVE metadata, or skip undersized text sets."""
+    generated, references = _paired_nonempty_texts(generated_texts, reference_texts)
+    if len(generated) < 2:
+        log_for_0(
+            f"MAUVE eval: need at least 2 non-empty pairs; observed {len(generated)}"
+        )
+        return None
+    if generated_features is None:
+        generated_features = evaluator.featurize_texts(
+            generated, max_length=config.eval_ppl_max_length,
+        )
+    elif len(generated_features) != len(generated):
+        raise ValueError(
+            "Precomputed MAUVE generated features do not match filtered text count: "
+            f"{len(generated_features)} != {len(generated)}"
+        )
+    reference_features = evaluator.featurize_texts(
+        references, max_length=config.eval_ppl_max_length,
+    )
+    results = compute_mauve_from_features(
+        generated_features,
+        reference_features,
+        seed=int(config.eval_mauve_seed),
+    )
+    results.update({
+        "mauve_featurizer": str(getattr(config, "eval_mauve_model", config.eval_ppl_model)),
+        "mauve_seed": int(config.eval_mauve_seed),
+        "mauve_scale": "percent",
+    })
+    return results
+
+
+def _build_mauve_evaluator(config, ppl_evaluator=None):
+    """Return the configured MAUVE featurizer, sharing the gPPL model if exact."""
+    if not config.online_eval or not bool(config.eval_mauve):
+        return None
+    mauve_model = str(getattr(config, "eval_mauve_model", config.eval_ppl_model))
+    if (
+        ppl_evaluator is not None
+        and mauve_model == str(config.eval_ppl_model)
+    ):
+        return ppl_evaluator
+    return PPLMetrics(
+        gen_ppl_eval_model_name_or_path=mauve_model,
+        eval_ppl_batch_size=config.eval_ppl_batch_size,
+        eval_context_size=config.eval_ppl_max_length,
+    )
 
 
 class _IndexedSubset:
@@ -185,6 +309,90 @@ def _clean_plan_latent(
     raise ValueError(f"Unknown sentence_encoder_type: {sentence_encoder_type}")
 
 
+@torch.no_grad()
+def _teacher_forced_token_stats(
+    model: nn.Module,
+    x0: torch.Tensor,
+    input_ids: torch.Tensor,
+    attention_mask: torch.Tensor,
+    loss_mask: torch.Tensor,
+    config,
+    self_cond_cfg_scale: float,
+    plan_z: Optional[torch.Tensor] = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return masked decoder NLL sum/count at clean token and plan latents."""
+    batch_size = x0.shape[0]
+    t_one = torch.ones((batch_size,), dtype=x0.dtype, device=x0.device)
+    sc_batch = (
+        torch.full_like(t_one, float(self_cond_cfg_scale))
+        if config.num_self_cond_cfg_tokens > 0 else None
+    )
+    model_input = (
+        torch.cat([x0, torch.zeros_like(x0)], dim=-1)
+        if config.self_cond_prob > 0 else x0
+    )
+    plan_kwargs = {}
+    if bool(getattr(config, "use_sentence_plan", False)):
+        if plan_z is None:
+            raise ValueError("plan_z is required for sentence-plan teacher forcing")
+        plan_kwargs = {"plan_z": plan_z, "plan_t": t_one}
+    use_bf16 = bool(getattr(config, "use_bf16", True)) and x0.is_cuda
+    with torch.amp.autocast("cuda", dtype=torch.bfloat16, enabled=use_bf16):
+        _, decoder_logits = model(
+            model_input,
+            t_one,
+            attention_mask=attention_mask,
+            deterministic=True,
+            self_cond_cfg_scale=sc_batch,
+            decoder_step_active=True,
+            **plan_kwargs,
+        )
+    token_nll = torch.nn.functional.cross_entropy(
+        decoder_logits.float().transpose(1, 2), input_ids, reduction="none",
+    )
+    mask = loss_mask.to(token_nll.dtype)
+    return (token_nll * mask).sum(), mask.sum()
+
+
+@torch.no_grad()
+def _token_denoising_l2_stats(
+    model: nn.Module,
+    x0: torch.Tensor,
+    noise: torch.Tensor,
+    t_value: float,
+    loss_mask: torch.Tensor,
+    config,
+    self_cond_cfg_scale: float,
+    plan_z: Optional[torch.Tensor] = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return masked token-field velocity MSE sum/count at one fixed timestep."""
+    batch_size = x0.shape[0]
+    t_batch = torch.full(
+        (batch_size,), float(t_value), dtype=x0.dtype, device=x0.device,
+    )
+    z = add_noise(x0, noise, t_batch, config)
+    cond_seq = torch.zeros_like(x0)
+    cond_mask = torch.zeros_like(loss_mask)
+    plan_t = torch.ones_like(t_batch) if plan_z is not None else None
+    v_pred, _, _, _ = _forward_sample(
+        model=model,
+        z=z,
+        t_batch=t_batch,
+        x_pred_prev=torch.zeros_like(x0),
+        config=config,
+        cfg_scale=1.0,
+        self_cond_cfg_scale=float(self_cond_cfg_scale),
+        cond_seq=cond_seq,
+        cond_seq_mask=cond_mask,
+        plan_z=plan_z,
+        plan_t=plan_t,
+    )
+    v_target = x0 - noise * float(config.denoiser_noise_scale)
+    squared = (v_pred.float() - v_target.float()).pow(2).mean(dim=-1)
+    mask = loss_mask.to(squared.dtype)
+    return (squared * mask).sum(), mask.sum()
+
+
 def _token_reconstruction_run_name(self_cond_cfg_scale: float, suffix: str) -> str:
     sccfg_str = f"-sccfg{self_cond_cfg_scale}" if self_cond_cfg_scale != 1.0 else ""
     return f"clean-token-reconstruction{sccfg_str}-{suffix}"
@@ -226,7 +434,9 @@ def run_generation(
             num_samples=config.num_samples,
         )
         if eval_dataset is None:
-            test_generation_uncond(**common_kwargs)
+            test_generation_uncond(
+                **common_kwargs, reference_dataset=train_dataset,
+            )
         else:
             test_generation_cond(
                 **common_kwargs, encoder=encoder, dataset=eval_dataset,
@@ -272,6 +482,7 @@ def run_generation(
         for self_cond_cfg_scale in sc_scales:
             test_token_reconstruction_clean(
                 state=state, encoder=encoder, tokenizer=tokenizer,
+                generator=generator,
                 config=config, dataset=reconstruction_dataset,
                 sentence_encoder=sentence_encoder,
                 is_conditional=eval_dataset is not None,
@@ -290,6 +501,7 @@ def test_generation_uncond(
     generator: torch.Generator,
     config: Config,
     sampling_config: SamplingConfig,
+    reference_dataset=None,
     num_samples: int = 64,
     batch_size: int = 64,
 ):
@@ -321,6 +533,7 @@ def test_generation_uncond(
             eval_ppl_batch_size=config.eval_ppl_batch_size,
             eval_context_size=config.eval_ppl_max_length,
         )
+    mauve_evaluator = _build_mauve_evaluator(config, ppl_metrics)
 
     world = _world()
     rank = _rank()
@@ -341,6 +554,7 @@ def test_generation_uncond(
         decode_time = 0.0
         num_batches = (local_num_samples + batch_size - 1) // batch_size
         local_processed = 0
+        token_generator, plan_generator = _evaluation_generators(generator, device)
 
         for batch_idx in tqdm(range(num_batches), desc="Generating samples", disable=(rank != 0)):
             if local_processed >= local_num_samples:
@@ -351,20 +565,17 @@ def test_generation_uncond(
                 time_schedule=time_schedule,
                 P_mean=config.denoiser_p_mean, P_std=config.denoiser_p_std,
                 device=device, dtype=param_dtype,
+                generator=token_generator,
             )
-            if device.type == "cuda":
-                z = torch.randn(
-                    (current_batch, config.max_length, d_model),
-                    dtype=param_dtype, device=device,
-                ) * config.denoiser_noise_scale
-            else:
-                z = (torch.randn((current_batch, config.max_length, d_model),
-                                 generator=generator, dtype=param_dtype)
-                     * config.denoiser_noise_scale).to(device)
+            z = torch.randn(
+                (current_batch, config.max_length, d_model),
+                generator=token_generator, dtype=param_dtype, device=device,
+            ) * config.denoiser_noise_scale
 
             gen_start = time.time()
             latent_out = _generate_samples_single_batch(
-                model=model, generator=generator, z=z, t_steps=t_steps,
+                model=model, generator=token_generator, plan_generator=plan_generator,
+                z=z, t_steps=t_steps,
                 cond_seq=None, cond_seq_mask=None,
                 config=config, sampling_config=sampling_config,
                 cfg_scale=cfg_scale, self_cond_cfg_scale=self_cond_cfg_scale,
@@ -427,6 +638,7 @@ def test_generation_uncond(
             upload_output_dir_to_hf(config.output_dir, config.hf_repo_id, reason="generation")
 
         ppl_results = None
+        mauve_results = None
         if config.online_eval and _rank() == 0:
             if len(eval_specs) == 1:
                 del model
@@ -439,6 +651,15 @@ def test_generation_uncond(
             with open(out_path, "r", encoding="utf-8") as f:
                 text_samples = [json.loads(line)["generated"] for line in f]
             nonempty_samples = [s for s in text_samples if isinstance(s, str) and s.strip()]
+            reference_texts = _dataset_reference_texts(
+                reference_dataset,
+                tokenizer,
+                count=len(text_samples),
+                max_length=config.eval_ppl_max_length,
+            )
+            mauve_generated, mauve_references = _paired_nonempty_texts(
+                text_samples, reference_texts,
+            )
             skipped = len(text_samples) - len(nonempty_samples)
             if skipped > 0:
                 log_for_0(f"PPL eval: skipped {skipped} empty samples")
@@ -449,25 +670,57 @@ def test_generation_uncond(
                     text_samples=nonempty_samples,
                     max_length=config.eval_ppl_max_length,
                     retokenize=True,
+                    return_features=(
+                        bool(config.eval_mauve)
+                        and nonempty_samples == mauve_generated
+                        and len(mauve_generated) >= 2
+                    ),
                 )
                 log_for_0(f"gPPL: {ppl_results['ppl']:.4f}")
                 log_for_0(f"Generation Mean Entropy: {ppl_results['mean_entropy']:.4f}")
+            if bool(config.eval_mauve):
+                if reference_dataset is None:
+                    log_for_0("MAUVE eval: no real-text reference dataset; skipping")
+                else:
+                    generated_features = None
+                    if (
+                        ppl_results is not None
+                        and nonempty_samples == mauve_generated
+                    ):
+                        generated_features = ppl_results.get("features")
+                    mauve_results = _compute_mauve_metrics(
+                        mauve_evaluator,
+                        mauve_generated,
+                        mauve_references,
+                        config,
+                        generated_features=(
+                            generated_features if mauve_evaluator is ppl_metrics else None
+                        ),
+                    )
+                    if mauve_results is not None:
+                        log_for_0(f"MAUVE: {mauve_results['mauve']:.2f}")
             log_for_0("=" * 70 + "\n")
 
         if _rank() == 0:
-            if ppl_results is not None:
+            if ppl_results is not None or mauve_results is not None:
                 metrics_line = {
                     "epoch": epoch_val, "step": step_val,
                     "mode": "generation_refine_decode",
-                    "ppl": ppl_results["ppl"], "g_ppl": ppl_results["ppl"],
-                    "mean_entropy": ppl_results["mean_entropy"],
                     "sampling_dimensions": _evaluation_sampling_dimensions(
                         sampling_config,
                         num_sampling_steps=num_sampling_steps,
                         cfg_scale=cfg_scale,
                         self_cond_cfg_scale=self_cond_cfg_scale,
                     ),
+                    **_evaluation_rng_metadata(generator),
                 }
+                if ppl_results is not None:
+                    metrics_line.update({
+                        "ppl": ppl_results["ppl"], "g_ppl": ppl_results["ppl"],
+                        "mean_entropy": ppl_results["mean_entropy"],
+                    })
+                if mauve_results is not None:
+                    metrics_line.update(mauve_results)
                 with open(os.path.join(config.output_dir, name, "metrics.jsonl"), "a", encoding="utf-8") as f:
                     f.write(json.dumps(metrics_line, ensure_ascii=False) + "\n")
                 upload_output_dir_to_hf(config.output_dir, config.hf_repo_id, reason="generation metrics")
@@ -483,6 +736,8 @@ def test_generation_uncond(
                         f"generation/{name}/g_ppl": ppl_results["ppl"],
                         f"generation/{name}/mean_entropy": ppl_results["mean_entropy"],
                     })
+                if mauve_results is not None:
+                    wandb_tables[f"generation/{name}/mauve"] = mauve_results["mauve"]
 
     if _rank() == 0 and config.use_wandb and wandb_tables and wandb is not None:
         try:
@@ -540,6 +795,7 @@ def test_generation_cond(
     )
 
     wandb_tables = {}
+    mauve_evaluator = _build_mauve_evaluator(config)
     cfg_list = sampling_config.cfgs
     steps_list = sampling_config.num_sampling_steps
     self_cond_cfg_scales_list = sampling_config.self_cond_cfg_scales
@@ -554,6 +810,7 @@ def test_generation_cond(
         generation_time = 0.0
         decode_time = 0.0
         samples_processed = 0
+        token_generator, plan_generator = _evaluation_generators(generator, device)
 
         local_num_samples = len(local_indices)
         local_total_batches = (local_num_samples + batch_size - 1) // batch_size
@@ -571,6 +828,7 @@ def test_generation_cond(
                 time_schedule=time_schedule,
                 P_mean=config.denoiser_p_mean, P_std=config.denoiser_p_std,
                 device=device, dtype=next(model.parameters()).dtype,
+                generator=token_generator,
             )
 
             cond_seq = encode_text(
@@ -578,13 +836,15 @@ def test_generation_cond(
                 encoder=encoder, latent_mean=encode_latent_mean, latent_std=encode_latent_std,
             ).to(next(model.parameters()).dtype)
 
-            z = (torch.randn((bsz, config.max_length, d_model),
-                             generator=generator, dtype=next(model.parameters()).dtype)
-                 * config.denoiser_noise_scale).to(device)
+            z = torch.randn(
+                (bsz, config.max_length, d_model), generator=token_generator,
+                dtype=next(model.parameters()).dtype, device=device,
+            ) * config.denoiser_noise_scale
 
             gen_start = time.time()
             latent_out = _generate_samples_single_batch(
-                model=model, generator=generator, z=z, t_steps=t_steps,
+                model=model, generator=token_generator, plan_generator=plan_generator,
+                z=z, t_steps=t_steps,
                 cond_seq=cond_seq, cond_seq_mask=cond_seq_mask_arr,
                 config=config, sampling_config=sampling_config,
                 cfg_scale=cfg_scale, self_cond_cfg_scale=self_cond_cfg_scale,
@@ -662,10 +922,18 @@ def test_generation_cond(
                 bleu_score = compute_bleu(hypotheses, references)
                 rouge_scores = compute_rouge(hypotheses, references)
                 cond_eval_results = {"bleu": bleu_score, **rouge_scores}
+                if mauve_evaluator is not None:
+                    mauve_results = _compute_mauve_metrics(
+                        mauve_evaluator, hypotheses, references, config,
+                    )
+                    if mauve_results is not None:
+                        cond_eval_results.update(mauve_results)
                 log_for_0(
                     f"BLEU: {bleu_score:.2f}  ROUGE-1: {rouge_scores['rouge1']:.2f}  "
                     f"ROUGE-2: {rouge_scores['rouge2']:.2f}  ROUGE-L: {rouge_scores['rougeL']:.2f}"
                 )
+                if "mauve" in cond_eval_results:
+                    log_for_0(f"MAUVE: {cond_eval_results['mauve']:.2f}")
 
             if config.use_wandb and wandb is not None:
                 table = wandb.Table(columns=["sample_id", "context", "original", "generated"])
@@ -679,6 +947,8 @@ def test_generation_cond(
                         f"generation/{name}/rouge2": cond_eval_results["rouge2"],
                         f"generation/{name}/rougeL": cond_eval_results["rougeL"],
                     })
+                    if "mauve" in cond_eval_results:
+                        wandb_tables[f"generation/{name}/mauve"] = cond_eval_results["mauve"]
             if cond_eval_results is not None:
                 metrics_line = {
                     "epoch": epoch_val,
@@ -691,6 +961,7 @@ def test_generation_cond(
                         self_cond_cfg_scale=self_cond_cfg_scale,
                     ),
                     **cond_eval_results,
+                    **_evaluation_rng_metadata(generator),
                 }
                 with open(os.path.join(config.output_dir, name, "metrics.jsonl"), "a", encoding="utf-8") as f:
                     f.write(json.dumps(metrics_line, ensure_ascii=False) + "\n")
@@ -756,6 +1027,7 @@ def test_plan_conditioned_generation(
             eval_ppl_batch_size=config.eval_ppl_batch_size,
             eval_context_size=config.eval_ppl_max_length,
         )
+    mauve_evaluator = _build_mauve_evaluator(config, ppl_metrics)
 
     world = _world()
     rank = _rank()
@@ -801,6 +1073,7 @@ def test_plan_conditioned_generation(
         generation_time = 0.0
         decode_time = 0.0
         samples_processed = 0
+        token_generator, plan_generator = _evaluation_generators(generator, device)
         local_num_samples = len(local_indices)
         local_total_batches = (local_num_samples + batch_size - 1) // batch_size
         pbar = tqdm(total=local_total_batches, desc=f"Generating with {plan_mode} plan", disable=(rank != 0))
@@ -861,22 +1134,20 @@ def test_plan_conditioned_generation(
                 time_schedule=time_schedule,
                 P_mean=config.denoiser_p_mean, P_std=config.denoiser_p_std,
                 device=device, dtype=param_dtype,
+                generator=token_generator,
             )
-            if device.type == "cuda":
-                z = torch.randn((bsz, config.max_length, d_model), dtype=param_dtype, device=device)
-                z = z * config.denoiser_noise_scale
-            else:
-                z = (
-                    torch.randn((bsz, config.max_length, d_model), generator=generator, dtype=param_dtype)
-                    * config.denoiser_noise_scale
-                ).to(device)
+            z = torch.randn(
+                (bsz, config.max_length, d_model), generator=token_generator,
+                dtype=param_dtype, device=device,
+            ) * config.denoiser_noise_scale
 
             cond_seq = x0 if is_conditional else None
             cond_seq_mask_for_sampling = cond_seq_mask_arr if is_conditional else None
 
             gen_start = time.time()
             latent_out = _generate_samples_single_batch(
-                model=model, generator=generator, z=z, t_steps=t_steps,
+                model=model, generator=token_generator, plan_generator=plan_generator,
+                z=z, t_steps=t_steps,
                 cond_seq=cond_seq, cond_seq_mask=cond_seq_mask_for_sampling,
                 config=config, sampling_config=sampling_config,
                 cfg_scale=cfg_scale, self_cond_cfg_scale=self_cond_cfg_scale,
@@ -978,6 +1249,10 @@ def test_plan_conditioned_generation(
                 with open(out_path, "r", encoding="utf-8") as f:
                     text_samples = [json.loads(line)["generated"] for line in f]
                 nonempty_samples = [s for s in text_samples if isinstance(s, str) and s.strip()]
+                reference_samples = [ref for _, ref, _, _ in all_generated]
+                mauve_generated, mauve_references = _paired_nonempty_texts(
+                    text_samples, reference_samples,
+                )
                 skipped = len(text_samples) - len(nonempty_samples)
                 if skipped > 0:
                     log_for_0(f"{plan_mode} plan PPL eval: skipped {skipped} empty samples")
@@ -986,6 +1261,11 @@ def test_plan_conditioned_generation(
                         text_samples=nonempty_samples,
                         max_length=config.eval_ppl_max_length,
                         retokenize=True,
+                        return_features=(
+                            bool(config.eval_mauve)
+                            and nonempty_samples == mauve_generated
+                            and len(mauve_generated) >= 2
+                        ),
                     )
                     log_for_0(f"{metric_key}: {ppl_results['ppl']:.4f}")
                     log_for_0(f"{plan_mode} plan Mean Entropy: {ppl_results['mean_entropy']:.4f}")
@@ -999,12 +1279,32 @@ def test_plan_conditioned_generation(
                     bleu_score = compute_bleu(hypotheses, references)
                     rouge_scores = compute_rouge(hypotheses, references)
                     similarity_results = {"bleu": bleu_score, **rouge_scores}
+                    if bool(config.eval_mauve):
+                        generated_features = None
+                        if (
+                            ppl_results is not None
+                            and nonempty_samples == mauve_generated
+                        ):
+                            generated_features = ppl_results.get("features")
+                        mauve_results = _compute_mauve_metrics(
+                            mauve_evaluator,
+                            mauve_generated,
+                            mauve_references,
+                            config,
+                            generated_features=(
+                                generated_features if mauve_evaluator is ppl_metrics else None
+                            ),
+                        )
+                        if mauve_results is not None:
+                            similarity_results.update(mauve_results)
                     log_for_0(
                         f"{plan_mode} plan BLEU: {bleu_score:.2f}  "
                         f"ROUGE-1: {rouge_scores['rouge1']:.2f}  "
                         f"ROUGE-2: {rouge_scores['rouge2']:.2f}  "
                         f"ROUGE-L: {rouge_scores['rougeL']:.2f}"
                     )
+                    if "mauve" in similarity_results:
+                        log_for_0(f"{plan_mode} plan MAUVE: {similarity_results['mauve']:.2f}")
 
             metrics_line = {
                 "epoch": epoch_val,
@@ -1016,6 +1316,7 @@ def test_plan_conditioned_generation(
                     cfg_scale=cfg_scale,
                     self_cond_cfg_scale=self_cond_cfg_scale,
                 ),
+                **_evaluation_rng_metadata(generator),
             }
             if ppl_results is not None:
                 metrics_line.update({
@@ -1054,6 +1355,8 @@ def test_plan_conditioned_generation(
                         f"{plan_mode}_plan/{name}/rouge2": similarity_results["rouge2"],
                         f"{plan_mode}_plan/{name}/rougeL": similarity_results["rougeL"],
                     })
+                    if "mauve" in similarity_results:
+                        wandb_payload[f"{plan_mode}_plan/{name}/mauve"] = similarity_results["mauve"]
 
     if _rank() == 0 and config.use_wandb and wandb_payload and wandb is not None:
         try:
@@ -1071,6 +1374,7 @@ def test_token_reconstruction_clean(
     state,
     encoder: nn.Module,
     tokenizer,
+    generator: torch.Generator,
     config: Config,
     dataset,
     sentence_encoder=None,
@@ -1106,6 +1410,22 @@ def test_token_reconstruction_clean(
         max_seq_length=config.max_length, pad_token_id=pad_token_id,
         max_input_seq_length=config.max_input_length, distributed=False,
     )
+    plan_dataloader = None
+    if bool(getattr(config, "use_sentence_plan", False)):
+        if total_samples < 2:
+            raise ValueError("sentence-plan reconstruction diagnostics require at least 2 samples")
+        shuffled_plan_indices = [int((idx + 1) % total_samples) for idx in local_indices]
+        plan_dataloader = get_dataloader(
+            _IndexedSubset(dataset, shuffled_plan_indices),
+            batch_size=batch_size,
+            shuffle=False,
+            num_workers=0,
+            drop_last=False,
+            max_seq_length=config.max_length,
+            pad_token_id=pad_token_id,
+            max_input_seq_length=config.max_input_length,
+            distributed=False,
+        )
     log_for_0(
         f"Clean token reconstruction samples: total={total_samples}, "
         f"per-rank~={(total_samples + world - 1) // world}, world={world}"
@@ -1118,8 +1438,24 @@ def test_token_reconstruction_clean(
     local_num_samples = len(local_indices)
     local_total_batches = (local_num_samples + batch_size - 1) // batch_size
     pbar = tqdm(total=local_total_batches, desc="Reconstructing clean token latents", disable=(rank != 0))
+    token_generator, _ = _evaluation_generators(generator, device)
+    timestep_probes = (0.1, 0.3, 0.5, 0.7, 0.9)
+    local_diagnostic_stats: dict[str, list[torch.Tensor]] = {}
 
-    for batch in dataloader:
+    def _accumulate(key: str, value_sum: torch.Tensor, value_count: torch.Tensor) -> None:
+        if key not in local_diagnostic_stats:
+            local_diagnostic_stats[key] = [value_sum.detach(), value_count.detach()]
+        else:
+            local_diagnostic_stats[key][0] += value_sum.detach()
+            local_diagnostic_stats[key][1] += value_count.detach()
+
+    batch_iter = (
+        zip(dataloader, plan_dataloader)
+        if plan_dataloader is not None
+        else ((batch, None) for batch in dataloader)
+    )
+
+    for batch, plan_batch in batch_iter:
         if samples_processed >= local_num_samples:
             break
 
@@ -1143,7 +1479,70 @@ def test_token_reconstruction_clean(
             model=model, x0=x0, input_ids=input_ids, loss_mask=loss_mask,
             tokenizer=tokenizer, sentence_encoder=sentence_encoder, config=config,
         )
+        shuffled_plan_latent = None
+        if plan_batch is not None:
+            plan_input_ids = torch.from_numpy(np.array(plan_batch["input_ids"])).to(device).long()
+            plan_encoder_attention_mask = (
+                torch.from_numpy(np.array(plan_batch["encoder_attention_mask"])).to(device).float()
+            )
+            plan_attention_mask = torch.from_numpy(np.array(plan_batch["attention_mask"])).to(device).float()
+            plan_cond_seq_mask = torch.from_numpy(np.array(plan_batch["cond_seq_mask"])).to(device).float()
+            plan_loss_mask = _batch_loss_mask(plan_attention_mask, plan_cond_seq_mask, config)
+            plan_x0 = encode_text(
+                input_ids=plan_input_ids,
+                attention_mask=plan_encoder_attention_mask,
+                encoder=encoder,
+                latent_mean=encode_latent_mean,
+                latent_std=encode_latent_std,
+                use_bf16=use_bf16,
+            ).to(param_dtype)
+            shuffled_plan_latent = _clean_plan_latent(
+                model=model,
+                x0=plan_x0,
+                input_ids=plan_input_ids,
+                loss_mask=plan_loss_mask,
+                tokenizer=tokenizer,
+                sentence_encoder=sentence_encoder,
+                config=config,
+            )
         encode_time += time.time() - enc_start
+
+        plan_variants = (
+            {"oracle": plan_latent, "shuffled": shuffled_plan_latent}
+            if plan_latent is not None else {"clean": None}
+        )
+        for plan_mode, diagnostic_plan in plan_variants.items():
+            nll_sum, token_count = _teacher_forced_token_stats(
+                model=model,
+                x0=x0,
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                loss_mask=loss_mask,
+                config=config,
+                self_cond_cfg_scale=self_cond_cfg_scale,
+                plan_z=diagnostic_plan,
+            )
+            _accumulate(f"{plan_mode}:teacher_nll", nll_sum, token_count)
+
+        for t_value in timestep_probes:
+            noise = torch.randn(
+                x0.shape,
+                generator=token_generator,
+                dtype=x0.dtype,
+                device=x0.device,
+            )
+            for plan_mode, diagnostic_plan in plan_variants.items():
+                l2_sum, l2_count = _token_denoising_l2_stats(
+                    model=model,
+                    x0=x0,
+                    noise=noise,
+                    t_value=t_value,
+                    loss_mask=loss_mask,
+                    config=config,
+                    self_cond_cfg_scale=self_cond_cfg_scale,
+                    plan_z=diagnostic_plan,
+                )
+                _accumulate(f"{plan_mode}:l2:t{int(t_value * 100):02d}", l2_sum, l2_count)
 
         dec_start = time.time()
         predicted_ids = _dlm_decode_batch(
@@ -1180,6 +1579,43 @@ def test_token_reconstruction_clean(
             samples_processed += 1
         pbar.update(1)
     pbar.close()
+
+    for value_sum, value_count in local_diagnostic_stats.values():
+        if world > 1:
+            dist.all_reduce(value_sum, op=dist.ReduceOp.SUM)
+            dist.all_reduce(value_count, op=dist.ReduceOp.SUM)
+
+    diagnostic_metrics: dict[str, float] = {}
+    diagnostic_modes = ("oracle", "shuffled") if plan_dataloader is not None else ("clean",)
+    for plan_mode in diagnostic_modes:
+        nll_sum, token_count = local_diagnostic_stats[f"{plan_mode}:teacher_nll"]
+        mean_nll = float((nll_sum / token_count.clamp_min(1)).item())
+        prefix = "" if plan_mode == "clean" else f"{plan_mode}_plan_"
+        diagnostic_metrics[f"{prefix}teacher_forced_token_ppl"] = float(
+            torch.exp(torch.tensor(mean_nll, dtype=torch.float64)).item()
+        )
+        l2_sum_total = 0.0
+        l2_count_total = 0.0
+        for t_value in timestep_probes:
+            bin_name = f"t{int(t_value * 100):02d}"
+            l2_sum, l2_count = local_diagnostic_stats[f"{plan_mode}:l2:{bin_name}"]
+            value = float((l2_sum / l2_count.clamp_min(1)).item())
+            diagnostic_metrics[f"{prefix}token_denoising_l2_{bin_name}"] = value
+            l2_sum_total += float(l2_sum.item())
+            l2_count_total += float(l2_count.item())
+        diagnostic_metrics[f"{prefix}token_denoising_l2"] = l2_sum_total / max(l2_count_total, 1.0)
+    if "oracle_plan_teacher_forced_token_ppl" in diagnostic_metrics:
+        diagnostic_metrics["teacher_forced_token_ppl"] = diagnostic_metrics[
+            "oracle_plan_teacher_forced_token_ppl"
+        ]
+        diagnostic_metrics["token_denoising_l2"] = diagnostic_metrics[
+            "oracle_plan_token_denoising_l2"
+        ]
+        for t_value in timestep_probes:
+            bin_name = f"t{int(t_value * 100):02d}"
+            diagnostic_metrics[f"token_denoising_l2_{bin_name}"] = diagnostic_metrics[
+                f"oracle_plan_token_denoising_l2_{bin_name}"
+            ]
 
     if world > 1:
         gathered = [None] * world
@@ -1268,6 +1704,8 @@ def test_token_reconstruction_clean(
         metrics_line = {
             "epoch": epoch_val, "step": step_val,
             "mode": "clean_token_reconstruction",
+            **_evaluation_rng_metadata(generator),
+            **diagnostic_metrics,
         }
         if ppl_results is not None:
             metrics_line.update({

@@ -27,6 +27,7 @@ def sample_timesteps(
     time_schedule: str = 'logit_normal',
     device: Optional[torch.device] = None,
     dtype: torch.dtype = torch.float32,
+    generator: Optional[torch.Generator] = None,
 ):
     """Sample timesteps using various time schedules.
 
@@ -40,10 +41,12 @@ def sample_timesteps(
         Sampled timesteps in [0, 1]
     """
     if time_schedule == 'logit_normal':
-        z = torch.randn((batch_size,), dtype=dtype, device=device) * P_std + P_mean
+        z = torch.randn(
+            (batch_size,), dtype=dtype, device=device, generator=generator,
+        ) * P_std + P_mean
         return torch.sigmoid(z)
     if time_schedule == 'uniform':
-        return torch.rand((batch_size,), dtype=dtype, device=device)
+        return torch.rand((batch_size,), dtype=dtype, device=device, generator=generator)
     raise ValueError(f"Unknown time_schedule: {time_schedule}")
 
 
@@ -51,6 +54,7 @@ def get_sampling_steps(
     n_steps: int, time_schedule: str = "logit_normal",
     P_mean: float = -0.8, P_std: float = 0.8,
     device: Optional[torch.device] = None, dtype: torch.dtype = torch.float32,
+    generator: Optional[torch.Generator] = None,
 ) -> torch.Tensor:
     """Return a length-(n_steps+1) tensor of t values in [0, 1] for a sampling run.
 
@@ -63,7 +67,7 @@ def get_sampling_steps(
         steps = sample_timesteps(
             batch_size=n_steps - 1,
             P_mean=P_mean, P_std=P_std, time_schedule=time_schedule,
-            device=device, dtype=dtype,
+            device=device, dtype=dtype, generator=generator,
         )
         steps = torch.sort(steps).values
         endpoints_lo = torch.zeros((1,), dtype=dtype, device=steps.device)
@@ -319,6 +323,7 @@ def _sde_step(
     model, z, t, t_next, x_pred_prev,
     config, cfg_scale, self_cond_cfg_scale,
     cond_seq, cond_seq_mask, gamma, generator, plan_z=None,
+    plan_generator=None,
     plan_t=None, plan_t_next=None, freeze_plan_z: bool = False,
 ):
     """Per-step SDE-style sampler with hybrid (t-and-step) noise scaling.
@@ -330,10 +335,9 @@ def _sde_step(
     h = float(t_next - t)
     alpha = max(0.0, min(1.0, 1.0 - gamma * h))
     t_back = alpha * float(t)
-    if z.is_cuda:
-        eps = torch.randn(z.shape, dtype=z.dtype, device=z.device) * config.denoiser_noise_scale
-    else:
-        eps = torch.randn(z.shape, generator=generator, dtype=z.dtype) * config.denoiser_noise_scale
+    eps = torch.randn(
+        z.shape, generator=generator, dtype=z.dtype, device=z.device,
+    ) * config.denoiser_noise_scale
     z_back = restore_cond(alpha * z + (1.0 - alpha) * eps, cond_seq, cond_seq_mask)
     plan_z_back = None
     plan_t_back = None
@@ -342,10 +346,12 @@ def _sde_step(
             plan_z_back = plan_z
             plan_t_back = plan_t
         else:
-            if z.is_cuda:
-                plan_eps = torch.randn(plan_z.shape, dtype=plan_z.dtype, device=plan_z.device)
-            else:
-                plan_eps = torch.randn(plan_z.shape, generator=generator, dtype=plan_z.dtype, device=plan_z.device)
+            plan_eps = torch.randn(
+                plan_z.shape,
+                generator=plan_generator if plan_generator is not None else generator,
+                dtype=plan_z.dtype,
+                device=plan_z.device,
+            )
             plan_eps = plan_eps * float(getattr(config, "plan_noise_scale", 1.0))
             t_back_batch = torch.full((z.shape[0],), t_back, dtype=z.dtype, device=z.device)
             plan_t_back = plan_time_from_token_time(t_back_batch, config)

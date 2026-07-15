@@ -197,6 +197,12 @@ def validate_config(config) -> Config:
         raise ValueError(f"num_workers must be >= 0, got {config.num_workers!r}")
     if int(config.num_samples) <= 0:
         raise ValueError(f"num_samples must be positive, got {config.num_samples!r}")
+    if int(config.eval_mauve_seed) < 0:
+        raise ValueError(f"eval_mauve_seed must be >= 0, got {config.eval_mauve_seed!r}")
+    if bool(config.eval_mauve) and (
+        not isinstance(config.eval_mauve_model, str) or not config.eval_mauve_model.strip()
+    ):
+        raise ValueError("eval_mauve_model must be a non-empty model ID/path when eval_mauve=true")
     if config.reconstruction_num_samples is not None:
         _validate_positive_int(config.reconstruction_num_samples, "reconstruction_num_samples")
     if int(config.train_sampling_eval_freq) < 0:
@@ -365,11 +371,14 @@ class Config:
     sampling_configs: list = [SamplingConfig()]
     num_samples: int = 100
 
-    # PPL Evaluation
-    online_eval: bool = True  # Enable PPL evaluation for generated samples
+    # Online generation evaluation
+    online_eval: bool = True  # Enable generation metrics for generated samples.
     eval_ppl_model: str = "gpt2-large"  # Model for PPL evaluation
     eval_ppl_batch_size: int = 64  # Batch size for PPL evaluation (adjusted to be divisible by device count)
     eval_ppl_max_length: int = 1024  # Max sequence length for PPL evaluation
+    eval_mauve: bool = True  # Compare generated/reference distributions in a fixed LM feature space.
+    eval_mauve_model: str = "gpt2-large"  # Feature model for MAUVE; may differ from eval_ppl_model.
+    eval_mauve_seed: int = 25  # Deterministic PCA/k-means seed used by mauve-text.
     reconstruction_eval: bool = False  # Run oracle/shuffled plan PPL and clean-token reconstruction diagnostics.
     reconstruction_num_samples: int = None  # None = reuse num_samples.
     train_sampling_eval_freq: int = 0  # Step interval for lightweight gPPL/plan/token-recon eval. 0 disables.

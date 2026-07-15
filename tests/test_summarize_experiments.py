@@ -84,6 +84,35 @@ def test_discovers_and_summarizes_run(tmp_path):
     assert row["plan_ppl_gap"] == 5.5
 
 
+def test_clean_model_summary_does_not_require_plan_intervention_metrics(tmp_path):
+    run_dir = make_run(tmp_path)
+    manifest_path = run_dir / "manifest.yaml"
+    manifest = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
+    manifest["resolved_config"]["use_sentence_plan"] = False
+    manifest_path.write_text(yaml.safe_dump(manifest), encoding="utf-8")
+    for variant in ("oracle", "shuffled"):
+        path = run_dir / "train_sampling_eval" / variant / "metrics.jsonl"
+        path.unlink()
+        path.parent.rmdir()
+    clean_path = run_dir / "train_sampling_eval" / "clean" / "metrics.jsonl"
+    clean = json.loads(clean_path.read_text(encoding="utf-8"))
+    clean.update({
+        "teacher_forced_token_ppl": 12.5,
+        "token_denoising_l2": 0.25,
+    })
+    clean_path.write_text(json.dumps(clean) + "\n", encoding="utf-8")
+
+    row = summarize_run(run_dir)
+
+    assert row["evaluation_family_state"] == "SINGLE_ELIGIBLE_FAMILY"
+    assert row["g_ppl"] == 31.0
+    assert row["token_recon_ppl"] == 40.0
+    assert row["teacher_forced_token_ppl"] == 12.5
+    assert row["token_denoising_l2"] == 0.25
+    assert "oracle_plan_ppl" not in row
+    assert "plan_ppl_gap" not in row
+
+
 def test_canonical_and_ppl_aliases_do_not_duplicate_exact_observations(tmp_path):
     run_dir = make_run(tmp_path)
     for path in run_dir.rglob("metrics.jsonl"):

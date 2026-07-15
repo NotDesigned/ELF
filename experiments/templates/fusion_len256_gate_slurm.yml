@@ -19,6 +19,7 @@ research_contract:
       - train_loss
       - steps_per_sec
       - g_ppl
+      - mauve
       - generation_mean_entropy
       - generation_nonempty_fraction
       - token_recon_ppl

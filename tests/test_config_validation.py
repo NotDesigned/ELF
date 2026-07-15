@@ -51,6 +51,25 @@ def test_overrides_accept_null_and_reject_bad_bool():
         apply_config_overrides(cfg, ["use_wandb=maybe"])
 
 
+def test_mauve_config_override_and_seed_validation():
+    cfg = apply_config_overrides(Config(), [
+        "eval_mauve=false", "eval_mauve_model=gpt2", "eval_mauve_seed=7",
+    ])
+    assert cfg.eval_mauve is False
+    assert cfg.eval_mauve_model == "gpt2"
+    assert cfg.eval_mauve_seed == 7
+
+    cfg.eval_mauve_seed = -1
+    with pytest.raises(ValueError, match="eval_mauve_seed"):
+        validate_config(cfg)
+
+    cfg.eval_mauve_seed = 0
+    cfg.eval_mauve = True
+    cfg.eval_mauve_model = ""
+    with pytest.raises(ValueError, match="eval_mauve_model"):
+        validate_config(cfg)
+
+
 def test_float_override_uses_declared_type_after_integer_yaml_value():
     cfg = Config()
     cfg.save_freq = 1  # Mirrors YAML parsing of ``save_freq: 1``.

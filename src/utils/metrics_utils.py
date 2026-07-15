@@ -48,6 +48,50 @@ def compute_rouge(hypotheses, references, return_std=False):
     return means, stds
 
 
+def compute_mauve_from_features(
+    generated_features,
+    reference_features,
+    *,
+    seed: int = 25,
+):
+    """Compute MAUVE from terminal LM hidden states on a 0--100 scale."""
+    try:
+        import mauve
+    except ImportError as exc:
+        raise RuntimeError(
+            "MAUVE evaluation requires mauve-text. Install requirements.txt "
+            "or set eval_mauve=false."
+        ) from exc
+
+    generated = np.asarray(generated_features, dtype=np.float32)
+    reference = np.asarray(reference_features, dtype=np.float32)
+    if generated.ndim != 2 or reference.ndim != 2:
+        raise ValueError("MAUVE features must be rank-2 arrays shaped (samples, hidden_dim)")
+    if generated.shape[1] != reference.shape[1]:
+        raise ValueError(
+            "MAUVE generated/reference feature dimensions differ: "
+            f"{generated.shape[1]} != {reference.shape[1]}"
+        )
+    if min(generated.shape[0], reference.shape[0]) < 2:
+        raise ValueError("MAUVE requires at least two non-empty generated and reference texts")
+    if not np.isfinite(generated).all() or not np.isfinite(reference).all():
+        raise ValueError("MAUVE features contain non-finite values")
+
+    result = mauve.compute_mauve(
+        p_features=reference,
+        q_features=generated,
+        num_buckets="auto",
+        seed=int(seed),
+        verbose=False,
+    )
+    return {
+        "mauve": float(result.mauve) * 100.0,
+        "mauve_num_buckets": int(result.num_buckets),
+        "mauve_num_generated": int(generated.shape[0]),
+        "mauve_num_reference": int(reference.shape[0]),
+    }
+
+
 # ============================================
 # Perplexity / entropy metrics (PyTorch)
 # ============================================
@@ -136,11 +180,35 @@ class Metrics:
         )
         return out["input_ids"], out["attention_mask"], self.eval_context_size
 
+    def _ensure_eval_model(self):
+        if self._eval_model is not None:
+            return
+        from transformers import AutoModelForCausalLM
+        log_for_0(f"Loading PyTorch model: {self.gen_ppl_eval_model_name_or_path}")
+        self._eval_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self._eval_model = AutoModelForCausalLM.from_pretrained(
+            self.gen_ppl_eval_model_name_or_path,
+            torch_dtype=torch.bfloat16,
+        ).to(self._eval_device).eval()
+        log_for_0("PPL/MAUVE feature model cached for reuse")
+
     @torch.no_grad()
-    def _compute_batch_nlls(self, input_ids: torch.Tensor, attention_mask: torch.Tensor):
+    def _compute_batch_nlls(
+        self,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor,
+        *,
+        return_features: bool = False,
+    ):
         model = self._eval_model
         eos_token_id = self.tokenizer.eos_token_id
-        logits = model(input_ids=input_ids, attention_mask=attention_mask).logits
+        outputs = model(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            output_hidden_states=return_features,
+            return_dict=True,
+        )
+        logits = outputs.logits
         targets = input_ids[:, 1:]
         logits_pred = logits[:, :-1, :]
         log_normalizers = torch.logsumexp(logits_pred.to(torch.float32), dim=-1)
@@ -150,26 +218,61 @@ class Metrics:
         if eos_token_id is not None:
             eos_count = (input_ids == eos_token_id).to(torch.int32).cumsum(dim=-1)
             valid_tokens = valid_tokens * (eos_count[:, :-1] == 0).to(torch.int32)
-        return nlls, valid_tokens
+        features = None
+        if return_features:
+            lengths = attention_mask.sum(dim=-1).long()
+            final_positions = torch.clamp(lengths - 1, min=0)
+            features = outputs.hidden_states[-1][
+                torch.arange(input_ids.shape[0], device=input_ids.device),
+                final_positions,
+            ].float()
+        return nlls, valid_tokens, features
+
+    @torch.no_grad()
+    def featurize_texts(self, text_samples: List[str], max_length: int) -> np.ndarray:
+        """Return the final valid-token hidden state used by standard MAUVE."""
+        if not text_samples or any(
+            not isinstance(text, str) or not text.strip() for text in text_samples
+        ):
+            raise ValueError("MAUVE featurization requires non-empty strings")
+        self._ensure_eval_model()
+        samples, attention_mask, _ = self._eval_retokenize(
+            text_samples, max_length=max_length,
+        )
+        batch_size = min(self.eval_ppl_batch_size or len(samples), len(samples)) or 1
+        features = []
+        for start in tqdm(
+            range(0, len(samples), batch_size), desc="Featurizing MAUVE texts",
+        ):
+            end = min(start + batch_size, len(samples))
+            input_ids = torch.from_numpy(samples[start:end]).to(self._eval_device).long()
+            attn = torch.from_numpy(attention_mask[start:end]).to(self._eval_device).long()
+            outputs = self._eval_model(
+                input_ids=input_ids,
+                attention_mask=attn,
+                output_hidden_states=True,
+                return_dict=True,
+            )
+            lengths = attn.sum(dim=-1).long()
+            final_positions = torch.clamp(lengths - 1, min=0)
+            batch_features = outputs.hidden_states[-1][
+                torch.arange(input_ids.shape[0], device=input_ids.device),
+                final_positions,
+            ]
+            features.append(batch_features.float().cpu().numpy())
+        return np.concatenate(features, axis=0).astype(np.float32, copy=False)
 
     def record_generative_perplexity(
         self,
         text_samples: List[str],
         max_length: int,
         retokenize: bool = True,
+        return_features: bool = False,
     ) -> Dict:
         import os
         os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
-        if self._eval_model is None:
-            from transformers import AutoModelForCausalLM
-            log_for_0(f"Loading PyTorch model: {self.gen_ppl_eval_model_name_or_path}")
-            self._eval_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-            self._eval_model = AutoModelForCausalLM.from_pretrained(
-                self.gen_ppl_eval_model_name_or_path,
-                torch_dtype=torch.bfloat16,
-            ).to(self._eval_device).eval()
-            log_for_0("PPL model cached for reuse")
+        self._ensure_eval_model()
 
         device = self._eval_device
 
@@ -187,6 +290,7 @@ class Metrics:
 
         per_sample_nll_sum = np.zeros(samples.shape[0], dtype=np.float64)
         per_sample_token_count = np.zeros(samples.shape[0], dtype=np.float64)
+        per_sample_features = None
 
         for i in tqdm(range(num_batches), desc="Evaluating perplexity"):
             batch_start = i * batch_size
@@ -201,7 +305,9 @@ class Metrics:
 
                 input_ids = torch.from_numpy(sample_chunk).to(device).long()
                 attn = torch.from_numpy(attn_mask_chunk).to(device).long()
-                nlls, valid_tokens = self._compute_batch_nlls(input_ids, attn)
+                nlls, valid_tokens, batch_features = self._compute_batch_nlls(
+                    input_ids, attn, return_features=return_features,
+                )
 
                 nlls_np = nlls.detach().cpu().numpy().astype(np.float64)
                 valid_tokens_np = valid_tokens.detach().cpu().numpy().astype(np.float64)
@@ -212,6 +318,15 @@ class Metrics:
 
                 per_sample_nll_sum[batch_start:batch_end] += weighted_nlls.sum(axis=-1)
                 per_sample_token_count[batch_start:batch_end] += valid_tokens_np.sum(axis=-1)
+                if return_features:
+                    batch_features_np = batch_features.detach().cpu().numpy().astype(np.float32)
+                    if per_sample_features is None:
+                        per_sample_features = np.zeros(
+                            (samples.shape[0], batch_features_np.shape[-1]), dtype=np.float32,
+                        )
+                    valid_rows = attn_mask_chunk.sum(axis=-1) > 0
+                    target = per_sample_features[batch_start:batch_end]
+                    target[valid_rows] = batch_features_np[valid_rows]
 
         with np.errstate(divide="ignore", invalid="ignore"):
             per_sample_ppl = np.exp(per_sample_nll_sum / per_sample_token_count)
@@ -227,8 +342,11 @@ class Metrics:
             per_sample_entropy.append(entropy)
             self.sample_entropy.update(entropy)
 
-        return {
+        results = {
             "ppl": float(self.gen_ppl.compute()),
             "per_sample_ppl": per_sample_ppl,
             "mean_entropy": sum(per_sample_entropy) / len(per_sample_entropy),
         }
+        if return_features:
+            results["features"] = per_sample_features
+        return results

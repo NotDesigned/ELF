@@ -15,6 +15,8 @@ from generation import (
     _IndexedSubset,
     _capture_rng_state,
     _evaluation_sampling_dimensions,
+    _evaluation_generators,
+    _teacher_forced_token_stats,
     _restore_rng_state,
 )
 from configs.config import SamplingConfig
@@ -34,6 +36,7 @@ class DecodeModel(nn.Module):
         t,
         deterministic=True,
         self_cond_cfg_scale=None,
+        attention_mask=None,
         decoder_step_active=None,
         plan_z=None,
         plan_t=None,
@@ -157,6 +160,44 @@ def test_rng_state_restore_replays_paired_cpu_noise():
     assert torch.equal(global_first, global_second)
 
 
+def test_token_rng_is_independent_from_plan_rng_consumption():
+    base = torch.Generator(device="cpu").manual_seed(123)
+    token_a, plan_a = _evaluation_generators(base, torch.device("cpu"))
+    token_b, _ = _evaluation_generators(base, torch.device("cpu"))
+
+    first_a = torch.randn(16, generator=token_a)
+    torch.randn(4096, generator=plan_a)
+    second_a = torch.randn(16, generator=token_a)
+    first_b = torch.randn(16, generator=token_b)
+    second_b = torch.randn(16, generator=token_b)
+
+    assert torch.equal(first_a, first_b)
+    assert torch.equal(second_a, second_b)
+
+
+def test_sde_token_path_is_paired_with_and_without_plan_latent():
+    base = torch.Generator(device="cpu").manual_seed(19)
+    token_a, _ = _evaluation_generators(base, torch.device("cpu"))
+    token_b, plan_b = _evaluation_generators(base, torch.device("cpu"))
+    z = torch.randn(2, 4, 3, generator=torch.Generator().manual_seed(5))
+    sampling = SimpleNamespace(sampling_method="sde", sde_gamma=1.0)
+
+    token_only = _generate_samples_single_batch(
+        model=SamplingModel(), generator=token_a, z=z.clone(),
+        t_steps=torch.tensor([0.0, 0.5, 1.0]), cond_seq=None,
+        cond_seq_mask=None, config=generation_config(use_sentence_plan=False),
+        sampling_config=sampling, cfg_scale=1.0, self_cond_cfg_scale=1.0,
+    )
+    token_with_plan, _ = _generate_samples_single_batch(
+        model=SamplingModel(), generator=token_b, plan_generator=plan_b,
+        z=z.clone(), t_steps=torch.tensor([0.0, 0.5, 1.0]),
+        cond_seq=None, cond_seq_mask=None, config=generation_config(),
+        sampling_config=sampling, cfg_scale=1.0, self_cond_cfg_scale=1.0,
+    )
+
+    assert torch.equal(token_only, token_with_plan)
+
+
 def test_dlm_decode_requires_plan_z_when_sentence_plan_enabled():
     z = torch.zeros(2, 4, 3)
 
@@ -187,6 +228,31 @@ def test_dlm_decode_passes_plan_z_to_model():
 
     assert torch.equal(decoded, torch.full((2, 4), 3))
     assert model.seen_plan_z is plan_z
+
+
+def test_teacher_forced_stats_are_masked_token_nll():
+    model = DecodeModel()
+    x0 = torch.zeros(2, 3, 4)
+    input_ids = torch.tensor([[3, 0, 1], [3, 3, 2]])
+    loss_mask = torch.tensor([[1.0, 0.0, 0.0], [1.0, 1.0, 0.0]])
+    plan_z = torch.ones(2, 3)
+
+    nll_sum, token_count = _teacher_forced_token_stats(
+        model=model,
+        x0=x0,
+        input_ids=input_ids,
+        attention_mask=torch.ones_like(loss_mask),
+        loss_mask=loss_mask,
+        config=generation_config(),
+        self_cond_cfg_scale=1.0,
+        plan_z=plan_z,
+    )
+
+    expected = torch.nn.functional.cross_entropy(
+        torch.tensor([[0.0, 0.0, 0.0, 1.0, 0.0]]), torch.tensor([3]),
+    )
+    assert token_count.item() == 3
+    assert nll_sum.item() == pytest.approx(3 * expected.item())
 
 
 def test_generate_samples_returns_plan_latent_when_enabled():

@@ -41,6 +41,21 @@ EVAL_KEYS = (
     "shuffled_plan_ppl",
     "token_recon_ppl",
 )
+_DENOISING_PROBE_KEYS = tuple(
+    f"{prefix}token_denoising_l2_t{timestep:02d}"
+    for prefix in ("", "oracle_plan_", "shuffled_plan_")
+    for timestep in (10, 30, 50, 70, 90)
+)
+EVAL_AUX_KEYS = (
+    "mauve",
+    "teacher_forced_token_ppl",
+    "oracle_plan_teacher_forced_token_ppl",
+    "shuffled_plan_teacher_forced_token_ppl",
+    "token_denoising_l2",
+    "oracle_plan_token_denoising_l2",
+    "shuffled_plan_token_denoising_l2",
+    *_DENOISING_PROBE_KEYS,
+)
 EVAL_PRIMARY_BY_MODE = {
     "clean_token_reconstruction": "token_recon_ppl",
     "generation_refine_decode": "g_ppl",
@@ -73,6 +88,9 @@ SCIENTIFIC_CONFIG_KEYS = (
     "sentence_encoder_grad",
     "plan_aux_passes",
     "plan_aux_token_context",
+    "eval_mauve",
+    "eval_mauve_model",
+    "eval_mauve_seed",
 )
 
 # ``summarize_run`` owns only scientific and evaluation projections when it is
@@ -82,6 +100,7 @@ SCIENTIFIC_CONFIG_KEYS = (
 LOCAL_SCIENCE_EVIDENCE_KEYS = frozenset({
     *TRAIN_KEYS,
     *EVAL_KEYS,
+    *EVAL_AUX_KEYS,
     *SCIENTIFIC_CONFIG_KEYS,
     "metric_evidence",
     "evaluation_metrics_by_variant",
@@ -351,7 +370,9 @@ def _record_binding(record: dict[str, Any]) -> dict[str, Any]:
 
 def _metric_candidates(record: dict[str, Any]) -> list[tuple[str, Any]]:
     candidates = [
-        (key, finite_metric_value(record[key])) for key in EVAL_KEYS if key in record
+        (key, finite_metric_value(record[key]))
+        for key in (*EVAL_KEYS, *EVAL_AUX_KEYS)
+        if key in record
     ]
     mode = record.get("mode")
     primary = EVAL_PRIMARY_BY_MODE.get(mode)
@@ -641,7 +662,16 @@ def collect_eval_evidence(
         ):
             primary: dict[str, Any] = {}
             complete = True
-            for metric in EVAL_KEYS:
+            resolved_config = manifest.get("resolved_config")
+            use_sentence_plan = bool(
+                resolved_config.get("use_sentence_plan", False)
+                if isinstance(resolved_config, dict) else False
+            )
+            expected_eval_keys = (
+                EVAL_KEYS if use_sentence_plan
+                else ("g_ppl", "token_recon_ppl")
+            )
+            for metric in expected_eval_keys:
                 expected_mode = next(
                     mode for mode, semantic in EVAL_PRIMARY_BY_MODE.items()
                     if semantic == metric
@@ -663,9 +693,24 @@ def collect_eval_evidence(
                 entropy = checkpoint.get("generation_mean_entropy", [])
                 if entropy:
                     primary["generation_mean_entropy"] = entropy[0]["value"]
-                primary["plan_ppl_gap"] = (
-                    primary["shuffled_plan_ppl"] - primary["oracle_plan_ppl"]
-                )
+                for aux_metric in EVAL_AUX_KEYS:
+                    expected_mode = (
+                        "generation_refine_decode"
+                        if aux_metric == "mauve"
+                        else "clean_token_reconstruction"
+                    )
+                    aux = [
+                        item for item in checkpoint.get(aux_metric, [])
+                        if item.get("mode") == expected_mode
+                    ]
+                    if len({item["variant_id"] for item in aux}) == 1:
+                        values = {json.dumps(item["value"]) for item in aux}
+                        if len(values) == 1:
+                            primary[aux_metric] = aux[0]["value"]
+                if "shuffled_plan_ppl" in primary and "oracle_plan_ppl" in primary:
+                    primary["plan_ppl_gap"] = (
+                        primary["shuffled_plan_ppl"] - primary["oracle_plan_ppl"]
+                    )
                 metrics = primary
                 break
 
@@ -848,7 +893,7 @@ def summarize_run(run_dir: Path) -> dict[str, Any]:
         row["latest_completed_checkpoint"] = checkpoint["path"]
         row["latest_completed_checkpoint_step"] = checkpoint["step"]
     nonfinite = sorted(
-        key for key in (*TRAIN_KEYS, *EVAL_KEYS, "generation_mean_entropy")
+        key for key in (*TRAIN_KEYS, *EVAL_KEYS, *EVAL_AUX_KEYS, "generation_mean_entropy")
         if key in row and row[key] is None
     )
     if nonfinite:

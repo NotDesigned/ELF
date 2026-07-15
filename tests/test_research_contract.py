@@ -33,6 +33,7 @@ def complete_collection(contract: dict, role: str) -> dict:
         "train_loss": 1.0,
         "steps_per_sec": 2.0,
         "g_ppl": 30.0,
+        "mauve": 80.0,
         "generation_mean_entropy": 3.0,
         "generation_nonempty_fraction": 1.0,
         "token_recon_ppl": 20.0,

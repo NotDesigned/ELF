@@ -19,6 +19,31 @@ from elf_experiments.controller import materialize_run, validate_run
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
+def test_stage_a_formal_matrix_retains_all_common_overrides():
+    campaign = load_and_resolve_campaign(
+        REPO_ROOT
+        / "experiments/campaigns/fusion_clean_vs_t5_plan_quality_stage_a_h200_20260715.yml"
+    )
+    required = {
+        "global_batch_size=null",
+        "batch_size=16",
+        "num_samples=256",
+        "reconstruction_eval=true",
+        "reconstruction_num_samples=256",
+        "eval_mauve=true",
+        "eval_mauve_model=gpt2-large",
+        "data_path=/datapool/liangluocheng/elf/eval_data/openwebtext-t5-head256-v1",
+    }
+
+    assert len(campaign["runs"]) == 12
+    for run in campaign["runs"]:
+        overrides = set(run["config_overrides"])
+        assert required <= overrides
+        assert sum(
+            value.startswith("sampling_configs_path=") for value in overrides
+        ) == 1
+
+
 def test_deep_merge_is_recursive_replaces_lists_and_does_not_mutate_inputs():
     base = {"backend": {"kind": "test-backend", "time": "1:00"}, "overrides": ["epochs=1"]}
     override = {"backend": {"time": "2:00"}, "overrides": []}

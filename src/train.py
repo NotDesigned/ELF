@@ -250,6 +250,10 @@ def run_training(config, *, force_cpu: bool = False):
         f"max_length={config.eval_ppl_max_length}, batch={config.eval_ppl_batch_size}"
     )
     log_for_0(
+        f"Eval MAUVE: enabled={config.online_eval and config.eval_mauve}, "
+        f"featurizer={config.eval_mauve_model}, seed={config.eval_mauve_seed}"
+    )
+    log_for_0(
         f"Reconstruction diagnostics: enabled={config.reconstruction_eval}, "
         f"samples={config.reconstruction_num_samples or config.num_samples}"
     )

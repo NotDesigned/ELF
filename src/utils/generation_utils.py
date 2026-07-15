@@ -66,6 +66,7 @@ def _generate_samples_single_batch(
     self_cond_cfg_scale: float,
     initial_plan_z: Optional[torch.Tensor] = None,
     fixed_plan_z: bool = False,
+    plan_generator: Optional[torch.Generator] = None,
 ) -> torch.Tensor:
     """Generate samples for a single batch (PyTorch Euler / SDE rollout)."""
     method = sampling_config.sampling_method
@@ -90,10 +91,12 @@ def _generate_samples_single_batch(
                 raise ValueError(f"initial_plan_z shape {tuple(initial_plan_z.shape)} does not match {plan_shape}")
             plan_z = initial_plan_z.to(device=z.device, dtype=z.dtype)
         else:
-            if z.is_cuda:
-                plan_z = torch.randn(plan_shape, dtype=z.dtype, device=z.device)
-            else:
-                plan_z = torch.randn(plan_shape, generator=generator, dtype=z.dtype, device=z.device)
+            plan_z = torch.randn(
+                plan_shape,
+                generator=plan_generator if plan_generator is not None else generator,
+                dtype=z.dtype,
+                device=z.device,
+            )
             plan_z = plan_z * float(getattr(config, "plan_noise_scale", 1.0))
     elif initial_plan_z is not None:
         raise ValueError("initial_plan_z was provided but use_sentence_plan=False")
@@ -124,6 +127,7 @@ def _generate_samples_single_batch(
                 step_out = _sde_step(
                     z=z, t=t, t_next=t_next, x_pred_prev=x_pred,
                     gamma=sde_gamma, generator=generator, **step_kwargs,
+                    plan_generator=plan_generator,
                     plan_z=plan_z, plan_t=plan_t, plan_t_next=plan_t_next,
                     freeze_plan_z=fixed_plan_z,
                 )

@@ -28,6 +28,8 @@ def plan_assets(config_path: str, overrides: list[str]) -> list[AssetRequirement
         requirements.append(AssetRequirement("model", config.sentence_t5_model_name, "frozen sentence plan"))
     if config.online_eval:
         requirements.append(AssetRequirement("model", config.eval_ppl_model, "generation perplexity evaluation"))
+        if config.eval_mauve:
+            requirements.append(AssetRequirement("model", config.eval_mauve_model, "MAUVE feature evaluation"))
     if config.warm_start:
         requirements.append(AssetRequirement("file", config.warm_start, "warm-start checkpoint"))
     unique: dict[tuple[str, str], AssetRequirement] = {}
