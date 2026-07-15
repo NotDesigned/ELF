@@ -41,7 +41,7 @@ def test_elf_source_bundle_excludes_local_secrets_caches_and_heavy_artifacts(tmp
         "__pycache__/", "*.py[cod]", "*$py.class", ".pytest_cache/",
         ".mypy_cache/", ".ruff_cache/", ".ipynb_checkpoints/", "*.egg-info/",
         "build/", "dist/", "outputs/", "output_dir/", "saved_models/",
-        "checkpoints/", "wandb/", "runs/", "data/", "*.log", "*.tar.gz",
+        "checkpoints/", "wandb/", "runs/", "data/", "papers/", "*.log", "*.tar.gz",
         "*.pt", "*.pth", "*.ckpt", "*.safetensors", ".DS_Store", "Thumbs.db",
     } <= excludes
 

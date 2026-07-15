@@ -42,6 +42,7 @@ runs/
 data/
 
 # Heavy artifacts
+papers/
 *.log
 *.tar.gz
 *.pt

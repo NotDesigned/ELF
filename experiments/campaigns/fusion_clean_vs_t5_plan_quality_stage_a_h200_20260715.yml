@@ -1,5 +1,5 @@
 schema_version: 1
-campaign: fusion-clean-vs-t5-plan-quality-stage-a-h200-20260715-c2
+campaign: fusion-clean-vs-t5-plan-quality-stage-a-h200-20260715-c3
 project: elf
 source_id: auto
 local_root: outputs/experiment_campaigns
@@ -116,7 +116,7 @@ profiles:
 runs:
   - matrix: {seed: [42, 123, 456]}
     template:
-      run_id: elf-a0-quality-stage-a-f32-s{seed}-h200-20260715-r2
+      run_id: elf-a0-quality-stage-a-f32-s{seed}-h200-20260715-r3
       research_role: a0_f32_s{seed}
       profile: wyd-h200
       config: src/configs/training_configs/ablations/owt_elfb/tier0_0_pure_elf_len256.yml
@@ -142,7 +142,7 @@ runs:
           time_warp_gamma: 1.5
   - matrix: {seed: [42, 123, 456]}
     template:
-      run_id: elf-a0-quality-stage-a-f64-s{seed}-h200-20260715-r2
+      run_id: elf-a0-quality-stage-a-f64-s{seed}-h200-20260715-r3
       research_role: a0_f64_s{seed}
       profile: wyd-h200
       config: src/configs/training_configs/ablations/owt_elfb/tier0_0_pure_elf_len256.yml
@@ -168,7 +168,7 @@ runs:
           time_warp_gamma: 1.0
   - matrix: {seed: [42, 123, 456]}
     template:
-      run_id: elf-a1-quality-stage-a-f32-s{seed}-h200-20260715-r2
+      run_id: elf-a1-quality-stage-a-f32-s{seed}-h200-20260715-r3
       research_role: a1_f32_s{seed}
       profile: wyd-h200
       config: src/configs/training_configs/ablations/owt_elfb/tier0_1_sentence_t5_len256.yml
@@ -188,7 +188,7 @@ runs:
         canonical_family_dimensions: *f32_family
   - matrix: {seed: [42, 123, 456]}
     template:
-      run_id: elf-a1-quality-stage-a-f64-s{seed}-h200-20260715-r2
+      run_id: elf-a1-quality-stage-a-f64-s{seed}-h200-20260715-r3
       research_role: a1_f64_s{seed}
       profile: wyd-h200
       config: src/configs/training_configs/ablations/owt_elfb/tier0_1_sentence_t5_len256.yml

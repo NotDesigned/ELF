@@ -1,5 +1,5 @@
 schema_version: 1
-campaign: fusion-clean-vs-t5-plan-quality-stage-a-smoke-h200-20260715-c2
+campaign: fusion-clean-vs-t5-plan-quality-stage-a-smoke-h200-20260715-c3
 project: elf
 source_id: auto
 local_root: outputs/experiment_campaigns
@@ -105,14 +105,14 @@ profiles:
       sif_path: /datapool/liangluocheng/elf/images/0ddac1ccfce3bce3f21f3f55075247564522ff7d73cfc56dde7e41a0202af954.sif
 
 runs:
-  - run_id: elf-a0-quality-stage-a-smoke-f32-s42-h200-20260715-r2
+  - run_id: elf-a0-quality-stage-a-smoke-f32-s42-h200-20260715-r3
     research_role: a0_f32_s42
     profile: wyd-h200
     config: src/configs/training_configs/ablations/owt_elfb/tier0_0_pure_elf_len256.yml
     evaluation:
       checkpoint_path: /datapool/liangluocheng/elf/runs/elf-a0-warm-a0ckpt19017-l256-s42-h100-20260712-r2/checkpoint_19017
       seeds: [42]
-  - run_id: elf-a1-quality-stage-a-smoke-f32-s42-h200-20260715-r2
+  - run_id: elf-a1-quality-stage-a-smoke-f32-s42-h200-20260715-r3
     research_role: a1_f32_s42
     profile: wyd-h200
     config: src/configs/training_configs/ablations/owt_elfb/tier0_1_sentence_t5_len256.yml
