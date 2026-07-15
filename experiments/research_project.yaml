@@ -23,6 +23,11 @@ controller:
       - yaml
     require_clean_git: true
 campaigns:
+  - name: fusion-independent-plan-denoiser-smoke-h200-20260715-c1
+    file: experiments/campaigns/fusion_independent_plan_denoiser_smoke_h200_20260715.yml
+    role_notes:
+      shared: H200 replacement smoke after H100 queue cancellation
+      independent: matched-depth independent prior on the same H200 resource shape
   - name: fusion-independent-plan-denoiser-smoke-h100-20260715-c1
     file: experiments/campaigns/fusion_independent_plan_denoiser_smoke_h100_20260715.yml
     role_notes:
