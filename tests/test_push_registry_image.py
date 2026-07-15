@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import json
 import os
 import shutil
 import subprocess
@@ -18,8 +20,32 @@ def write_executable(path: Path, body: str) -> None:
     path.chmod(0o755)
 
 
+def registry_token(actions: list[str]) -> str:
+    def encode(payload: dict[str, object]) -> str:
+        raw = json.dumps(payload, separators=(",", ":")).encode()
+        return base64.urlsafe_b64encode(raw).decode().rstrip("=")
+
+    return ".".join(
+        (
+            encode({"alg": "none"}),
+            encode(
+                {
+                    "access": [
+                        {"type": "repository", "name": "team/elf", "actions": actions}
+                    ]
+                }
+            ),
+            "signature",
+        )
+    )
+
+
 def fake_environment(
-    tmp_path: Path, docker_push: str, *, publisher: str = "crane"
+    tmp_path: Path,
+    docker_push: str,
+    *,
+    publisher: str = "crane",
+    registry_actions: list[str] | None = None,
 ) -> dict[str, str]:
     safe_sco = shutil.which("experiment-safe-sco")
     if safe_sco is None:
@@ -36,8 +62,10 @@ if [[ "$1" == push ]]; then {docker_push}; fi
 if [[ "$1" == save ]]; then : > "$3"; exit 0; fi
 exit 2
 """
+    token = registry_token(registry_actions or ["pull"])
     crane = f"""
 printf 'crane %s\\n' "$*" >> {marker!s}
+if [[ "$1" == auth && "$2" == token ]]; then printf '{token}\\n'; exit 0; fi
 if [[ "$1" == push ]]; then exit 0; fi
 if [[ "$1" == digest ]]; then printf '{DIGEST}\\n'; exit 0; fi
 exit 2
@@ -127,6 +155,22 @@ def test_auth_failure_is_redacted_and_never_falls_back(tmp_path: Path) -> None:
     assert "<redacted>" in result.stderr
     calls = (tmp_path / "calls").read_text(encoding="utf-8")
     assert "crane push" not in calls
+
+
+def test_docker_denial_with_proven_push_scope_uses_native_fallback(tmp_path: Path) -> None:
+    env = fake_environment(
+        tmp_path,
+        "printf 'denied: client path rejected request\\n' >&2; exit 1",
+        registry_actions=["pull", "push"],
+    )
+    result = run_script(env, IMAGE)
+    assert result.returncode == 0
+    assert "registry token grants push" in result.stderr
+    assert result.stdout.strip() == f"registry.example.test/team/elf@{DIGEST}"
+    calls = (tmp_path / "calls").read_text(encoding="utf-8")
+    assert "crane auth token --push registry.example.test/team/elf" in calls
+    assert "docker save -o" in calls
+    assert "crane push" in calls
 
 
 def test_transport_failure_uses_archive_fallback_and_cleans_up(tmp_path: Path) -> None:

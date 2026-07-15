@@ -32,6 +32,7 @@ SKOPEO_BIN=${EXPERIMENTCTL_SKOPEO_BIN:-skopeo}
 SAFE_SCO_BIN=${EXPERIMENTCTL_SAFE_SCO_BIN:-experiment-safe-sco}
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 AUTH_CHECK="$SCRIPT_DIR/check_docker_registry_auth.py"
+PUSH_SCOPE_CHECK="$SCRIPT_DIR/check_registry_push_scope.py"
 WORK_DIR=""
 
 cleanup() {
@@ -61,6 +62,7 @@ esac
 command -v "$DOCKER_BIN" >/dev/null || die "docker is required"
 command -v timeout >/dev/null || die "timeout is required"
 [[ -f "$AUTH_CHECK" ]] || die "missing Docker credential checker: $AUTH_CHECK"
+[[ -f "$PUSH_SCOPE_CHECK" ]] || die "missing registry push-scope checker: $PUSH_SCOPE_CHECK"
 command -v "$SAFE_SCO_BIN" >/dev/null \
   || die "ml-experiment-control Rust sanitizer is not installed"
 "$DOCKER_BIN" info >/dev/null 2>&1 || die "Docker daemon is unavailable"
@@ -117,8 +119,19 @@ if [[ "$PUSH_RC" -ne 0 ]]; then
   printf 'docker push failed (class=%s, exit=%s)\n' "$FAILURE_CLASS" "$PUSH_RC" >&2
   print_redacted_tail "$PUSH_LOG"
   if [[ "$FAILURE_CLASS" == auth ]]; then
-    printf 'authentication/authorization failures are not eligible for transport fallback\n' >&2
-    exit 30
+    # Docker Desktop can report a bare `denied:` before uploading any layer even
+    # when the registry-issued JWT explicitly grants push. Only that positive,
+    # exact-repository proof is sufficient to treat the failure as a client-path
+    # problem and continue through the native archive publisher.
+    if [[ "$PUBLISHER" == crane ]] \
+      && EXPERIMENTCTL_CRANE_BIN="$PUBLISHER_BIN" \
+        python3 "$PUSH_SCOPE_CHECK" "${IMAGE%:*}" >/dev/null 2>&1; then
+      printf 'registry token grants push; using native fallback for Docker client denial\n' >&2
+      FAILURE_CLASS=transport
+    else
+      printf 'authentication/authorization failures are not eligible for transport fallback\n' >&2
+      exit 30
+    fi
   fi
   if [[ "$FAILURE_CLASS" != transport ]]; then
     printf 'unclassified failures require diagnosis before retrying with another client\n' >&2

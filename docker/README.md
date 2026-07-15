@@ -86,10 +86,13 @@ tools/push_registry_image.sh --dry-run "$IMMUTABLE_IMAGE"
 tools/push_registry_image.sh "$IMMUTABLE_IMAGE"
 ```
 
-The helper tries Docker first, stops on authentication/authorization errors,
-and only uses a temporary `docker save` plus native `crane`/`skopeo` fallback
-for classified transport failures such as TLS EOF or HTTP 502. It removes the
-archive on every exit and succeeds only after verifying the remote digest.
+The helper tries Docker first and normally stops on authentication/authorization
+errors. A Docker client denial may use the temporary `docker save` plus native
+`crane` fallback only when an inspectable registry JWT explicitly grants push
+for the exact repository; otherwise it remains fail-closed. Classified transport
+failures such as TLS EOF or HTTP 502 may also use native `crane`/`skopeo`. The
+helper removes the archive on every exit and succeeds only after verifying the
+remote digest.
 
 The dry run is a local registry preflight: it requires a reachable Docker
 daemon, the exact local immutable image, a `crane` or `skopeo` verifier, and a

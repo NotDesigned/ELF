@@ -343,7 +343,9 @@ particular user's Python module path or `~/.codex` directory. Publish immutable
 images with `tools/push_registry_image.sh`; it distinguishes authorization
 from transport failures, bounds every operation, uses archive plus native
 crane/skopeo only as a transport fallback, verifies the remote digest, and
-removes temporary archives on exit.
+removes temporary archives on exit. If Docker reports an authorization-shaped
+failure, native fallback remains fail-closed unless an inspectable registry JWT
+explicitly grants `push` for the exact repository.
 
 ### Campaign schema
 
