@@ -38,6 +38,7 @@ def make_run(tmp_path: Path) -> Path:
             "plan_aux_passes": 1,
             "plan_aux_token_context": "denoiser_z",
         },
+        "evaluation": {"seeds": [123]},
     }
     (run_dir / "manifest.yaml").write_text(yaml.safe_dump(manifest), encoding="utf-8")
     (run_dir / "status.json").write_text(
@@ -78,6 +79,9 @@ def test_discovers_and_summarizes_run(tmp_path):
     row = summarize_run(run_dir)
     assert row["run_id"] == "run-a"
     assert row["state"] == "RUNNING"
+    assert row["seed"] == 42
+    assert row["evaluation_seed"] == 123
+    assert row["evaluation_seeds"] == [123]
     assert row["step"] == 200
     assert row["train_loss"] == 1.5
     assert row["g_ppl"] == 31.0

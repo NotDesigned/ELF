@@ -102,6 +102,8 @@ LOCAL_SCIENCE_EVIDENCE_KEYS = frozenset({
     *EVAL_KEYS,
     *EVAL_AUX_KEYS,
     *SCIENTIFIC_CONFIG_KEYS,
+    "evaluation_seed",
+    "evaluation_seeds",
     "metric_evidence",
     "evaluation_metrics_by_variant",
     "evaluation_variants",
@@ -867,6 +869,20 @@ def summarize_run(run_dir: Path) -> dict[str, Any]:
     }
     for key in SCIENTIFIC_CONFIG_KEYS:
         row[key] = config.get(key)
+    evaluation = manifest.get("evaluation")
+    evaluation = evaluation if isinstance(evaluation, dict) else {}
+    evaluation_seeds = evaluation.get("seeds")
+    if (
+        isinstance(evaluation_seeds, list)
+        and evaluation_seeds
+        and all(
+            isinstance(seed, int) and not isinstance(seed, bool)
+            for seed in evaluation_seeds
+        )
+    ):
+        row["evaluation_seeds"] = list(evaluation_seeds)
+        if len(evaluation_seeds) == 1:
+            row["evaluation_seed"] = evaluation_seeds[0]
 
     train_path = run_dir / "train_metrics.jsonl"
     if train_path.is_file():
