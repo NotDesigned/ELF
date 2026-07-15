@@ -9,6 +9,40 @@ import torch.nn as nn
 from utils.logging_utils import log_for_0
 
 
+def prepare_t5_attention_mask(
+    attention_mask: Optional[torch.Tensor],
+    *,
+    expand_3d: bool,
+    model_dtype: torch.dtype,
+) -> Optional[torch.Tensor]:
+    """Prepare keep masks for the old and new Transformers T5 APIs.
+
+    Transformers before 4.45 accepts a 3D keep mask and converts it to an
+    additive mask internally. Newer releases treat a supplied 4D mask as
+    already prepared, so it must contain zero for visible pairs and a large
+    negative value for blocked pairs; expanding a boolean keep mask directly
+    would silently turn masking into a harmless 0/1 attention bias.
+    """
+    if attention_mask is None:
+        return None
+    keep_mask = (
+        attention_mask != 0
+        if attention_mask.dtype.is_floating_point
+        else attention_mask.bool()
+    )
+    if keep_mask.ndim == 3 and expand_3d:
+        if not model_dtype.is_floating_point:
+            raise TypeError(f"T5 model dtype must be floating point, got {model_dtype}")
+        keep_mask = keep_mask[:, None, :, :]
+        zero = torch.zeros((), dtype=model_dtype, device=keep_mask.device)
+        blocked = torch.full(
+            (), torch.finfo(model_dtype).min,
+            dtype=model_dtype, device=keep_mask.device,
+        )
+        return torch.where(keep_mask, zero, blocked)
+    return keep_mask
+
+
 class T5EncoderConfig:
     """Configuration class for T5Encoder."""
 
@@ -75,10 +109,11 @@ class T5Encoder(nn.Module):
         was_training = self.model.training
         if deterministic:
             self.model.eval()
-        if attention_mask is not None and attention_mask.dtype.is_floating_point:
-            attention_mask = attention_mask != 0
-        if attention_mask is not None and attention_mask.ndim == 3 and self._expand_3d_attention_mask:
-            attention_mask = attention_mask[:, None, :, :]
+        attention_mask = prepare_t5_attention_mask(
+            attention_mask,
+            expand_3d=self._expand_3d_attention_mask,
+            model_dtype=next(self.model.parameters()).dtype,
+        )
         try:
             out = self.model(input_ids=input_ids, attention_mask=attention_mask)
         finally:
