@@ -73,6 +73,7 @@ _CAMPAIGN_SECRET_KEY_RE = re.compile(
 )
 _URL_USERINFO_RE = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://[^/@\s]+@")
 _SHA256_DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+_CAMPAIGN_REVISION_RE = re.compile(r"^campaign\.[0-9a-f]{64}$")
 
 
 def _reject_embedded_credentials(value: Any, *, path: str) -> None:
@@ -795,8 +796,16 @@ def source_identity(campaign: dict[str, Any]) -> str:
     return result.stdout.strip()
 
 
-def provenance_identity(campaign_path: Path) -> dict[str, str]:
-    """Keep Git and campaign provenance separate from runtime artifact identity."""
+def provenance_identity(
+    campaign_path: Path, *, campaign_id: str | None = None,
+) -> dict[str, str]:
+    """Keep Git and authored Campaign provenance separate from runtime identity.
+
+    A daemon-owned execution copy may differ byte-for-byte solely because its
+    operational ``local_root`` was rebound.  In that path the daemon supplies
+    the exact catalog revision explicitly; direct CLI use continues to hash the
+    supplied Campaign file.
+    """
     try:
         commit = run_command(["git", "rev-parse", "HEAD"], cwd=REPO_ROOT).stdout.strip()
     except subprocess.CalledProcessError as error:
@@ -805,10 +814,18 @@ def provenance_identity(campaign_path: Path) -> dict[str, str]:
             raise RuntimeError(
                 "Git metadata is unavailable; build the image with GIT_COMMIT"
             ) from error
-    campaign_id = run_command(
-        ["bash", "scripts/source_identity.sh", "--campaign", str(campaign_path)], cwd=REPO_ROOT
-    ).stdout.strip()
-    return {"git_commit": commit, "campaign_id": campaign_id}
+    resolved_campaign_id = campaign_id
+    if resolved_campaign_id is not None:
+        if _CAMPAIGN_REVISION_RE.fullmatch(resolved_campaign_id) is None:
+            raise ValueError(
+                "--campaign-id must be an immutable campaign.<sha256> revision"
+            )
+    else:
+        resolved_campaign_id = run_command(
+            ["bash", "scripts/source_identity.sh", "--campaign", str(campaign_path)],
+            cwd=REPO_ROOT,
+        ).stdout.strip()
+    return {"git_commit": commit, "campaign_id": resolved_campaign_id}
 
 
 def selected_runs(campaign: dict[str, Any], names: Iterable[str]) -> list[dict[str, Any]]:
@@ -1784,6 +1801,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--run", action="append", default=[], help="limit to this run ID; repeatable")
     parser.add_argument("--attempt-id", default="attempt-001")
+    parser.add_argument(
+        "--campaign-id",
+        help="daemon-reviewed authored Campaign revision for an operational execution copy",
+    )
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument(
         "--local-root", type=Path,
@@ -1836,7 +1857,7 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps([output], ensure_ascii=False, indent=2, sort_keys=True))
         return 0
     campaign = load_campaign(args.campaign)
-    campaign.update(provenance_identity(args.campaign))
+    campaign.update(provenance_identity(args.campaign, campaign_id=args.campaign_id))
     default_identity = source_identity(campaign)
     selected = selected_runs(campaign, args.run)
     runs_with_identity = []

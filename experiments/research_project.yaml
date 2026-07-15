@@ -10,6 +10,7 @@ controller:
   capabilities:
     submit_outbox: true
     run_identity_v2: true
+    authored_campaign_revision: true
     cancel_outbox: true
     evaluate: false
     refresh_evidence_local: true

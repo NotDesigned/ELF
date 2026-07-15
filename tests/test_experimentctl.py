@@ -1196,6 +1196,30 @@ def test_controller_uses_baked_identity_without_git(tmp_path, monkeypatch):
     assert result == {"git_commit": "baked-commit", "campaign_id": "campaign.baked"}
 
 
+def test_provenance_identity_preserves_daemon_reviewed_authored_revision(
+    tmp_path, monkeypatch,
+):
+    reviewed_revision = "campaign." + "a" * 64
+
+    def fake_run(command, *, cwd=None, **_kwargs):
+        assert command[:2] == ["git", "rev-parse"]
+        return experimentctl.CommandResult(tuple(command), 0, "commit-reviewed\n", "")
+
+    monkeypatch.setattr(experimentctl, "run_command", fake_run)
+    result = experimentctl.provenance_identity(
+        tmp_path / "campaign.execution.yml", campaign_id=reviewed_revision,
+    )
+
+    assert result == {
+        "git_commit": "commit-reviewed",
+        "campaign_id": reviewed_revision,
+    }
+    with pytest.raises(ValueError, match="campaign.<sha256>"):
+        experimentctl.provenance_identity(
+            tmp_path / "campaign.execution.yml", campaign_id="campaign.mutable",
+        )
+
+
 def test_parses_structured_training_metric_from_sensecore_log():
     record = parse_training_metric_line(
         "INFO - engine - Step 120: loss=3.1, l2=1.2, ce=9.8, plan=0.0, "
