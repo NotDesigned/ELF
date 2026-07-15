@@ -33,13 +33,13 @@ campaigns:
     role_notes:
       shared: frozen-T5 plan predictor in the shared ELF trunk
       independent: frozen-T5 plan predictor in an independent 12-block plan-only ELF stack
-  - name: fusion-aux-ratio-eval-f32-h200-20260715-c2
+  - name: fusion-aux-ratio-eval-f32-h200-20260715-c4
     file: experiments/campaigns/fusion_aux_ratio_eval_f32_h200_20260715.yml
     role_notes:
       aux0: completed H100 aux0 checkpoint, paired oracle/shuffled evaluation
       aux1: completed H100 aux1 checkpoint, paired oracle/shuffled evaluation
       aux2: completed H100 aux2 checkpoint, paired oracle/shuffled evaluation
-  - name: fusion-aux-ratio-eval-f64-h200-20260715-c2
+  - name: fusion-aux-ratio-eval-f64-h200-20260715-c4
     file: experiments/campaigns/fusion_aux_ratio_eval_f64_h200_20260715.yml
     role_notes:
       aux0: completed H100 aux0 checkpoint, paired oracle/shuffled evaluation

@@ -19,6 +19,17 @@ from elf_experiments.controller import materialize_run, validate_run
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
+def test_research_project_campaign_catalog_matches_campaign_files():
+    project = yaml.safe_load(
+        (REPO_ROOT / "experiments/research_project.yaml").read_text(encoding="utf-8")
+    )
+
+    for entry in project["campaigns"]:
+        campaign_path = REPO_ROOT / entry["file"]
+        campaign = yaml.safe_load(campaign_path.read_text(encoding="utf-8"))
+        assert entry["name"] == campaign["campaign"], campaign_path
+
+
 def test_stage_a_formal_matrix_retains_all_common_overrides():
     campaign = load_and_resolve_campaign(
         REPO_ROOT
