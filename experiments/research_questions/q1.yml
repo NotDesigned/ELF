@@ -14,6 +14,15 @@ notes:
     可关注 learned-plan 的 train_plan_emb_batch_var、oracle/shuffled plan PPL 差异，
     以及相对 a0 的 train_ce_loss、g_ppl 和 token_recon_ppl；这些是分析线索，
     不是 ResearchQuestion 的强制 schema gate。
+  - >-
+    2026-07-15 的配对 H200 确认性评测（32/64 steps，各 seed=42/123/456）
+    否定了“增加 detached plan denoiser passes 可恢复有用 plan conditioning 且不损害
+    生成”的具体假设。相对 aux0，aux1 的配对 gPPL 平均恶化 91.20（32 steps）/
+    83.93（64 steps），aux2 恶化 147.53/121.25；aux2 的非空生成比例也在所有
+    seed 上下降。oracle-shuffled 配对 gap 对 aux1/aux2 没有稳定正效应，而
+    token_recon_ppl 基本不变（约 20.017-20.018），把问题定位到生成/plan 动力学，
+    而不是 token autoencoding。Q1 仍保持 OPEN，但后续不应继续沿增加
+    plan_aux_passes 的方向扩展。
 links:
   campaigns:
     - fusion-len256-gate-h100-20260711
@@ -22,7 +31,7 @@ links:
     - fusion-aux-ratio-ga2-h100-20260714-c1
     - fusion-aux-ratio-ga2-h200-20260712-c1
     - fusion-aux-ratio-ga2-h200-20260714-c2
-    - fusion-aux-ratio-eval-f32-h200-20260715-c2
-    - fusion-aux-ratio-eval-f64-h200-20260715-c2
+    - fusion-aux-ratio-eval-f32-h200-20260715-c4
+    - fusion-aux-ratio-eval-f64-h200-20260715-c4
   runs: []
   evidence: []
