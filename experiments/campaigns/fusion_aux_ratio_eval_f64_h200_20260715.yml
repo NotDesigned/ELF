@@ -1,5 +1,5 @@
 schema_version: 1
-campaign: fusion-aux-ratio-eval-f64-h200-20260715-c2
+campaign: fusion-aux-ratio-eval-f64-h200-20260715-c3
 project: elf
 source_id: auto
 local_root: outputs/experiment_campaigns
@@ -42,6 +42,8 @@ research_contract:
       - source_id
       - image_id
       - resolved_config.max_length
+      - resolved_config.data_path
+      - env.ELF_EVAL_DATA_ID
       - resolved_config.batch_size
       - resolved_config.num_samples
       - resolved_config.reconstruction_num_samples
@@ -57,6 +59,7 @@ defaults:
     - num_samples=256
     - reconstruction_eval=true
     - reconstruction_num_samples=256
+    - data_path=/datapool/liangluocheng/elf/eval_data/openwebtext-t5-head256-v1
     - sampling_configs_path=src/configs/sampling_configs/uncond_sampling_steps64.yml
   evaluation:
     canonical_family_dimensions:
@@ -69,6 +72,7 @@ defaults:
   image_id: sha256:de751282d5d72932ab64a7a22fd0324373cf35c00f0e27e38fb80bf1834b168c
   resources: {gpus: 1, nodes: 1, cpus: 8}
   env:
+    ELF_EVAL_DATA_ID: sha256:ecff221a9bcea13f64ddce845e1b4918c6fc618608de3568413503ea7888bdf5
     NUM_WORKERS: "4"
     REQUIRE_OFFLINE_CACHE: "1"
     USE_WANDB: "false"
@@ -111,7 +115,7 @@ runs:
           checkpoint: /datapool/liangluocheng/elf/runs/elf-aux2-mb64-ga2-h100-20260714-r1/checkpoint_38035
       seed: [42, 123, 456]
     template:
-      run_id: elf-{arm.name}-eval-f64-s{seed}-h200-20260715-r2
+      run_id: elf-{arm.name}-eval-f64-s{seed}-h200-20260715-r3
       research_role: '{arm.name}_s{seed}'
       profile: wyd-h200
       config: '{arm.config}'

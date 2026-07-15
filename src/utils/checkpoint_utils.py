@@ -305,6 +305,10 @@ def load_checkpoint(checkpoint_path: str, state, load_optimizer: bool = True) ->
     """Load an ELF checkpoint.
 
     Uses an existing local path first; otherwise tries HF and then local fallback.
+    Evaluation loads (``load_optimizer=False``) intentionally do not restore
+    process RNG state: evaluation seeds are applied after loading, and a
+    checkpoint produced with more CUDA ranks cannot be restored verbatim into
+    a smaller evaluation allocation.
     """
     log_for_0(f"Loading ELF checkpoint from {checkpoint_path}...")
     ckpt, loaded_from = _load_checkpoint_payload(
@@ -335,7 +339,7 @@ def load_checkpoint(checkpoint_path: str, state, load_optimizer: bool = True) ->
         raise ValueError("resume checkpoint was not saved at an optimizer boundary")
     state.epoch = float(ckpt["epoch"])
     rng_states = ckpt.get("rng_states")
-    if rng_states:
+    if load_optimizer and rng_states:
         rank = dist.get_rank() if dist.is_available() and dist.is_initialized() else 0
         rng = rng_states[rank] if rank < len(rng_states) else rng_states[0]
         random.setstate(rng["python"])
@@ -352,7 +356,7 @@ def load_checkpoint(checkpoint_path: str, state, load_optimizer: bool = True) ->
             torch.cuda.set_rng_state_all(rng["torch_cuda"])
         if rng.get("dropout") is not None and state.dropout_generator is not None:
             state.dropout_generator.set_state(rng["dropout"])
-    elif ckpt.get("dropout_rng") is not None and state.dropout_generator is not None:
+    elif load_optimizer and ckpt.get("dropout_rng") is not None and state.dropout_generator is not None:
         # Legacy warm-start/resume compatibility for explicitly migrated files.
         state.dropout_generator.set_state(ckpt["dropout_rng"])
 

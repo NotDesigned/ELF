@@ -149,3 +149,40 @@ def test_checkpoint_restores_process_rng_state(tmp_path, monkeypatch):
     assert actual[1] == expected[1]
     assert torch.equal(actual[2], expected[2])
     assert torch.equal(actual[3], expected[3])
+
+
+def test_eval_checkpoint_load_does_not_restore_training_rng_state(tmp_path, monkeypatch):
+    monkeypatch.setenv("RANK", "0")
+    state = make_state(seed=11)
+    random.seed(13)
+    np.random.seed(17)
+    torch.manual_seed(19)
+    save_checkpoint(state, str(tmp_path), step=8)
+
+    random.seed(99)
+    np.random.seed(99)
+    torch.manual_seed(99)
+    state.dropout_generator.manual_seed(99)
+    expected = (
+        random.random(),
+        np.random.rand(),
+        torch.rand(1),
+        torch.rand(1, generator=state.dropout_generator),
+    )
+
+    random.seed(99)
+    np.random.seed(99)
+    torch.manual_seed(99)
+    state.dropout_generator.manual_seed(99)
+    load_checkpoint(str(tmp_path), state, load_optimizer=False)
+    actual = (
+        random.random(),
+        np.random.rand(),
+        torch.rand(1),
+        torch.rand(1, generator=state.dropout_generator),
+    )
+
+    assert actual[0] == expected[0]
+    assert actual[1] == expected[1]
+    assert torch.equal(actual[2], expected[2])
+    assert torch.equal(actual[3], expected[3])
