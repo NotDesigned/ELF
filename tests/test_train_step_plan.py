@@ -5,6 +5,8 @@ import pytest
 import torch
 import torch.nn as nn
 
+import modules.model as model_module
+from configs.config import Config
 from modules.model import ELF
 from train_step import _decode_continuation_texts, train_step
 from utils.train_utils import TrainState
@@ -17,6 +19,29 @@ class TinyEncoder(nn.Module):
 
     def forward(self, input_ids, attention_mask=None, deterministic=True):
         return self.emb(input_ids)
+
+
+def test_shared_train_eval_model_factory_preserves_attention_topology(monkeypatch):
+    captured = {}
+    sentinel = object()
+
+    def fake_factory(**kwargs):
+        captured.update(kwargs)
+        return sentinel
+
+    monkeypatch.setitem(model_module.ELF_models, "ELF-B", fake_factory)
+    config = Config()
+    config.use_sentence_plan = True
+    config.plan_attention_topology = "hierarchical_prefix"
+
+    built = model_module.build_elf_from_config(
+        config, text_encoder_dim=512, vocab_size=32100,
+    )
+
+    assert built is sentinel
+    assert captured["plan_attention_topology"] == "hierarchical_prefix"
+    assert captured["text_encoder_dim"] == 512
+    assert captured["vocab_size"] == 32100
 
 
 class ToyTokenizer:

@@ -656,3 +656,33 @@ def ELF_L(**kwargs): return ELF(depth=32, hidden_size=1280, num_heads=16, **kwar
 ELF_models = {
     'ELF-B': ELF_B, 'ELF-M': ELF_M, 'ELF-L': ELF_L,
 }
+
+
+def build_elf_from_config(config, *, text_encoder_dim: int, vocab_size: int) -> ELF:
+    """Build one ELF model from the shared train/eval configuration surface.
+
+    Keeping this mapping here prevents standalone evaluation from silently
+    dropping a newly-added architecture field that training already honors.
+    """
+    return ELF_models[config.model](
+        text_encoder_dim=text_encoder_dim,
+        max_length=config.max_length,
+        attn_drop=config.attn_dropout,
+        proj_drop=config.proj_dropout,
+        num_time_tokens=config.num_time_tokens,
+        num_self_cond_cfg_tokens=config.num_self_cond_cfg_tokens,
+        vocab_size=vocab_size,
+        num_model_mode_tokens=config.num_model_mode_tokens,
+        bottleneck_dim=config.bottleneck_dim,
+        gradient_checkpointing=bool(getattr(config, "gradient_checkpointing", True)),
+        use_sentence_plan=bool(getattr(config, "use_sentence_plan", False)),
+        sentence_encoder_type=getattr(config, "sentence_encoder_type", "sentence_t5"),
+        sentence_emb_dim=int(getattr(config, "sentence_emb_dim", 768)),
+        num_plan_tokens=int(getattr(config, "num_plan_tokens", 8)),
+        plan_adapter_type=getattr(config, "plan_adapter_type", "slot_mlp"),
+        plan_slot_dit_depth=int(getattr(config, "plan_slot_dit_depth", 2)),
+        plan_denoiser_type=getattr(config, "plan_denoiser_type", "shared"),
+        plan_denoiser_depth=int(getattr(config, "plan_denoiser_depth", 12)),
+        plan_attention_topology=getattr(config, "plan_attention_topology", "joint"),
+        plan_learned_encoder_norm=bool(getattr(config, "plan_learned_encoder_norm", True)),
+    )

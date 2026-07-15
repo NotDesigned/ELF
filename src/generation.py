@@ -370,15 +370,20 @@ def _token_denoising_l2_stats(
     config,
     self_cond_cfg_scale: float,
     plan_z: Optional[torch.Tensor] = None,
+    cond_seq_mask: Optional[torch.Tensor] = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Return masked token-field velocity MSE sum/count at one fixed timestep."""
     batch_size = x0.shape[0]
     t_batch = torch.full(
         (batch_size,), float(t_value), dtype=x0.dtype, device=x0.device,
     )
-    z = add_noise(x0, noise, t_batch, config)
-    cond_seq = torch.zeros_like(x0)
-    cond_mask = torch.zeros_like(loss_mask)
+    cond_mask = (
+        torch.zeros_like(loss_mask) if cond_seq_mask is None else cond_seq_mask
+    )
+    cond_seq = x0 if cond_seq_mask is not None else torch.zeros_like(x0)
+    z = add_noise(
+        x0, noise, t_batch, config, cond_seq_mask=cond_mask.unsqueeze(-1),
+    )
     plan_t = torch.ones_like(t_batch) if plan_z is not None else None
     v_pred, _, _, _ = _forward_sample(
         model=model,
@@ -427,6 +432,15 @@ def run_generation(
     sentence_encoder=None,
 ):
     """Run generation, and optionally plan/token reconstruction diagnostics."""
+    if bool(getattr(config, "split_input_as_prefix", False)) and eval_dataset is None:
+        if train_dataset is None:
+            raise ValueError(
+                "split_input_as_prefix evaluation requires data_path or eval_data_path"
+            )
+        # Input-only corpora become conditional evaluation datasets through
+        # the deterministic collator split below.
+        eval_dataset = train_dataset
+
     for sc_idx, sc in enumerate(config.sampling_configs):
         if len(config.sampling_configs) > 1:
             log_for_0(f"\n--- Sampling config {sc_idx + 1}/{len(config.sampling_configs)} ---")
@@ -793,7 +807,9 @@ def test_generation_cond(
         local_dataset, batch_size=batch_size,
         shuffle=False, num_workers=0, drop_last=False,
         max_seq_length=config.max_length, pad_token_id=pad_token_id,
-        max_input_seq_length=config.max_input_length, distributed=False,
+        max_input_seq_length=config.max_input_length,
+        split_input_as_prefix=bool(getattr(config, "split_input_as_prefix", False)),
+        distributed=False,
     )
     log_for_0(
         f"Conditional eval samples: total={total_samples}, "
@@ -801,7 +817,14 @@ def test_generation_cond(
     )
 
     wandb_tables = {}
-    mauve_evaluator = _build_mauve_evaluator(config)
+    ppl_metrics = None
+    if config.online_eval:
+        ppl_metrics = PPLMetrics(
+            gen_ppl_eval_model_name_or_path=config.eval_ppl_model,
+            eval_ppl_batch_size=config.eval_ppl_batch_size,
+            eval_context_size=config.eval_ppl_max_length,
+        )
+    mauve_evaluator = _build_mauve_evaluator(config, ppl_metrics)
     cfg_list = sampling_config.cfgs
     steps_list = sampling_config.num_sampling_steps
     self_cond_cfg_scales_list = sampling_config.self_cond_cfg_scales
@@ -827,6 +850,7 @@ def test_generation_cond(
             bsz = batch["input_ids"].shape[0]
             input_ids = torch.from_numpy(np.array(batch["input_ids"])).to(device).long()
             encoder_attention_mask = torch.from_numpy(np.array(batch["encoder_attention_mask"])).to(device).float()
+            attention_mask = torch.from_numpy(np.array(batch["attention_mask"])).to(device).float()
             cond_seq_mask_arr = torch.from_numpy(np.array(batch["cond_seq_mask"])).to(device).float()
 
             t_steps = get_sampling_steps(
@@ -870,13 +894,24 @@ def test_generation_cond(
                 z=latent, model=model, t_final_val=t_final_val,
                 config=config, self_cond_cfg_scale=self_cond_cfg_scale,
                 plan_z=plan_latent,
+                cond_seq_mask=cond_seq_mask_arr,
             )
-            predicted_ids = shift_left(predicted_ids, cond_len_per_sample, 0)[:, :gen_length]
+            predicted_ids = shift_left(
+                predicted_ids, cond_len_per_sample, pad_token_id,
+            )[:, :gen_length]
             predicted_ids = mask_after_eos(predicted_ids, eos_token_id=eos_token_id, pad_token_id=pad_token_id)
             decode_time += time.time() - dec_start
 
-            original_texts = [batch["target"][i] for i in range(bsz)]
-            context_texts = [batch["input"][i] for i in range(bsz)]
+            if "target" in batch and "input" in batch:
+                original_texts = [batch["target"][i] for i in range(bsz)]
+                context_texts = [batch["input"][i] for i in range(bsz)]
+            else:
+                original_texts = _decode_selected_texts(
+                    input_ids, attention_mask * (1 - cond_seq_mask_arr), tokenizer,
+                )
+                context_texts = _decode_selected_texts(
+                    input_ids, cond_seq_mask_arr, tokenizer,
+                )
             sample_ids = [int(i) for i in batch["index"]]
 
             for i in range(bsz):
@@ -917,7 +952,12 @@ def test_generation_cond(
             out_path = os.path.join(config.output_dir, name, f"all_generated_{epoch_val}_{step_val}.jsonl")
             with open(out_path, "w", encoding="utf-8") as f:
                 for tid, orig, gen, ctx in all_generated:
-                    f.write(json.dumps({"id": tid, "generated": gen}, ensure_ascii=False) + "\n")
+                    f.write(json.dumps({
+                        "id": tid,
+                        "context": ctx,
+                        "reference": orig,
+                        "generated": gen,
+                    }, ensure_ascii=False) + "\n")
             log_for_0(f"Saved {len(all_generated)} generated texts to {out_path}")
             upload_output_dir_to_hf(config.output_dir, config.hf_repo_id, reason="generation")
 
@@ -928,9 +968,40 @@ def test_generation_cond(
                 bleu_score = compute_bleu(hypotheses, references)
                 rouge_scores = compute_rouge(hypotheses, references)
                 cond_eval_results = {"bleu": bleu_score, **rouge_scores}
+                nonempty_hypotheses = [
+                    text for text in hypotheses if isinstance(text, str) and text.strip()
+                ]
+                mauve_generated, mauve_references = _paired_nonempty_texts(
+                    hypotheses, references,
+                )
+                ppl_results = None
+                if nonempty_hypotheses:
+                    ppl_metrics.reset()
+                    ppl_results = ppl_metrics.record_generative_perplexity(
+                        text_samples=nonempty_hypotheses,
+                        max_length=config.eval_ppl_max_length,
+                        retokenize=True,
+                        return_features=(
+                            bool(config.eval_mauve)
+                            and nonempty_hypotheses == mauve_generated
+                            and len(mauve_generated) >= 2
+                        ),
+                    )
+                    cond_eval_results.update({
+                        "ppl": ppl_results["ppl"],
+                        "g_ppl": ppl_results["ppl"],
+                        "mean_entropy": ppl_results["mean_entropy"],
+                    })
                 if mauve_evaluator is not None:
                     mauve_results = _compute_mauve_metrics(
-                        mauve_evaluator, hypotheses, references, config,
+                        mauve_evaluator, mauve_generated, mauve_references, config,
+                        generated_features=(
+                            ppl_results.get("features")
+                            if ppl_results is not None
+                            and mauve_evaluator is ppl_metrics
+                            and nonempty_hypotheses == mauve_generated
+                            else None
+                        ),
                     )
                     if mauve_results is not None:
                         cond_eval_results.update(mauve_results)
@@ -940,6 +1011,11 @@ def test_generation_cond(
                 )
                 if "mauve" in cond_eval_results:
                     log_for_0(f"MAUVE: {cond_eval_results['mauve']:.2f}")
+                if "g_ppl" in cond_eval_results:
+                    log_for_0(
+                        f"Conditional gPPL: {cond_eval_results['g_ppl']:.4f}  "
+                        f"Mean entropy: {cond_eval_results['mean_entropy']:.4f}"
+                    )
 
             if config.use_wandb and wandb is not None:
                 table = wandb.Table(columns=["sample_id", "context", "original", "generated"])
@@ -953,6 +1029,11 @@ def test_generation_cond(
                         f"generation/{name}/rouge2": cond_eval_results["rouge2"],
                         f"generation/{name}/rougeL": cond_eval_results["rougeL"],
                     })
+                    if "g_ppl" in cond_eval_results:
+                        wandb_tables.update({
+                            f"generation/{name}/g_ppl": cond_eval_results["g_ppl"],
+                            f"generation/{name}/mean_entropy": cond_eval_results["mean_entropy"],
+                        })
                     if "mauve" in cond_eval_results:
                         wandb_tables[f"generation/{name}/mauve"] = cond_eval_results["mauve"]
             if cond_eval_results is not None:
@@ -1047,7 +1128,9 @@ def test_plan_conditioned_generation(
         local_dataset, batch_size=batch_size,
         shuffle=False, num_workers=0, drop_last=False,
         max_seq_length=config.max_length, pad_token_id=pad_token_id,
-        max_input_seq_length=config.max_input_length, distributed=False,
+        max_input_seq_length=config.max_input_length,
+        split_input_as_prefix=bool(getattr(config, "split_input_as_prefix", False)),
+        distributed=False,
     )
     plan_dataloader = None
     if plan_mode == "shuffled":
@@ -1057,7 +1140,9 @@ def test_plan_conditioned_generation(
             plan_dataset, batch_size=batch_size,
             shuffle=False, num_workers=0, drop_last=False,
             max_seq_length=config.max_length, pad_token_id=pad_token_id,
-            max_input_seq_length=config.max_input_length, distributed=False,
+            max_input_seq_length=config.max_input_length,
+            split_input_as_prefix=bool(getattr(config, "split_input_as_prefix", False)),
+            distributed=False,
         )
     log_for_0(
         f"{plan_mode} plan samples: total={total_samples}, "
@@ -1182,8 +1267,16 @@ def test_plan_conditioned_generation(
 
             sample_ids = [int(i) for i in batch["index"]]
             if is_conditional:
-                reference_texts = [batch["target"][i] for i in range(bsz)]
-                context_texts = [batch["input"][i] for i in range(bsz)]
+                if "target" in batch and "input" in batch:
+                    reference_texts = [batch["target"][i] for i in range(bsz)]
+                    context_texts = [batch["input"][i] for i in range(bsz)]
+                else:
+                    reference_texts = _decode_selected_texts(
+                        input_ids, attention_mask * (1 - cond_seq_mask_arr), tokenizer,
+                    )
+                    context_texts = _decode_selected_texts(
+                        input_ids, cond_seq_mask_arr, tokenizer,
+                    )
             else:
                 reference_texts = _decode_selected_texts(input_ids, attention_mask, tokenizer)
                 context_texts = [""] * bsz
@@ -1415,7 +1508,9 @@ def test_token_reconstruction_clean(
         local_dataset, batch_size=batch_size,
         shuffle=False, num_workers=0, drop_last=False,
         max_seq_length=config.max_length, pad_token_id=pad_token_id,
-        max_input_seq_length=config.max_input_length, distributed=False,
+        max_input_seq_length=config.max_input_length,
+        split_input_as_prefix=bool(getattr(config, "split_input_as_prefix", False)),
+        distributed=False,
     )
     plan_dataloader = None
     if bool(getattr(config, "use_sentence_plan", False)):
@@ -1431,6 +1526,7 @@ def test_token_reconstruction_clean(
             max_seq_length=config.max_length,
             pad_token_id=pad_token_id,
             max_input_seq_length=config.max_input_length,
+            split_input_as_prefix=bool(getattr(config, "split_input_as_prefix", False)),
             distributed=False,
         )
     log_for_0(
@@ -1549,6 +1645,7 @@ def test_token_reconstruction_clean(
                     config=config,
                     self_cond_cfg_scale=self_cond_cfg_scale,
                     plan_z=diagnostic_plan,
+                    cond_seq_mask=(cond_seq_mask_arr if is_conditional else None),
                 )
                 _accumulate(f"{plan_mode}:l2:t{int(t_value * 100):02d}", l2_sum, l2_count)
 
@@ -1574,8 +1671,16 @@ def test_token_reconstruction_clean(
 
         sample_ids = [int(i) for i in batch["index"]]
         if is_conditional:
-            reference_texts = [batch["target"][i] for i in range(bsz)]
-            context_texts = [batch["input"][i] for i in range(bsz)]
+            if "target" in batch and "input" in batch:
+                reference_texts = [batch["target"][i] for i in range(bsz)]
+                context_texts = [batch["input"][i] for i in range(bsz)]
+            else:
+                reference_texts = _decode_selected_texts(
+                    input_ids, attention_mask * (1 - cond_seq_mask_arr), tokenizer,
+                )
+                context_texts = _decode_selected_texts(
+                    input_ids, cond_seq_mask_arr, tokenizer,
+                )
         else:
             reference_texts = _decode_selected_texts(input_ids, attention_mask, tokenizer)
             context_texts = [""] * bsz

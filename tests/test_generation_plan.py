@@ -16,6 +16,7 @@ from generation import (
     _capture_rng_state,
     _evaluation_sampling_dimensions,
     _evaluation_generators,
+    _token_denoising_l2_stats,
     _teacher_forced_token_stats,
     _restore_rng_state,
 )
@@ -322,3 +323,27 @@ def test_hierarchical_sampling_passes_prefix_mask_to_every_model_step():
     )
 
     assert model.seen_cond_seq_mask is cond_seq_mask
+
+
+def test_conditional_denoising_diagnostic_preserves_prefix_mask():
+    model = SamplingModel()
+    x0 = torch.randn(2, 4, 3)
+    cond_seq_mask = torch.tensor(
+        [[1, 1, 0, 0], [1, 0, 0, 0]], dtype=torch.float32,
+    )
+
+    loss_sum, loss_count = _token_denoising_l2_stats(
+        model=model,
+        x0=x0,
+        noise=torch.randn_like(x0),
+        t_value=0.5,
+        loss_mask=1 - cond_seq_mask,
+        config=generation_config(plan_attention_topology="hierarchical_prefix"),
+        self_cond_cfg_scale=1.0,
+        plan_z=torch.ones(2, 3),
+        cond_seq_mask=cond_seq_mask,
+    )
+
+    assert model.seen_cond_seq_mask is cond_seq_mask
+    assert torch.isfinite(loss_sum)
+    assert loss_count.item() == 5

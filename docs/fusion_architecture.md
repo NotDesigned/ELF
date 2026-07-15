@@ -394,6 +394,15 @@ independent denoiser's extra parameter-count confound. The learned clean-plan
 encoder pass remains bidirectional because it constructs a training target,
 not the generative prior.
 
+For input-only corpora, `split_input_as_prefix=true` uses the first
+`max_input_length` valid tokens as the observed prefix in a full window;
+shorter rows are split in half. The prefix-conditioned OWT campaign therefore
+uses 128/128 at `max_length=256` and balanced halves for short documents. Its T5 encoder mask lets prefix rows
+read prefix keys only, while future rows may read the valid prefix and future;
+therefore contextual prefix embeddings do not leak the continuation into the
+plan path. Conditional generation and every plan/token diagnostic reuse this
+same split.
+
 **Current metrics:** `loss`, `l2_loss`, `ce_loss`, `plan_loss`, and
 `plan_aux_loss` are returned from `train_step.py`. `train_ce_loss` is still the
 training decoder branch, not the sampling metric: decoder rows see clean `s0`

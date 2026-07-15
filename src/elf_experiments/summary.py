@@ -48,6 +48,10 @@ _DENOISING_PROBE_KEYS = tuple(
 )
 EVAL_AUX_KEYS = (
     "mauve",
+    "bleu",
+    "rouge1",
+    "rouge2",
+    "rougeL",
     "teacher_forced_token_ppl",
     "oracle_plan_teacher_forced_token_ppl",
     "shuffled_plan_teacher_forced_token_ppl",
@@ -82,12 +86,17 @@ def finite_metric_value(value: Any) -> Any:
 SCIENTIFIC_CONFIG_KEYS = (
     "seed",
     "max_length",
+    "max_input_length",
+    "split_input_as_prefix",
     "global_batch_size",
     "use_sentence_plan",
     "sentence_encoder_type",
     "sentence_encoder_grad",
     "plan_aux_passes",
     "plan_aux_token_context",
+    "plan_attention_topology",
+    "plan_time_schedule",
+    "plan_time_warp_gamma",
     "eval_mauve",
     "eval_mauve_model",
     "eval_mauve_seed",
@@ -698,7 +707,7 @@ def collect_eval_evidence(
                 for aux_metric in EVAL_AUX_KEYS:
                     expected_mode = (
                         "generation_refine_decode"
-                        if aux_metric == "mauve"
+                        if aux_metric in {"mauve", "bleu", "rouge1", "rouge2", "rougeL"}
                         else "clean_token_reconstruction"
                     )
                     aux = [

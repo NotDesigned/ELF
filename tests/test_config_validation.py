@@ -98,6 +98,18 @@ def test_plan_attention_topology_validation():
         validate_config(cfg)
 
 
+def test_input_prefix_split_requires_max_input_length():
+    cfg = Config()
+    cfg.split_input_as_prefix = True
+
+    with pytest.raises(ValueError, match="split_input_as_prefix"):
+        validate_config(cfg)
+
+    cfg.max_length = 256
+    cfg.max_input_length = 128
+    assert validate_config(cfg).split_input_as_prefix is True
+
+
 def test_float_override_uses_declared_type_after_integer_yaml_value():
     cfg = Config()
     cfg.save_freq = 1  # Mirrors YAML parsing of ``save_freq: 1``.
@@ -243,6 +255,9 @@ def test_owt_elfb_ablation_configs_are_unique_and_expected():
         "tier5_hierarchical_prefix_len256.yml",
         "tier5_hierarchical_prefix_lead_g3.yml",
         "tier5_hierarchical_prefix_lead_g3_len256.yml",
+        "tier5_prefix128_joint_aligned_len256.yml",
+        "tier5_prefix128_hierarchical_aligned_len256.yml",
+        "tier5_prefix128_hierarchical_lead_g3_len256.yml",
     }
     paths = sorted(root.glob("*.yml"))
     assert {p.name for p in paths} == expected
@@ -267,6 +282,8 @@ def test_owt_elfb_ablation_configs_are_unique_and_expected():
             float(cfg.plan_loss_weight),
             float(cfg.plan_noise_scale),
             int(cfg.max_length),
+            cfg.max_input_length,
+            bool(cfg.split_input_as_prefix),
             int(cfg.eval_ppl_max_length),
         )
         assert key not in seen, f"{path.name} duplicates {seen.get(key)}"
@@ -298,6 +315,17 @@ def test_owt_elfb_ablation_configs_are_unique_and_expected():
     assert triangular.plan_time_warp_gamma == pytest.approx(1.0)
     assert leading.plan_time_schedule == "noise_power"
     assert leading.plan_time_warp_gamma == pytest.approx(3.0)
+
+    prefix_configs = [
+        load_config_from_yaml(str(root / name))
+        for name in (
+            "tier5_prefix128_joint_aligned_len256.yml",
+            "tier5_prefix128_hierarchical_aligned_len256.yml",
+            "tier5_prefix128_hierarchical_lead_g3_len256.yml",
+        )
+    ]
+    assert {cfg.max_input_length for cfg in prefix_configs} == {128}
+    assert {cfg.split_input_as_prefix for cfg in prefix_configs} == {True}
 
 
 def test_config_reference_covers_config_sampling_cli_and_launcher_flags():

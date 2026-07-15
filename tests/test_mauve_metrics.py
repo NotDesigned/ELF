@@ -177,3 +177,18 @@ def test_campaign_summary_collects_mauve_as_variant_metric():
 
     assert candidates["oracle_plan_ppl"] == 42.0
     assert candidates["mauve"] == 87.5
+
+
+def test_campaign_summary_collects_conditional_similarity_metrics():
+    candidates = dict(_metric_candidates({
+        "mode": "generation_refine_decode",
+        "g_ppl": 31.0,
+        "bleu": 4.5,
+        "rouge1": 20.0,
+        "rouge2": 7.0,
+        "rougeL": 18.0,
+    }))
+
+    assert candidates["g_ppl"] == 31.0
+    assert candidates["bleu"] == 4.5
+    assert candidates["rougeL"] == 18.0

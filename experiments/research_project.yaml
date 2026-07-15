@@ -23,6 +23,18 @@ controller:
       - yaml
     require_clean_git: true
 campaigns:
+  - name: fusion-hierarchical-prefix128-plan-lead-h200-20260715-c2
+    file: experiments/campaigns/fusion_hierarchical_prefix128_plan_lead_h200_20260715.yml
+    role_notes:
+      joint_aligned: prefix128 conditional control with joint plan/future attention
+      triangular_aligned: matched prefix -> plan -> future topology with aligned time
+      triangular_lead_g3: matched prefix topology plus gamma-3 plan-leading time
+  - name: fusion-hierarchical-prefix128-plan-lead-smoke-h200-20260715-c2
+    file: experiments/campaigns/fusion_hierarchical_prefix128_plan_lead_smoke_h200_20260715.yml
+    role_notes:
+      joint_aligned: operational conditional joint-attention control
+      triangular_aligned: operational prefix mask and block-triangular treatment
+      triangular_lead_g3: operational prefix topology plus gamma-3 schedule treatment
   - name: fusion-hierarchical-plan-lead-h200-20260715-c2
     file: experiments/campaigns/fusion_hierarchical_plan_lead_h200_20260715.yml
     role_notes:

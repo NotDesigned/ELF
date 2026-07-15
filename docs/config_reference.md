@@ -31,6 +31,7 @@ schema rather than treating training flags as scheduler configuration.
 | `eval_data_path` | `None` | Optional separate evaluation dataset. |
 | `max_length` | `128` | Total padded/truncated token length. |
 | `max_input_length` | `None` | Maximum conditioning-input length; when set, smaller than `max_length`. |
+| `split_input_as_prefix` | `false` | For input-only corpora, use the first `max_input_length` tokens as prefix in a full window; shorter rows are split in half so both prefix and future remain meaningful. |
 | `pad_token` | `pad` | Padding policy: `pad` or `eos`. |
 | `tokenizer_name` | `None` | Tokenizer ID/path; falls back to `encoder_model_name`. |
 | `encoder_model_name` | `t5-small` | Frozen text encoder ID/path. |

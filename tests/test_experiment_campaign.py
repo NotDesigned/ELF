@@ -14,7 +14,7 @@ from elf_experiments.campaign import (
     resolve_campaign,
 )
 from elf_experiments.controller import materialize_run, validate_run
-from configs.config import load_config_from_yaml
+from configs.config import Config, load_config_from_yaml
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -57,6 +57,59 @@ def test_hierarchical_plan_campaign_is_a_matched_three_arm_ablation():
         assert len({getattr(config, field) for config in configs.values()}) == 1
     assert len({run["image_id"] for run in runs.values()}) == 1
     assert len({run["backend"]["gres"] for run in runs.values()}) == 1
+
+
+def test_prefix128_plan_campaign_exercises_prefix_conditioning_in_all_arms():
+    campaign = load_and_resolve_campaign(
+        REPO_ROOT
+        / "experiments/campaigns/fusion_hierarchical_prefix128_plan_lead_h200_20260715.yml"
+    )
+    runs = {run["research_role"]: run for run in campaign["runs"]}
+    assert set(runs) == {
+        "joint_aligned",
+        "triangular_aligned",
+        "triangular_lead_g3",
+    }
+
+    configs = {
+        role: load_config_from_yaml(str(REPO_ROOT / run["config"]))
+        for role, run in runs.items()
+    }
+    assert {cfg.split_input_as_prefix for cfg in configs.values()} == {True}
+    assert {cfg.max_input_length for cfg in configs.values()} == {128}
+    assert {cfg.max_length for cfg in configs.values()} == {256}
+    assert {cfg.plan_denoiser_type for cfg in configs.values()} == {"shared"}
+    assert configs["joint_aligned"].plan_attention_topology == "joint"
+    assert configs["joint_aligned"].plan_time_schedule == "aligned"
+    assert configs["triangular_aligned"].plan_attention_topology == "hierarchical_prefix"
+    assert configs["triangular_aligned"].plan_time_schedule == "aligned"
+    assert configs["triangular_lead_g3"].plan_attention_topology == "hierarchical_prefix"
+    assert configs["triangular_lead_g3"].plan_time_schedule == "noise_power"
+    assert configs["triangular_lead_g3"].plan_time_warp_gamma == pytest.approx(3.0)
+    assert len({run["image_id"] for run in runs.values()}) == 1
+    assert len({run["backend"]["gres"] for run in runs.values()}) == 1
+
+    allowed_config_differences = {
+        "output_dir",
+        "wandb_run_name",
+        "wandb_tag",
+        "plan_attention_topology",
+        "plan_time_schedule",
+        "plan_time_warp_gamma",
+    }
+    baseline = configs["joint_aligned"]
+
+    def comparable(value):
+        if isinstance(value, list):
+            return [vars(item) if hasattr(item, "__dict__") else item for item in value]
+        return value
+
+    for role, config in configs.items():
+        differences = {
+            key for key in Config.__annotations__
+            if comparable(getattr(config, key)) != comparable(getattr(baseline, key))
+        }
+        assert differences <= allowed_config_differences, (role, differences)
 
 
 def test_research_project_campaign_catalog_matches_campaign_files():

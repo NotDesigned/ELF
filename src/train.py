@@ -39,7 +39,7 @@ from configs.config import (
     resolve_batch_sizes,
     SamplingConfig,
 )
-from modules.model import ELF_models
+from modules.model import build_elf_from_config
 from utils.data_utils import get_dataloader, prepare_batch, load_dataset, get_pad_token_id
 from train_step import train_step
 
@@ -344,25 +344,8 @@ def run_training(config, *, force_cpu: bool = False):
     except TypeError:
         vocab_size = tokenizer.vocab_size
     log_for_0(f"Tokenizer vocab: CE head={vocab_size}")
-    model = ELF_models[config.model](
-        text_encoder_dim=encoder_config.d_model, max_length=config.max_length,
-        attn_drop=config.attn_dropout, proj_drop=config.proj_dropout,
-        num_time_tokens=config.num_time_tokens,
-        num_self_cond_cfg_tokens=config.num_self_cond_cfg_tokens,
-        vocab_size=vocab_size,
-        num_model_mode_tokens=config.num_model_mode_tokens,
-        bottleneck_dim=config.bottleneck_dim,
-        gradient_checkpointing=bool(getattr(config, "gradient_checkpointing", True)),
-        use_sentence_plan=bool(getattr(config, "use_sentence_plan", False)),
-        sentence_encoder_type=getattr(config, "sentence_encoder_type", "sentence_t5"),
-        sentence_emb_dim=int(getattr(config, "sentence_emb_dim", 768)),
-        num_plan_tokens=int(getattr(config, "num_plan_tokens", 8)),
-        plan_adapter_type=getattr(config, "plan_adapter_type", "slot_mlp"),
-        plan_slot_dit_depth=int(getattr(config, "plan_slot_dit_depth", 2)),
-        plan_denoiser_type=getattr(config, "plan_denoiser_type", "shared"),
-        plan_denoiser_depth=int(getattr(config, "plan_denoiser_depth", 12)),
-        plan_attention_topology=getattr(config, "plan_attention_topology", "joint"),
-        plan_learned_encoder_norm=bool(getattr(config, "plan_learned_encoder_norm", True)),
+    model = build_elf_from_config(
+        config, text_encoder_dim=encoder_config.d_model, vocab_size=vocab_size,
     ).to(device)
 
     _log_model_parameter_summary(model)
@@ -511,6 +494,7 @@ def run_training(config, *, force_cpu: bool = False):
         num_workers=config.num_workers, drop_last=True,
         max_seq_length=config.max_length, pad_token_id=pad_token_id,
         max_input_seq_length=config.max_input_length,
+        split_input_as_prefix=bool(getattr(config, "split_input_as_prefix", False)),
         distributed=(world > 1),
     )
 

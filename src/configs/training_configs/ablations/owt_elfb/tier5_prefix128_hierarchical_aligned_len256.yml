@@ -1,0 +1,12 @@
+base_config: tier5_hierarchical_prefix_len256.yml
+
+# Same deterministic OWT prefix/future split as the joint control. Only the
+# future-to-prefix/plan attention edges are removed.
+split_input_as_prefix: true
+max_input_length: 128
+
+output_dir: outputs/ablations/owt_elfb/tier5_prefix128_hierarchical_aligned_len256
+resume: null
+warm_start: null
+wandb_run_name: tier5_owt_elfb_prefix128_hierarchical_aligned_len256
+wandb_tag: tier5,owt,elfb,sentence_t5,prefix128,hierarchical_prefix,aligned,len256

@@ -137,6 +137,21 @@ The gamma-3 arm uses the same mapping in training and sampling:
 schedule, not a separate
 two-stage sampler.
 
+The prefix-conditioned counterpart uses a deterministic 128/128 split for full
+256-token OWT windows and balanced halves for shorter rows:
+
+| Config | Observed prefix | Attention topology | Plan time |
+|---|---:|---|---|
+| `tier5_prefix128_joint_aligned_len256.yml` | first 128 valid tokens | joint plan/future | aligned |
+| `tier5_prefix128_hierarchical_aligned_len256.yml` | first 128 valid tokens | prefix/plan -> future | aligned |
+| `tier5_prefix128_hierarchical_lead_g3_len256.yml` | first 128 valid tokens | prefix/plan -> future | `noise_power`, gamma=3 |
+
+The continuation-only Sentence-T5 embedding is the clean plan target. Prefix
+T5 rows attend only prefix keys, so the hierarchical plan prior cannot receive
+future information through contextual token embeddings. Conditional free
+generation, oracle/shuffled plan interventions, teacher-forced PPL, and token
+denoising diagnostics all use the same prefix mask.
+
 ## Warm Start
 
 For warm-starting plan runs from a trained pure ELF checkpoint, add overrides:

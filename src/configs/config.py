@@ -199,6 +199,10 @@ def validate_config(config) -> Config:
                 f"max_input_length must be smaller than max_length for conditional generation, "
                 f"got max_input_length={config.max_input_length}, max_length={config.max_length}"
             )
+    if bool(config.split_input_as_prefix) and config.max_input_length is None:
+        raise ValueError(
+            "split_input_as_prefix=true requires max_input_length to define the prefix length"
+        )
     if config.batch_size is not None:
         _validate_positive_int(config.batch_size, "batch_size")
     if config.global_batch_size is not None:
@@ -297,6 +301,7 @@ class Config:
     eval_data_path: str = None
     max_length: int = 128
     max_input_length: int = None  # Max length for conditioning input (e.g., prompt or encoder input); None = no limit
+    split_input_as_prefix: bool = False  # Split input-only corpora into bounded prefix + future halves.
     pad_token: str = "pad"  # "pad" or "eos" - which token to use for padding
 
     # Tokenizer

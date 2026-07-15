@@ -83,6 +83,7 @@ def get_dataloader(
     max_seq_length: int = 512,
     pad_token_id: int = 0,
     max_input_seq_length: Optional[int] = None,
+    split_input_as_prefix: bool = False,
     distributed: bool = True,
 ):
     """Create a DataLoader."""
@@ -100,7 +101,26 @@ def get_dataloader(
             cond_lens = np.array(cond_lens)
         else:
             seq_list = input_ids_list
-            cond_lens = np.zeros(len(input_ids_list), dtype=np.int32)
+            if split_input_as_prefix:
+                if max_input_seq_length is None:
+                    raise ValueError(
+                        "split_input_as_prefix requires max_input_seq_length"
+                    )
+                # Long rows use the requested boundary. Short rows are split
+                # in half instead of leaving a one-token continuation. The
+                # deterministic boundary keeps every arm on the same data.
+                cond_lens = np.array([
+                    (
+                        0 if min(len(ids), int(max_seq_length)) <= 1
+                        else min(
+                            int(max_input_seq_length),
+                            min(len(ids), int(max_seq_length)) // 2,
+                        )
+                    )
+                    for ids in input_ids_list
+                ], dtype=np.int32)
+            else:
+                cond_lens = np.zeros(len(input_ids_list), dtype=np.int32)
 
         ids, total_lens = pad_and_truncate(seq_list, max_seq_length, pad_token_id)
         pos = np.arange(max_seq_length)[None, :]
@@ -246,6 +266,14 @@ def load_dataset(config, dataset_cache_dir=None):
     if config.eval_data_path:
         eval_dataset = load_dataset_split(config.eval_data_path, dataset_cache_dir)
         log_for_0(f"Eval size: {len(eval_dataset)}")
+    elif bool(getattr(config, "split_input_as_prefix", False)):
+        # Reuse the same immutable input-only corpus for deterministic
+        # prefix/future evaluation. Generation selects a fixed indexed subset.
+        eval_dataset = train_dataset
+        log_for_0(
+            "Using training corpus for prefix-conditioned evaluation "
+            f"(prefix length={config.max_input_length})"
+        )
     else:
         log_for_0("No eval dataset")
     return train_dataset, eval_dataset
