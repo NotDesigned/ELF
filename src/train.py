@@ -264,6 +264,7 @@ def run_training(config, *, force_cpu: bool = False):
         log_for_0(
             "Sentence plan: "
             f"type={config.sentence_encoder_type}, adapter={getattr(config, 'plan_adapter_type', 'slot_mlp')}, "
+            f"denoiser={getattr(config, 'plan_denoiser_type', 'shared')}, "
             f"slots={config.num_plan_tokens}, dim={config.sentence_emb_dim}, "
             f"time={getattr(config, 'plan_time_schedule', 'aligned')}"
             f"(gamma={getattr(config, 'plan_time_warp_gamma', 1.0)}), "
@@ -357,6 +358,8 @@ def run_training(config, *, force_cpu: bool = False):
         num_plan_tokens=int(getattr(config, "num_plan_tokens", 8)),
         plan_adapter_type=getattr(config, "plan_adapter_type", "slot_mlp"),
         plan_slot_dit_depth=int(getattr(config, "plan_slot_dit_depth", 2)),
+        plan_denoiser_type=getattr(config, "plan_denoiser_type", "shared"),
+        plan_denoiser_depth=int(getattr(config, "plan_denoiser_depth", 12)),
         plan_learned_encoder_norm=bool(getattr(config, "plan_learned_encoder_norm", True)),
     ).to(device)
 

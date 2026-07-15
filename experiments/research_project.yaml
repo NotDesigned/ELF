@@ -23,6 +23,16 @@ controller:
       - yaml
     require_clean_git: true
 campaigns:
+  - name: fusion-independent-plan-denoiser-smoke-h100-20260715-c1
+    file: experiments/campaigns/fusion_independent_plan_denoiser_smoke_h100_20260715.yml
+    role_notes:
+      shared: execution control using the shared ELF trunk plan predictor
+      independent: execution treatment using the matched-depth plan-only ELF predictor
+  - name: fusion-independent-plan-denoiser-h100-20260715-c1
+    file: experiments/campaigns/fusion_independent_plan_denoiser_h100_20260715.yml
+    role_notes:
+      shared: frozen-T5 plan predictor in the shared ELF trunk
+      independent: frozen-T5 plan predictor in an independent 12-block plan-only ELF stack
   - name: fusion-aux-ratio-eval-f32-h200-20260715-c2
     file: experiments/campaigns/fusion_aux_ratio_eval_f32_h200_20260715.yml
     role_notes:

@@ -353,6 +353,22 @@ only with `sentence_encoder_type=learned` and `sentence_encoder_grad=none`.
 Question: do more detached plan-denoiser passes improve sampling / plan
 refinement while preserving the learned encoder representation?
 
+### Tier 4: Independent Plan Denoiser
+
+This ablation holds the frozen Sentence-T5 plan space and plan-to-token
+conditioning path fixed while separating the plan prior parameters:
+
+| Config | `plan_denoiser_type` | Plan prediction path |
+|---|---|---|
+| `tier0_1_sentence_t5_len256.yml` | `shared` | plan slots -> shared ELF trunk -> shared plan readout |
+| `tier4_independent_plan_denoiser_len256.yml` | `independent` | noisy plan + plan time -> separate 12-block plan-only ELF stack |
+
+The independent arm still inserts plan slots into the token ELF trunk, so token
+generation remains plan-conditioned. Only the clean-plan prediction comes from
+the separate stack and is invariant to the token-field input. Its 12-block
+depth matches ELF-B's shared trunk. This isolates
+parameter sharing from the deferred prefix/future attention-mask ablation.
+
 **Current metrics:** `loss`, `l2_loss`, `ce_loss`, `plan_loss`, and
 `plan_aux_loss` are returned from `train_step.py`. `train_ce_loss` is still the
 training decoder branch, not the sampling metric: decoder rows see clean `s0`

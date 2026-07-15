@@ -136,6 +136,11 @@ def validate_config(config) -> Config:
         )
     if config.plan_adapter_type not in {"slot_mlp", "slot_dit"}:
         raise ValueError(f"plan_adapter_type must be 'slot_mlp' or 'slot_dit', got {config.plan_adapter_type!r}")
+    if config.plan_denoiser_type not in {"shared", "independent"}:
+        raise ValueError(
+            "plan_denoiser_type must be 'shared' or 'independent', "
+            f"got {config.plan_denoiser_type!r}"
+        )
     if config.plan_aux_token_context not in {"denoiser_z", "resampled_z", "mixed_z", "clean_x0"}:
         raise ValueError(
             "plan_aux_token_context must be one of ['clean_x0', 'denoiser_z', 'mixed_z', 'resampled_z'], "
@@ -224,6 +229,8 @@ def validate_config(config) -> Config:
         _validate_positive_int(config.sentence_emb_dim, "sentence_emb_dim")
     if config.plan_adapter_type == "slot_dit":
         _validate_positive_int(config.plan_slot_dit_depth, "plan_slot_dit_depth")
+    if config.plan_denoiser_type == "independent":
+        _validate_positive_int(config.plan_denoiser_depth, "plan_denoiser_depth")
 
     config.sampling_configs = [
         validate_sampling_config(sc, source=f"sampling_configs[{idx}]")
@@ -315,6 +322,8 @@ class Config:
     num_plan_tokens: int = 8
     plan_adapter_type: str = "slot_mlp"  # "slot_mlp" or "slot_dit"
     plan_slot_dit_depth: int = 2
+    plan_denoiser_type: str = "shared"  # "shared" or plan-only "independent"
+    plan_denoiser_depth: int = 12
     plan_learned_encoder_norm: bool = True
     plan_loss_weight: float = 1.0
     plan_noise_scale: float = 1.0

@@ -70,6 +70,23 @@ def test_mauve_config_override_and_seed_validation():
         validate_config(cfg)
 
 
+def test_independent_plan_denoiser_config_validation():
+    cfg = Config()
+    cfg.use_sentence_plan = True
+    cfg.plan_denoiser_type = "independent"
+    cfg.plan_denoiser_depth = 3
+    assert validate_config(cfg).plan_denoiser_depth == 3
+
+    cfg.plan_denoiser_type = "coupled"
+    with pytest.raises(ValueError, match="plan_denoiser_type"):
+        validate_config(cfg)
+
+    cfg.plan_denoiser_type = "independent"
+    cfg.plan_denoiser_depth = 0
+    with pytest.raises(ValueError, match="plan_denoiser_depth"):
+        validate_config(cfg)
+
+
 def test_float_override_uses_declared_type_after_integer_yaml_value():
     cfg = Config()
     cfg.save_freq = 1  # Mirrors YAML parsing of ``save_freq: 1``.
@@ -207,6 +224,8 @@ def test_owt_elfb_ablation_configs_are_unique_and_expected():
         "tier3_aux2_len256.yml",
         "tier3_aux4.yml",
         "tier3_aux4_len256.yml",
+        "tier4_independent_plan_denoiser.yml",
+        "tier4_independent_plan_denoiser_len256.yml",
     }
     paths = sorted(root.glob("*.yml"))
     assert {p.name for p in paths} == expected
@@ -221,6 +240,8 @@ def test_owt_elfb_ablation_configs_are_unique_and_expected():
             int(cfg.plan_aux_passes),
             cfg.plan_aux_token_context,
             cfg.plan_adapter_type,
+            cfg.plan_denoiser_type,
+            int(cfg.plan_denoiser_depth),
             int(cfg.num_plan_tokens),
             bool(cfg.plan_learned_encoder_norm),
             float(cfg.plan_loss_weight),
@@ -240,6 +261,12 @@ def test_owt_elfb_ablation_configs_are_unique_and_expected():
         cfg = load_config_from_yaml(str(path))
         assert cfg.max_length == 256
         assert cfg.eval_ppl_max_length == 256
+
+    independent = load_config_from_yaml(str(root / "tier4_independent_plan_denoiser_len256.yml"))
+    assert independent.sentence_encoder_type == "sentence_t5"
+    assert independent.plan_denoiser_type == "independent"
+    assert independent.plan_denoiser_depth == 12
+    assert independent.max_length == 256
 
 
 def test_config_reference_covers_config_sampling_cli_and_launcher_flags():

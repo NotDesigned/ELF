@@ -114,6 +114,76 @@ class SlotDiT(nn.Module):
         return self.out_norm(x)
 
 
+class IndependentPlanDenoiser(nn.Module):
+    """Plan-only ELF stack with parameters independent from the token trunk."""
+
+    def __init__(self, sentence_emb_dim: int, hidden_size: int, num_heads: int,
+                 depth: int, num_plan_tokens: int, mlp_ratio: float = 4.0,
+                 attn_drop: float = 0.0, proj_drop: float = 0.0,
+                 gradient_checkpointing: bool = False):
+        super().__init__()
+        if depth <= 0:
+            raise ValueError("plan_denoiser_depth must be positive")
+        self.sentence_emb_dim = sentence_emb_dim
+        self.hidden_size = hidden_size
+        self.num_plan_tokens = num_plan_tokens
+        self.gradient_checkpointing = gradient_checkpointing
+        self.plan_in = _make_linear(
+            sentence_emb_dim, hidden_size * num_plan_tokens, bias=True,
+        )
+        self.plan_tokens = nn.Parameter(torch.empty(1, num_plan_tokens, hidden_size))
+        self.time_embedder = TimestepEmbedder(hidden_size)
+        self.blocks = nn.ModuleList()
+        q1, q3 = depth // 4, depth // 4 * 3
+        for index in range(depth):
+            in_drop_range = q3 > index >= q1
+            self.blocks.append(ELFBlock(
+                hidden_size,
+                num_heads,
+                mlp_ratio=mlp_ratio,
+                attn_drop=attn_drop if in_drop_range else 0.0,
+                proj_drop=proj_drop if in_drop_range else 0.0,
+            ))
+        self.out_norm = RMSNorm(hidden_size, eps=1e-6)
+        self.plan_out = _make_linear(
+            hidden_size * num_plan_tokens, sentence_emb_dim, bias=True,
+        )
+        NORMAL_INIT_002(self.plan_tokens)
+
+    def forward(self, plan_z: torch.Tensor, plan_t: torch.Tensor,
+                deterministic: bool = True) -> torch.Tensor:
+        if plan_z.shape[-1] != self.sentence_emb_dim:
+            raise ValueError(
+                f"plan_z dim {plan_z.shape[-1]} does not match "
+                f"sentence_emb_dim={self.sentence_emb_dim}"
+            )
+        batch_size = plan_z.shape[0]
+        with torch.amp.autocast('cuda', enabled=False):
+            hidden = self.plan_in(plan_z.float()).reshape(
+                batch_size, self.num_plan_tokens, self.hidden_size,
+            )
+            time_emb = self.time_embedder(plan_t)
+            hidden = hidden + self.plan_tokens.expand(batch_size, -1, -1) + time_emb.unsqueeze(1)
+        use_checkpoint = self.gradient_checkpointing and self.training and torch.is_grad_enabled()
+        for block in self.blocks:
+            if use_checkpoint:
+                def _block_forward(value: torch.Tensor, block: ELFBlock = block) -> torch.Tensor:
+                    return block(
+                        value, rope_fn=None, attention_mask=None,
+                        deterministic=deterministic,
+                    )
+
+                hidden = checkpoint(_block_forward, hidden, use_reentrant=False)
+            else:
+                hidden = block(
+                    hidden, rope_fn=None, attention_mask=None,
+                    deterministic=deterministic,
+                )
+        with torch.amp.autocast('cuda', enabled=False):
+            hidden = self.out_norm(hidden.float())
+            return self.plan_out(hidden.reshape(batch_size, -1))
+
+
 class ELF(nn.Module):
     """Text ELF Transformer."""
 
@@ -139,6 +209,8 @@ class ELF(nn.Module):
         num_plan_tokens: int = 8,
         plan_adapter_type: str = "slot_mlp",
         plan_slot_dit_depth: int = 2,
+        plan_denoiser_type: str = "shared",
+        plan_denoiser_depth: int = 12,
         plan_learned_encoder_norm: bool = True,
     ):
         super().__init__()
@@ -161,6 +233,7 @@ class ELF(nn.Module):
         self.sentence_emb_dim = sentence_emb_dim
         self.num_plan_tokens = num_plan_tokens if use_sentence_plan else 0
         self.plan_adapter_type = plan_adapter_type
+        self.plan_denoiser_type = plan_denoiser_type
         self.plan_learned_encoder_norm = plan_learned_encoder_norm
 
         # Self-conditioning input projection (only used when input is [z, x_pred]).
@@ -190,6 +263,8 @@ class ELF(nn.Module):
                 raise ValueError("sentence_encoder_type must be 'sentence_t5' or 'learned'")
             if self.plan_adapter_type not in {"slot_mlp", "slot_dit"}:
                 raise ValueError("plan_adapter_type must be 'slot_mlp' or 'slot_dit'")
+            if self.plan_denoiser_type not in {"shared", "independent"}:
+                raise ValueError("plan_denoiser_type must be 'shared' or 'independent'")
             if self.num_plan_tokens <= 0:
                 raise ValueError("num_plan_tokens must be positive when use_sentence_plan=True")
             if self.sentence_emb_dim <= 0:
@@ -226,6 +301,30 @@ class ELF(nn.Module):
             else:
                 self.register_parameter("plan_encoder_query", None)
                 self.plan_encoder_output_norm = nn.Identity()
+            if self.plan_denoiser_type == "independent":
+                self.independent_plan_denoiser = IndependentPlanDenoiser(
+                    sentence_emb_dim=sentence_emb_dim,
+                    hidden_size=hidden_size,
+                    num_heads=num_heads,
+                    depth=plan_denoiser_depth,
+                    num_plan_tokens=self.num_plan_tokens,
+                    mlp_ratio=mlp_ratio,
+                    attn_drop=attn_drop,
+                    proj_drop=proj_drop,
+                    gradient_checkpointing=gradient_checkpointing,
+                )
+                if self.sentence_encoder_type == "sentence_t5":
+                    # The frozen target arm does not need the shared plan
+                    # readout once its predictor is replaced. Keep the modules
+                    # in the state dict for warm-start compatibility, but do
+                    # not give the optimizer dead parameters.
+                    shared_readout_modules = [self.plan_norm, self.plan_out]
+                    if self.plan_out_input is not None:
+                        shared_readout_modules.extend([self.plan_out_input, self.plan_out_dit])
+                    for module in shared_readout_modules:
+                        module.requires_grad_(False)
+            else:
+                self.independent_plan_denoiser = None
 
         head_dim = hidden_size // num_heads
         prefix_total = num_model_mode_tokens + num_time_tokens
@@ -421,6 +520,17 @@ class ELF(nn.Module):
             plan_hidden = x[:, plan_start:field_start]
         x = x[:, field_start:]
 
+        independent_plan_pred = None
+        if (
+            self.use_sentence_plan
+            and return_plan
+            and self.plan_denoiser_type == "independent"
+            and not learned_plan_encode
+        ):
+            independent_plan_pred = self.independent_plan_denoiser(
+                plan_z, plan_t, deterministic=deterministic,
+            )
+
         # Factored decoder unembedding: hidden -> text_encoder_dim -> vocab
         with torch.amp.autocast('cuda', enabled=False):
             decoder_logits = None
@@ -431,11 +541,14 @@ class ELF(nn.Module):
             output = self.final_layer(x.float())
             plan_pred = None
             if plan_hidden is not None:
-                plan_pred = self.predict_plan(
-                    plan_hidden, plan_context,
-                    deterministic=deterministic,
-                    learned_plan_encode=learned_plan_encode,
-                )
+                if self.plan_denoiser_type == "independent" and not learned_plan_encode:
+                    plan_pred = independent_plan_pred
+                else:
+                    plan_pred = self.predict_plan(
+                        plan_hidden, plan_context,
+                        deterministic=deterministic,
+                        learned_plan_encode=learned_plan_encode,
+                    )
         if return_plan:
             return output, decoder_logits, plan_pred
         return output, decoder_logits

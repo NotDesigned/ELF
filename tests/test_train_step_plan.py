@@ -120,6 +120,7 @@ def tiny_model(
     use_sentence_plan=True,
     num_self_cond_cfg_tokens=1,
     plan_adapter_type="slot_mlp",
+    plan_denoiser_type="shared",
 ):
     return ELF(
         text_encoder_dim=4,
@@ -139,6 +140,8 @@ def tiny_model(
         num_plan_tokens=4,
         plan_adapter_type=plan_adapter_type,
         plan_slot_dit_depth=1,
+        plan_denoiser_type=plan_denoiser_type,
+        plan_denoiser_depth=1,
     )
 
 
@@ -224,6 +227,75 @@ def test_decode_continuation_texts_uses_loss_mask_only():
     texts = _decode_continuation_texts(input_ids, loss_mask, ToyTokenizer())
 
     assert texts == ["2 3", "4"]
+
+
+def test_independent_plan_denoiser_output_does_not_depend_on_token_field():
+    torch.manual_seed(2026)
+    model = tiny_model(
+        sentence_encoder_type="sentence_t5",
+        plan_denoiser_type="independent",
+    ).eval()
+    plan_z = torch.randn(2, 8)
+    plan_t = torch.tensor([0.2, 0.7])
+    token_t = torch.tensor([0.3, 0.6])
+    self_cond_cfg_scale = torch.ones(2)
+    x_a = torch.randn(2, 6, 4)
+    x_b = torch.randn(2, 6, 4)
+
+    _, _, plan_a = model(
+        x_a, token_t, plan_z=plan_z, plan_t=plan_t,
+        self_cond_cfg_scale=self_cond_cfg_scale,
+        return_plan=True, deterministic=True,
+    )
+    _, _, plan_b = model(
+        x_b, token_t, plan_z=plan_z, plan_t=plan_t,
+        self_cond_cfg_scale=self_cond_cfg_scale,
+        return_plan=True, deterministic=True,
+    )
+
+    assert torch.equal(plan_a, plan_b)
+
+
+def test_independent_plan_loss_does_not_train_shared_token_trunk():
+    torch.manual_seed(2027)
+    model = tiny_model(
+        sentence_encoder_type="sentence_t5",
+        plan_denoiser_type="independent",
+    )
+    plan_z = torch.randn(2, 8)
+    target = torch.randn(2, 8)
+    _, _, plan_pred = model(
+        torch.randn(2, 6, 4),
+        torch.tensor([0.3, 0.6]),
+        plan_z=plan_z,
+        plan_t=torch.tensor([0.2, 0.7]),
+        self_cond_cfg_scale=torch.ones(2),
+        return_plan=True,
+        deterministic=True,
+    )
+
+    ((plan_pred - target) ** 2).mean().backward()
+
+    independent_grad = model.independent_plan_denoiser.plan_out.weight.grad
+    shared_grad = model.blocks[0].attn.qkv.weight.grad
+    assert independent_grad is not None
+    assert independent_grad.norm().item() > 0
+    assert shared_grad is None or shared_grad.norm().item() == pytest.approx(0.0)
+
+
+def test_independent_sentence_t5_replaces_and_freezes_shared_plan_readout():
+    model = tiny_model(
+        sentence_encoder_type="sentence_t5",
+        plan_denoiser_type="independent",
+    )
+
+    assert all(not parameter.requires_grad for parameter in model.plan_out.parameters())
+    assert all(not parameter.requires_grad for parameter in model.plan_norm.parameters())
+    assert all(
+        parameter.requires_grad
+        for parameter in model.independent_plan_denoiser.parameters()
+    )
+    assert all(parameter.requires_grad for parameter in model.blocks.parameters())
 
 
 @pytest.mark.parametrize(
@@ -397,11 +469,15 @@ def test_invalid_plan_aux_token_context_raises():
         run_tiny_train_step(tiny_config(plan_aux_token_context="bad_context"))
 
 
-def test_sentence_t5_plan_uses_decoded_continuation_texts():
+@pytest.mark.parametrize("plan_denoiser_type", ["shared", "independent"])
+def test_sentence_t5_plan_uses_decoded_continuation_texts(plan_denoiser_type):
     sentence_encoder = ToySentenceEncoder()
     _, metrics = run_tiny_train_step(
         tiny_config(sentence_encoder_type="sentence_t5", plan_aux_passes=4),
-        model=tiny_model(sentence_encoder_type="sentence_t5"),
+        model=tiny_model(
+            sentence_encoder_type="sentence_t5",
+            plan_denoiser_type=plan_denoiser_type,
+        ),
         tokenizer=ToyTokenizer(),
         sentence_encoder=sentence_encoder,
     )

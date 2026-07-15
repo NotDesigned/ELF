@@ -172,6 +172,8 @@ def main():
         num_plan_tokens=int(getattr(config, "num_plan_tokens", 8)),
         plan_adapter_type=getattr(config, "plan_adapter_type", "slot_mlp"),
         plan_slot_dit_depth=int(getattr(config, "plan_slot_dit_depth", 2)),
+        plan_denoiser_type=getattr(config, "plan_denoiser_type", "shared"),
+        plan_denoiser_depth=int(getattr(config, "plan_denoiser_depth", 12)),
         plan_learned_encoder_norm=bool(getattr(config, "plan_learned_encoder_norm", True)),
     ).to(device)
 

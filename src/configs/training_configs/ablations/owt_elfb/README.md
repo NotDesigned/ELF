@@ -95,6 +95,23 @@ For the primary length-aligned campaign, use `tier3_aux0_len256.yml`,
 `tier3_aux2_len256.yml`, and `tier3_aux4_len256.yml`, with
 `tier0_2_learned_main_len256.yml` as the `plan_aux_passes=1` reference.
 
+## Independent Plan Denoiser
+
+This axis keeps the frozen Sentence-T5 target, plan-slot conditioning path,
+token model, and objectives fixed while changing who predicts the clean plan:
+
+| Config | Plan predictor |
+|---|---|
+| `tier0_1_sentence_t5_len256.yml` | `shared`: read plan slots after the shared ELF trunk. |
+| `tier4_independent_plan_denoiser_len256.yml` | `independent`: separate 12-block plan-only ELF stack over noisy plan slots and plan time. |
+
+The 12-block depth matches ELF-B's shared trunk. The independent predictor
+cannot read the token field. The token ELF trunk
+still receives the current plan slots, so this tests whether the plan prior
+should have separate parameters without changing how tokens are conditioned.
+Use the same pure-ELF warm start, source, image, seed, batch settings, training
+budget, hardware, and sampling variants for both arms.
+
 ## Warm Start
 
 For warm-starting plan runs from a trained pure ELF checkpoint, add overrides:
