@@ -472,10 +472,17 @@ def collect_eval_evidence(
             })
 
     observations: list[dict[str, Any]] = []
+    observation_fingerprints: set[str] = set()
     diagnostics: list[dict[str, Any]] = []
     for item in expanded:
         errors = _exact_observation_errors(item)
         if not errors:
+            fingerprint = json.dumps(
+                item, sort_keys=True, separators=(",", ":"), ensure_ascii=True,
+            )
+            if fingerprint in observation_fingerprints:
+                continue
+            observation_fingerprints.add(fingerprint)
             observations.append(item)
             continue
         diagnostic = {

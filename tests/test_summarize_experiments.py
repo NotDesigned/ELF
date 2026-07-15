@@ -84,6 +84,23 @@ def test_discovers_and_summarizes_run(tmp_path):
     assert row["plan_ppl_gap"] == 5.5
 
 
+def test_canonical_and_ppl_aliases_do_not_duplicate_exact_observations(tmp_path):
+    run_dir = make_run(tmp_path)
+    for path in run_dir.rglob("metrics.jsonl"):
+        record = json.loads(path.read_text(encoding="utf-8"))
+        primary = next(key for key in (
+            "token_recon_ppl", "g_ppl", "oracle_plan_ppl",
+            "shuffled_plan_ppl",
+        ) if key in record)
+        record["ppl"] = record[primary]
+        path.write_text(json.dumps(record) + "\n", encoding="utf-8")
+
+    observations = summarize_run(run_dir)["metric_evidence"]["observations"]
+
+    assert len(observations) == 4
+    assert len({json.dumps(item, sort_keys=True) for item in observations}) == 4
+
+
 def test_local_scientific_merge_preserves_exact_operational_preimage():
     previous = {
         "project": "elf",
