@@ -88,6 +88,11 @@ the correct plan produced lower perplexity than a mismatched plan.
 
 ## Cross-platform controller: `tools/experimentctl.py`
 
+The registered Project runs its controller with the dedicated Seoul daemon
+environment at `/opt/ml-expd/venv/bin/python`. Training itself still runs in
+the backend SIF; the daemon environment only resolves campaigns, stages source,
+and manages scheduler/evidence operations.
+
 The controller freezes campaign metadata locally before scheduler submission
 and exposes the same operations for SenseCore and WYD Slurm:
 

@@ -4,7 +4,7 @@ title: ELF plan-token fusion
 run_roots:
   - outputs/experiment_campaigns
 controller:
-  python: /home/proton/miniconda3/envs/elf/bin/python
+  python: /opt/ml-expd/venv/bin/python
   experimentctl: tools/experimentctl.py
   workdir: .
   capabilities:
