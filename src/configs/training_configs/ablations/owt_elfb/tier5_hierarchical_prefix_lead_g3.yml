@@ -1,0 +1,12 @@
+base_config: tier5_hierarchical_prefix.yml
+
+# With t=0 as pure noise and t=1 as clean, gamma=3 maps token t=0.5 to
+# plan t=0.875. The plan therefore leads while preserving shared endpoints.
+plan_time_schedule: noise_power
+plan_time_warp_gamma: 3.0
+
+output_dir: outputs/ablations/owt_elfb/tier5_hierarchical_prefix_lead_g3
+resume: null
+warm_start: null
+wandb_run_name: tier5_owt_elfb_hierarchical_prefix_lead_g3
+wandb_tag: tier5,owt,elfb,sentence_t5,hierarchical_prefix,noise_power,gamma3

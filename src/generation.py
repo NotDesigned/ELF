@@ -319,6 +319,7 @@ def _teacher_forced_token_stats(
     config,
     self_cond_cfg_scale: float,
     plan_z: Optional[torch.Tensor] = None,
+    cond_seq_mask: Optional[torch.Tensor] = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Return masked decoder NLL sum/count at clean token and plan latents."""
     batch_size = x0.shape[0]
@@ -336,6 +337,11 @@ def _teacher_forced_token_stats(
         if plan_z is None:
             raise ValueError("plan_z is required for sentence-plan teacher forcing")
         plan_kwargs = {"plan_z": plan_z, "plan_t": t_one}
+    topology_kwargs = {}
+    if str(getattr(config, "plan_attention_topology", "joint")) == "hierarchical_prefix":
+        if cond_seq_mask is None:
+            cond_seq_mask = torch.zeros_like(attention_mask)
+        topology_kwargs = {"cond_seq_mask": cond_seq_mask}
     use_bf16 = bool(getattr(config, "use_bf16", True)) and x0.is_cuda
     with torch.amp.autocast("cuda", dtype=torch.bfloat16, enabled=use_bf16):
         _, decoder_logits = model(
@@ -345,7 +351,7 @@ def _teacher_forced_token_stats(
             deterministic=True,
             self_cond_cfg_scale=sc_batch,
             decoder_step_active=True,
-            **plan_kwargs,
+            **topology_kwargs, **plan_kwargs,
         )
     token_nll = torch.nn.functional.cross_entropy(
         decoder_logits.float().transpose(1, 2), input_ids, reduction="none",
@@ -1161,6 +1167,7 @@ def test_plan_conditioned_generation(
                 z=latent, model=model, t_final_val=t_steps[-1].item(),
                 config=config, self_cond_cfg_scale=self_cond_cfg_scale,
                 plan_z=plan_latent,
+                cond_seq_mask=(cond_seq_mask_arr if is_conditional else None),
             )
             if is_conditional:
                 if config.max_input_length is None:
@@ -1521,6 +1528,7 @@ def test_token_reconstruction_clean(
                 config=config,
                 self_cond_cfg_scale=self_cond_cfg_scale,
                 plan_z=diagnostic_plan,
+                cond_seq_mask=(cond_seq_mask_arr if is_conditional else None),
             )
             _accumulate(f"{plan_mode}:teacher_nll", nll_sum, token_count)
 
@@ -1549,6 +1557,7 @@ def test_token_reconstruction_clean(
             z=x0, model=model, t_final_val=1.0,
             config=config, self_cond_cfg_scale=self_cond_cfg_scale,
             plan_z=plan_latent,
+            cond_seq_mask=(cond_seq_mask_arr if is_conditional else None),
         )
         target_lengths = loss_mask.to(torch.int32).sum(dim=1)
         if is_conditional:

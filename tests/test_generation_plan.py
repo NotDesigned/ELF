@@ -29,6 +29,7 @@ class DecodeModel(nn.Module):
         super().__init__()
         self.weight = nn.Parameter(torch.zeros(()))
         self.seen_plan_z = None
+        self.seen_cond_seq_mask = None
 
     def forward(
         self,
@@ -37,12 +38,14 @@ class DecodeModel(nn.Module):
         deterministic=True,
         self_cond_cfg_scale=None,
         attention_mask=None,
+        cond_seq_mask=None,
         decoder_step_active=None,
         plan_z=None,
         plan_t=None,
         return_plan=False,
     ):
         self.seen_plan_z = plan_z
+        self.seen_cond_seq_mask = cond_seq_mask
         logits = torch.zeros(x.shape[0], x.shape[1], 5, dtype=x.dtype, device=x.device)
         logits[..., 3] = 1.0
         return torch.zeros_like(x), logits
@@ -52,6 +55,7 @@ class SamplingModel(nn.Module):
     def __init__(self):
         super().__init__()
         self.weight = nn.Parameter(torch.zeros(()))
+        self.seen_cond_seq_mask = None
 
     def forward(
         self,
@@ -60,10 +64,12 @@ class SamplingModel(nn.Module):
         deterministic=True,
         self_cond_cfg_scale=None,
         decoder_step_active=None,
+        cond_seq_mask=None,
         plan_z=None,
         plan_t=None,
         return_plan=False,
     ):
+        self.seen_cond_seq_mask = cond_seq_mask
         if return_plan:
             return torch.zeros_like(x), None, torch.zeros_like(plan_z)
         return torch.zeros_like(x), None
@@ -230,6 +236,25 @@ def test_dlm_decode_passes_plan_z_to_model():
     assert model.seen_plan_z is plan_z
 
 
+def test_hierarchical_decode_passes_prefix_mask_to_model():
+    model = DecodeModel()
+    z = torch.zeros(2, 4, 3)
+    plan_z = torch.ones(2, 3)
+    cond_seq_mask = torch.tensor([[1, 1, 0, 0], [1, 0, 0, 0]], dtype=torch.float32)
+
+    _dlm_decode_batch(
+        z=z,
+        model=model,
+        t_final_val=1.0,
+        config=generation_config(plan_attention_topology="hierarchical_prefix"),
+        self_cond_cfg_scale=1.0,
+        plan_z=plan_z,
+        cond_seq_mask=cond_seq_mask,
+    )
+
+    assert model.seen_cond_seq_mask is cond_seq_mask
+
+
 def test_teacher_forced_stats_are_masked_token_nll():
     model = DecodeModel()
     x0 = torch.zeros(2, 3, 4)
@@ -275,3 +300,25 @@ def test_generate_samples_returns_plan_latent_when_enabled():
     token_z, plan_z = out
     assert token_z.shape == z.shape
     assert plan_z.shape == (2, 3)
+
+
+def test_hierarchical_sampling_passes_prefix_mask_to_every_model_step():
+    model = SamplingModel()
+    z = torch.randn(2, 4, 3)
+    cond_seq = torch.randn_like(z)
+    cond_seq_mask = torch.tensor([[1, 1, 0, 0], [1, 0, 0, 0]], dtype=torch.float32)
+
+    _generate_samples_single_batch(
+        model=model,
+        generator=torch.Generator(device="cpu").manual_seed(12),
+        z=z,
+        t_steps=torch.tensor([0.0, 1.0]),
+        cond_seq=cond_seq,
+        cond_seq_mask=cond_seq_mask,
+        config=generation_config(plan_attention_topology="hierarchical_prefix"),
+        sampling_config=SimpleNamespace(sampling_method="ode", sde_gamma=0.0),
+        cfg_scale=1.0,
+        self_cond_cfg_scale=1.0,
+    )
+
+    assert model.seen_cond_seq_mask is cond_seq_mask

@@ -87,6 +87,17 @@ def test_independent_plan_denoiser_config_validation():
         validate_config(cfg)
 
 
+def test_plan_attention_topology_validation():
+    cfg = Config()
+    cfg.use_sentence_plan = True
+    cfg.plan_attention_topology = "hierarchical_prefix"
+    assert validate_config(cfg).plan_attention_topology == "hierarchical_prefix"
+
+    cfg.plan_attention_topology = "future_leak"
+    with pytest.raises(ValueError, match="plan_attention_topology"):
+        validate_config(cfg)
+
+
 def test_float_override_uses_declared_type_after_integer_yaml_value():
     cfg = Config()
     cfg.save_freq = 1  # Mirrors YAML parsing of ``save_freq: 1``.
@@ -132,10 +143,12 @@ def test_wandb_run_name_does_not_imply_stable_run_id():
 def test_plan_time_scheduler_noise_power_leads_and_validates():
     cfg = Config()
     cfg.plan_time_schedule = "noise_power"
-    cfg.plan_time_warp_gamma = 2.0
+    cfg.plan_time_warp_gamma = 3.0
 
     t = torch.tensor([0.0, 0.5, 1.0])
-    assert torch.allclose(plan_time_from_token_time(t, cfg), torch.tensor([0.0, 0.75, 1.0]))
+    assert torch.allclose(
+        plan_time_from_token_time(t, cfg), torch.tensor([0.0, 0.875, 1.0])
+    )
 
     cfg.plan_time_warp_gamma = 0.5
     with pytest.raises(ValueError, match="plan_time_warp_gamma"):
@@ -226,6 +239,10 @@ def test_owt_elfb_ablation_configs_are_unique_and_expected():
         "tier3_aux4_len256.yml",
         "tier4_independent_plan_denoiser.yml",
         "tier4_independent_plan_denoiser_len256.yml",
+        "tier5_hierarchical_prefix.yml",
+        "tier5_hierarchical_prefix_len256.yml",
+        "tier5_hierarchical_prefix_lead_g3.yml",
+        "tier5_hierarchical_prefix_lead_g3_len256.yml",
     }
     paths = sorted(root.glob("*.yml"))
     assert {p.name for p in paths} == expected
@@ -242,6 +259,9 @@ def test_owt_elfb_ablation_configs_are_unique_and_expected():
             cfg.plan_adapter_type,
             cfg.plan_denoiser_type,
             int(cfg.plan_denoiser_depth),
+            cfg.plan_attention_topology,
+            cfg.plan_time_schedule,
+            float(cfg.plan_time_warp_gamma),
             int(cfg.num_plan_tokens),
             bool(cfg.plan_learned_encoder_norm),
             float(cfg.plan_loss_weight),
@@ -267,6 +287,17 @@ def test_owt_elfb_ablation_configs_are_unique_and_expected():
     assert independent.plan_denoiser_type == "independent"
     assert independent.plan_denoiser_depth == 12
     assert independent.max_length == 256
+
+    triangular = load_config_from_yaml(str(root / "tier5_hierarchical_prefix_len256.yml"))
+    leading = load_config_from_yaml(
+        str(root / "tier5_hierarchical_prefix_lead_g3_len256.yml")
+    )
+    assert triangular.plan_denoiser_type == leading.plan_denoiser_type == "shared"
+    assert triangular.plan_attention_topology == leading.plan_attention_topology == "hierarchical_prefix"
+    assert triangular.plan_time_schedule == "aligned"
+    assert triangular.plan_time_warp_gamma == pytest.approx(1.0)
+    assert leading.plan_time_schedule == "noise_power"
+    assert leading.plan_time_warp_gamma == pytest.approx(3.0)
 
 
 def test_config_reference_covers_config_sampling_cli_and_launcher_flags():

@@ -211,6 +211,7 @@ class ELF(nn.Module):
         plan_slot_dit_depth: int = 2,
         plan_denoiser_type: str = "shared",
         plan_denoiser_depth: int = 12,
+        plan_attention_topology: str = "joint",
         plan_learned_encoder_norm: bool = True,
     ):
         super().__init__()
@@ -234,6 +235,7 @@ class ELF(nn.Module):
         self.num_plan_tokens = num_plan_tokens if use_sentence_plan else 0
         self.plan_adapter_type = plan_adapter_type
         self.plan_denoiser_type = plan_denoiser_type
+        self.plan_attention_topology = plan_attention_topology
         self.plan_learned_encoder_norm = plan_learned_encoder_norm
 
         # Self-conditioning input projection (only used when input is [z, x_pred]).
@@ -265,6 +267,10 @@ class ELF(nn.Module):
                 raise ValueError("plan_adapter_type must be 'slot_mlp' or 'slot_dit'")
             if self.plan_denoiser_type not in {"shared", "independent"}:
                 raise ValueError("plan_denoiser_type must be 'shared' or 'independent'")
+            if self.plan_attention_topology not in {"joint", "hierarchical_prefix"}:
+                raise ValueError(
+                    "plan_attention_topology must be 'joint' or 'hierarchical_prefix'"
+                )
             if self.num_plan_tokens <= 0:
                 raise ValueError("num_plan_tokens must be positive when use_sentence_plan=True")
             if self.sentence_emb_dim <= 0:
@@ -409,11 +415,67 @@ class ELF(nn.Module):
             plan_pred = self.plan_encoder_output_norm(plan_pred)
         return plan_pred
 
+    @staticmethod
+    def build_hierarchical_attention_mask(
+        *,
+        field_attention_mask: Optional[torch.Tensor],
+        cond_seq_mask: torch.Tensor,
+        upstream_token_count: int,
+    ) -> torch.Tensor:
+        """Build a prefix/plan -> future block-triangular attention mask.
+
+        The upstream group contains time, self-cond CFG, model-mode, plan, and
+        observed field-prefix tokens. It cannot read future-token keys. Future
+        queries may read every valid key. Enforcing this in every transformer
+        block also prevents future information from leaking indirectly through
+        an internal time/mode/prefix token on a later layer.
+        """
+        if cond_seq_mask.dim() != 2:
+            raise ValueError(
+                "cond_seq_mask must have shape (batch, field_length), "
+                f"got {tuple(cond_seq_mask.shape)}"
+            )
+        batch_size, field_length = cond_seq_mask.shape
+        if upstream_token_count < 0:
+            raise ValueError("upstream_token_count must be non-negative")
+        if field_attention_mask is None:
+            field_valid = torch.ones(
+                (batch_size, field_length),
+                dtype=torch.bool,
+                device=cond_seq_mask.device,
+            )
+        else:
+            if field_attention_mask.dim() != 2 or tuple(field_attention_mask.shape) != (
+                batch_size,
+                field_length,
+            ):
+                raise ValueError(
+                    "field attention_mask must match cond_seq_mask shape for "
+                    "hierarchical_prefix topology"
+                )
+            field_valid = field_attention_mask.bool()
+
+        cond_rows = cond_seq_mask.bool() & field_valid
+        future_rows = ~cond_seq_mask.bool() & field_valid
+        internal_rows = torch.ones(
+            (batch_size, upstream_token_count),
+            dtype=torch.bool,
+            device=cond_seq_mask.device,
+        )
+        query_is_upstream = torch.cat([internal_rows, cond_rows], dim=1)
+        key_is_future = torch.cat([torch.zeros_like(internal_rows), future_rows], dim=1)
+        key_is_valid = torch.cat([internal_rows, field_valid], dim=1)
+        no_future_leak = ~(
+            query_is_upstream.unsqueeze(-1) & key_is_future.unsqueeze(-2)
+        )
+        return no_future_leak & key_is_valid.unsqueeze(1)
+
     def forward(
         self,
         x: torch.Tensor,
         t: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
+        cond_seq_mask: Optional[torch.Tensor] = None,
         deterministic: bool = True,
         self_cond_cfg_scale: Optional[torch.Tensor] = None,
         decoder_step_active: Optional[bool] = None,
@@ -422,7 +484,12 @@ class ELF(nn.Module):
         return_plan: bool = False,
         learned_plan_encode: bool = False,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
-        """x: (N, S, C) or (N, S, 2C) with self-cond. t: (N,). attention_mask: (N, S), 1=valid."""
+        """Run ELF over token fields and optional plan slots.
+
+        ``attention_mask`` and ``cond_seq_mask`` refer to the unprefixed token
+        field. The latter is required by ``hierarchical_prefix`` so observed
+        prefix rows can condition plan slots while future-token rows cannot.
+        """
         B = x.shape[0]
 
         if learned_plan_encode:
@@ -430,6 +497,16 @@ class ELF(nn.Module):
                 raise ValueError("learned_plan_encode requires use_sentence_plan=True and sentence_encoder_type='learned'")
             plan_z = self.plan_encoder_query.expand(B, -1)
             return_plan = True
+
+        if (
+            self.use_sentence_plan
+            and self.plan_attention_topology == "hierarchical_prefix"
+            and not learned_plan_encode
+            and cond_seq_mask is None
+        ):
+            raise ValueError(
+                "cond_seq_mask is required for hierarchical_prefix plan attention"
+            )
 
         if self.use_sentence_plan:
             if plan_z is None:
@@ -500,6 +577,23 @@ class ELF(nn.Module):
                 prefix_mask = torch.ones((B, prefix_len),
                                          dtype=attention_mask.dtype, device=attention_mask.device)
                 attention_mask = torch.cat([prefix_mask, attention_mask], dim=1)
+
+        if (
+            self.use_sentence_plan
+            and self.plan_attention_topology == "hierarchical_prefix"
+            and not learned_plan_encode
+        ):
+            field_length = cond_seq_mask.shape[1]
+            if x.shape[1] < field_length:
+                raise ValueError("cond_seq_mask is longer than the token field")
+            field_attention_mask = None
+            if attention_mask is not None:
+                field_attention_mask = attention_mask[:, -field_length:]
+            attention_mask = self.build_hierarchical_attention_mask(
+                field_attention_mask=field_attention_mask,
+                cond_seq_mask=cond_seq_mask,
+                upstream_token_count=x.shape[1] - field_length,
+            )
 
         use_checkpoint = self.gradient_checkpointing and self.training and torch.is_grad_enabled()
         for block in self.blocks:

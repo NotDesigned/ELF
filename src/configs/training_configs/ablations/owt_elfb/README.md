@@ -112,6 +112,31 @@ should have separate parameters without changing how tokens are conditioned.
 Use the same pure-ELF warm start, source, image, seed, batch settings, training
 budget, hardware, and sampling variants for both arms.
 
+## Hierarchical Prefix -> Plan -> Future Topology
+
+This axis keeps the shared ELF-B parameter count fixed and separates activation
+topology from relative diffusion time:
+
+| Config | Attention topology | Plan time |
+|---|---|---|
+| `tier0_1_sentence_t5_len256.yml` | joint plan/future | aligned |
+| `tier5_hierarchical_prefix_len256.yml` | prefix/plan -> future block-triangular | aligned |
+| `tier5_hierarchical_prefix_lead_g3_len256.yml` | prefix/plan -> future block-triangular | `noise_power`, gamma=3 |
+
+For `hierarchical_prefix`, time/self-cond/mode/plan/observed-prefix queries are
+all upstream and cannot read future-token keys. Future-token queries may read
+every valid upstream and future key. Blocking the whole upstream group in every
+layer prevents future information from leaking back to plan slots through an
+intermediate special or prefix token. On unconditional OWT, the observed prefix
+is empty, so this is a plan-prior -> future test; conditional datasets are still
+required to measure prefix-conditioned plan adherence.
+
+The gamma-3 arm uses the same mapping in training and sampling:
+`plan_t = 1 - (1 - token_t)^3`. At token `t=0.5`, the plan has reached
+`t=0.875`, approximately 90% of its denoising path. It is a soft plan-first
+schedule, not a separate
+two-stage sampler.
+
 ## Warm Start
 
 For warm-starting plan runs from a trained pure ELF checkpoint, add overrides:

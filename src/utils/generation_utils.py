@@ -168,7 +168,8 @@ def _generate_samples_single_batch(
 @torch.no_grad()
 def _dlm_decode_batch(z: torch.Tensor, model: nn.Module, t_final_val,
                       config, self_cond_cfg_scale: float,
-                      plan_z: Optional[torch.Tensor] = None) -> torch.Tensor:
+                      plan_z: Optional[torch.Tensor] = None,
+                      cond_seq_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
     """Decode z -> tokens with the DLM decoder head."""
     batch_size = z.shape[0]
     if isinstance(t_final_val, torch.Tensor) and t_final_val.dim() == 0:
@@ -185,13 +186,20 @@ def _dlm_decode_batch(z: torch.Tensor, model: nn.Module, t_final_val,
         if plan_z is None:
             raise ValueError("plan_z is required for decoding when use_sentence_plan=True")
         plan_kwargs = {"plan_z": plan_z, "plan_t": t_final}
+    topology_kwargs = {}
+    if str(getattr(config, "plan_attention_topology", "joint")) == "hierarchical_prefix":
+        if cond_seq_mask is None:
+            cond_seq_mask = torch.zeros(
+                z.shape[:2], dtype=z.dtype, device=z.device,
+            )
+        topology_kwargs = {"cond_seq_mask": cond_seq_mask}
     use_bf16 = bool(getattr(config, "use_bf16", True)) and z.is_cuda
     with torch.amp.autocast('cuda', dtype=torch.bfloat16, enabled=use_bf16):
         _, decoder_logits = model(
             z_input, t_final, deterministic=True,
             self_cond_cfg_scale=sc_batch,
             decoder_step_active=True,
-            **plan_kwargs,
+            **topology_kwargs, **plan_kwargs,
         )
     return decoder_logits.argmax(dim=-1)
 

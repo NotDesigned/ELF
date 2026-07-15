@@ -141,6 +141,11 @@ def validate_config(config) -> Config:
             "plan_denoiser_type must be 'shared' or 'independent', "
             f"got {config.plan_denoiser_type!r}"
         )
+    if config.plan_attention_topology not in {"joint", "hierarchical_prefix"}:
+        raise ValueError(
+            "plan_attention_topology must be 'joint' or 'hierarchical_prefix', "
+            f"got {config.plan_attention_topology!r}"
+        )
     if config.plan_aux_token_context not in {"denoiser_z", "resampled_z", "mixed_z", "clean_x0"}:
         raise ValueError(
             "plan_aux_token_context must be one of ['clean_x0', 'denoiser_z', 'mixed_z', 'resampled_z'], "
@@ -324,6 +329,7 @@ class Config:
     plan_slot_dit_depth: int = 2
     plan_denoiser_type: str = "shared"  # "shared" or plan-only "independent"
     plan_denoiser_depth: int = 12
+    plan_attention_topology: str = "joint"  # "joint" or prefix->plan->future "hierarchical_prefix"
     plan_learned_encoder_norm: bool = True
     plan_loss_weight: float = 1.0
     plan_noise_scale: float = 1.0

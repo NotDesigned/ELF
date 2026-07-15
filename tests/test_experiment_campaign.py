@@ -14,9 +14,49 @@ from elf_experiments.campaign import (
     resolve_campaign,
 )
 from elf_experiments.controller import materialize_run, validate_run
+from configs.config import load_config_from_yaml
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_hierarchical_plan_campaign_is_a_matched_three_arm_ablation():
+    campaign = load_and_resolve_campaign(
+        REPO_ROOT
+        / "experiments/campaigns/fusion_hierarchical_plan_lead_h200_20260715.yml"
+    )
+    runs = {run["research_role"]: run for run in campaign["runs"]}
+    assert set(runs) == {
+        "joint_aligned",
+        "triangular_aligned",
+        "triangular_lead_g3",
+    }
+
+    configs = {
+        role: load_config_from_yaml(str(REPO_ROOT / run["config"]))
+        for role, run in runs.items()
+    }
+    assert {config.plan_denoiser_type for config in configs.values()} == {"shared"}
+    assert configs["joint_aligned"].plan_attention_topology == "joint"
+    assert configs["joint_aligned"].plan_time_schedule == "aligned"
+    assert configs["triangular_aligned"].plan_attention_topology == "hierarchical_prefix"
+    assert configs["triangular_aligned"].plan_time_schedule == "aligned"
+    assert configs["triangular_lead_g3"].plan_attention_topology == "hierarchical_prefix"
+    assert configs["triangular_lead_g3"].plan_time_schedule == "noise_power"
+    assert configs["triangular_lead_g3"].plan_time_warp_gamma == pytest.approx(3.0)
+
+    matched_fields = (
+        "sentence_encoder_type",
+        "sentence_emb_dim",
+        "num_plan_tokens",
+        "plan_loss_weight",
+        "max_length",
+        "eval_ppl_max_length",
+    )
+    for field in matched_fields:
+        assert len({getattr(config, field) for config in configs.values()}) == 1
+    assert len({run["image_id"] for run in runs.values()}) == 1
+    assert len({run["backend"]["gres"] for run in runs.values()}) == 1
 
 
 def test_research_project_campaign_catalog_matches_campaign_files():

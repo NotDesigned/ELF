@@ -107,6 +107,7 @@ def tiny_config(**overrides):
         sentence_encoder_grad="none",
         plan_aux_passes=1,
         plan_aux_token_context="denoiser_z",
+        plan_attention_topology="joint",
         grad_accum_steps=1,
         ema_decay1=0.0,
     )
@@ -121,6 +122,7 @@ def tiny_model(
     num_self_cond_cfg_tokens=1,
     plan_adapter_type="slot_mlp",
     plan_denoiser_type="shared",
+    plan_attention_topology="joint",
 ):
     return ELF(
         text_encoder_dim=4,
@@ -142,7 +144,70 @@ def tiny_model(
         plan_slot_dit_depth=1,
         plan_denoiser_type=plan_denoiser_type,
         plan_denoiser_depth=1,
+        plan_attention_topology=plan_attention_topology,
     )
+
+
+def test_hierarchical_attention_mask_blocks_all_upstream_future_reads():
+    mask = ELF.build_hierarchical_attention_mask(
+        field_attention_mask=torch.tensor([[1, 1, 1, 0]], dtype=torch.float32),
+        cond_seq_mask=torch.tensor([[1, 1, 0, 0]], dtype=torch.float32),
+        upstream_token_count=2,
+    )
+
+    # Internal + observed-prefix queries cannot read the one valid future key.
+    assert not mask[0, :4, 4].any()
+    # The padded final key is unavailable to every query.
+    assert not mask[0, :, 5].any()
+    # A future query can read internal, observed-prefix, and future keys.
+    assert mask[0, 4, :5].all()
+
+
+def test_hierarchical_shared_plan_depends_on_prefix_not_future_field():
+    torch.manual_seed(2031)
+    model = tiny_model(
+        sentence_encoder_type="sentence_t5",
+        plan_attention_topology="hierarchical_prefix",
+    ).eval()
+    plan_z = torch.randn(2, 8)
+    plan_t = torch.tensor([0.2, 0.7])
+    token_t = torch.tensor([0.3, 0.6])
+    cond_seq_mask = torch.tensor(
+        [[1, 1, 0, 0, 0, 0], [1, 1, 0, 0, 0, 0]], dtype=torch.float32,
+    )
+    attention_mask = torch.ones_like(cond_seq_mask)
+    x_base = torch.randn(2, 6, 4)
+    x_future_changed = x_base.clone()
+    x_future_changed[:, 2:] = torch.randn_like(x_future_changed[:, 2:])
+    x_prefix_changed = x_base.clone()
+    x_prefix_changed[:, :2] = torch.randn_like(x_prefix_changed[:, :2])
+
+    common = {
+        "t": token_t,
+        "attention_mask": attention_mask,
+        "cond_seq_mask": cond_seq_mask,
+        "plan_z": plan_z,
+        "plan_t": plan_t,
+        "self_cond_cfg_scale": torch.ones(2),
+        "return_plan": True,
+        "deterministic": True,
+    }
+    _, _, plan_base = model(x_base, **common)
+    _, _, plan_future_changed = model(x_future_changed, **common)
+    _, _, plan_prefix_changed = model(x_prefix_changed, **common)
+
+    assert torch.equal(plan_base, plan_future_changed)
+    assert not torch.equal(plan_base, plan_prefix_changed)
+
+
+def test_hierarchical_train_step_runs_with_prefix_mask_plumbed():
+    model = tiny_model(plan_attention_topology="hierarchical_prefix")
+    config = tiny_config(plan_attention_topology="hierarchical_prefix")
+
+    _, metrics = run_tiny_train_step(config, model=model)
+
+    assert torch.isfinite(metrics["loss"])
+    assert torch.isfinite(metrics["plan_loss"])
 
 
 def train_state(model):

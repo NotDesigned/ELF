@@ -221,8 +221,8 @@ Notes:
 
 - Plan and field default to a **shared time `t`** (`plan_time_schedule=aligned`).
   `plan_time_schedule=noise_power` makes the plan lead the token field while
-  preserving the same endpoints. With `plan_time_warp_gamma=2`, token `t=0.5`
-  maps to plan `t_s=0.75` (token noise `0.5`, plan noise `0.25`).
+  preserving the same endpoints. With `plan_time_warp_gamma=3`, token `t=0.5`
+  maps to plan `t_s=0.875` (token noise `0.5`, plan noise `0.125`).
 - At inference the sentence latent is **sampled** (`z_s` denoised from noise
   jointly with the field). The encoder pass only provides the training target
   `s0`; it is not used at inference.
@@ -368,6 +368,31 @@ generation remains plan-conditioned. Only the clean-plan prediction comes from
 the separate stack and is invariant to the token-field input. Its 12-block
 depth matches ELF-B's shared trunk. This isolates
 parameter sharing from the deferred prefix/future attention-mask ablation.
+
+### Tier 5: Hierarchical Prefix -> Plan -> Future
+
+`plan_attention_topology=hierarchical_prefix` gives the generative path a
+block-triangular dependency graph. Time/self-cond/mode/plan/observed-prefix
+queries cannot read future-token keys in any ELF block; future-token queries
+can read every valid upstream and future key. This realizes
+`p(plan | prefix) * p(future | prefix, plan)` without allowing noisy future
+tokens to feed back into the plan readout through an intermediate special or
+prefix token.
+
+The matched three-arm ablation is:
+
+| Arm | Attention | Plan time |
+|---|---|---|
+| joint-aligned | bidirectional joint | aligned |
+| triangular-aligned | block-triangular | aligned |
+| triangular-lead-g3 | block-triangular | `1-(1-t)^3` |
+
+The first contrast isolates activation topology. The second contrast isolates
+soft plan-leading time after future-to-plan attention has already been removed.
+All three use the shared plan predictor, so this campaign does not inherit the
+independent denoiser's extra parameter-count confound. The learned clean-plan
+encoder pass remains bidirectional because it constructs a training target,
+not the generative prior.
 
 **Current metrics:** `loss`, `l2_loss`, `ce_loss`, `plan_loss`, and
 `plan_aux_loss` are returned from `train_step.py`. `train_ce_loss` is still the

@@ -126,6 +126,18 @@ def train_step(
         loss_mask = torch.ones_like(attention_mask)
     loss_mask = loss_mask * (1 - cond_seq_mask)
 
+    plan_attention_kwargs = {}
+    if str(getattr(config, "plan_attention_topology", "joint")) == "hierarchical_prefix":
+        topology_cond_seq_mask = cond_seq_mask
+        if config.label_drop_prob > 0:
+            topology_cond_seq_mask = topology_cond_seq_mask * (
+                ~label_drop_mask
+            ).to(topology_cond_seq_mask.dtype).unsqueeze(1)
+        plan_attention_kwargs = {
+            "attention_mask": attention_mask,
+            "cond_seq_mask": topology_cond_seq_mask,
+        }
+
     cond_seq_mask = cond_seq_mask.unsqueeze(-1)  # (B, S, 1)
 
     denoiser_z = add_noise(x0, noise, t, config, cond_seq_mask=cond_seq_mask)
@@ -249,7 +261,7 @@ def train_step(
             net_out_uncond = model(
                 z_input_uncond, t_input,
                 deterministic=True, self_cond_cfg_scale=self_cond_cfg_scale,
-                **plan_kwargs,
+                **plan_attention_kwargs, **plan_kwargs,
             )
         return net_out_uncond
 
@@ -265,7 +277,7 @@ def train_step(
                 net_out_uncond = model(
                     z, t_input,
                     deterministic=True, self_cond_cfg_scale=self_cond_cfg_scale,
-                    **plan_kwargs,
+                    **plan_attention_kwargs, **plan_kwargs,
                 )
             v_uncond, _ = net_out_to_v_x(net_out_uncond, z, t_input, t_eps)
             return v_uncond, v_uncond
@@ -278,7 +290,7 @@ def train_step(
             net_out_cond = model(
                 z_input_cond, t_input,
                 deterministic=True, self_cond_cfg_scale=self_cond_cfg_scale,
-                **plan_kwargs,
+                **plan_attention_kwargs, **plan_kwargs,
             )
         v_cond, _ = net_out_to_v_x(net_out_cond, z, t_input, t_eps)
         return v_cond, v_uncond
@@ -358,7 +370,7 @@ def train_step(
             deterministic=False,
             self_cond_cfg_scale=self_cond_cfg_scale,
             decoder_step_active=decoder_step_active,  # (B,) tensor
-            **plan_kwargs,
+            **plan_attention_kwargs, **plan_kwargs,
         )
     if use_sentence_plan:
         net_out, decoder_logits, plan_pred = model_out
@@ -425,6 +437,7 @@ def train_step(
                     token_z_aux.detach(), t_aux,
                     deterministic=False,
                     self_cond_cfg_scale=self_cond_cfg_scale,
+                    **plan_attention_kwargs,
                     plan_z=plan_z_aux,
                     plan_t=plan_t_aux,
                     return_plan=True,

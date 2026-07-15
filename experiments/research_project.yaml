@@ -23,6 +23,18 @@ controller:
       - yaml
     require_clean_git: true
 campaigns:
+  - name: fusion-hierarchical-plan-lead-h200-20260715-c2
+    file: experiments/campaigns/fusion_hierarchical_plan_lead_h200_20260715.yml
+    role_notes:
+      joint_aligned: shared-trunk bidirectional attention with aligned plan/token time
+      triangular_aligned: matched shared-trunk block-triangular attention with aligned time
+      triangular_lead_g3: matched block-triangular treatment with gamma-3 plan-leading time
+  - name: fusion-hierarchical-plan-lead-smoke-h200-20260715-c2
+    file: experiments/campaigns/fusion_hierarchical_plan_lead_smoke_h200_20260715.yml
+    role_notes:
+      joint_aligned: operational joint-attention control
+      triangular_aligned: operational mask and prefix-plumbing treatment
+      triangular_lead_g3: operational mask plus gamma-3 schedule treatment
   - name: fusion-independent-plan-denoiser-h200-20260715-c2
     file: experiments/campaigns/fusion_independent_plan_denoiser_h200_20260715_c2.yml
     role_notes:

@@ -194,10 +194,13 @@ def _forward_sample_self_cond(
                 "plan_t": t_batch if plan_t is None else plan_t,
                 "return_plan": True,
             }
+        topology_kwargs = {}
+        if str(getattr(config, "plan_attention_topology", "joint")) == "hierarchical_prefix":
+            topology_kwargs = {"cond_seq_mask": cond_seq_mask}
         return model(
             z_input, t_batch, deterministic=True,
             self_cond_cfg_scale=self_cond_scale,
-            **plan_kwargs,
+            **topology_kwargs, **plan_kwargs,
         )
 
     if config.num_self_cond_cfg_tokens > 0:
