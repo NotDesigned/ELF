@@ -131,6 +131,7 @@ schema rather than treating training flags as scheduler configuration.
 | `eval_mauve` | `true` | Compute MAUVE between generated and real-reference distributions; writes the standard score on a 0--100 scale. |
 | `eval_mauve_model` | `gpt2-large` | Frozen language model used only to featurize real/generated text for MAUVE. It can differ from `eval_ppl_model`; equal values share one loaded evaluator. |
 | `eval_mauve_seed` | `25` | Deterministic PCA/k-means seed for `mauve-text`. |
+| `eval_sampled_plan_diagnostics` | `false` | For conditional sentence-plan generation, compare sampled plan latents with their per-example clean targets using variance, cosine, MSE, retrieval top-1, and retrieval margin. |
 | `reconstruction_eval` | `false` | Enable oracle/shuffled-plan and clean-token reconstruction diagnostics. |
 | `reconstruction_num_samples` | `None` | Reconstruction sample count; `None` reuses `num_samples`. |
 | `train_sampling_eval_freq` | `0` | Microstep interval for lightweight generation diagnostics; zero disables. |

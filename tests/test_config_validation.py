@@ -70,6 +70,21 @@ def test_mauve_config_override_and_seed_validation():
         validate_config(cfg)
 
 
+def test_sampled_plan_diagnostics_require_conditional_sentence_plans():
+    cfg = Config()
+    cfg.eval_sampled_plan_diagnostics = True
+    with pytest.raises(ValueError, match="use_sentence_plan"):
+        validate_config(cfg)
+
+    cfg.use_sentence_plan = True
+    with pytest.raises(ValueError, match="conditional evaluation"):
+        validate_config(cfg)
+
+    cfg.split_input_as_prefix = True
+    cfg.max_input_length = 64
+    assert validate_config(cfg).eval_sampled_plan_diagnostics is True
+
+
 def test_independent_plan_denoiser_config_validation():
     cfg = Config()
     cfg.use_sentence_plan = True

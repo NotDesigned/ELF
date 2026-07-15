@@ -236,6 +236,16 @@ def validate_config(config) -> Config:
     if bool(config.use_sentence_plan):
         _validate_positive_int(config.num_plan_tokens, "num_plan_tokens")
         _validate_positive_int(config.sentence_emb_dim, "sentence_emb_dim")
+    if bool(config.eval_sampled_plan_diagnostics):
+        if not bool(config.use_sentence_plan):
+            raise ValueError(
+                "eval_sampled_plan_diagnostics=true requires use_sentence_plan=true"
+            )
+        if not bool(config.split_input_as_prefix) and config.eval_data_path is None:
+            raise ValueError(
+                "eval_sampled_plan_diagnostics=true requires conditional evaluation "
+                "through split_input_as_prefix or eval_data_path"
+            )
     if config.plan_adapter_type == "slot_dit":
         _validate_positive_int(config.plan_slot_dit_depth, "plan_slot_dit_depth")
     if config.plan_denoiser_type == "independent":
@@ -399,6 +409,7 @@ class Config:
     eval_mauve: bool = True  # Compare generated/reference distributions in a fixed LM feature space.
     eval_mauve_model: str = "gpt2-large"  # Feature model for MAUVE; may differ from eval_ppl_model.
     eval_mauve_seed: int = 25  # Deterministic PCA/k-means seed used by mauve-text.
+    eval_sampled_plan_diagnostics: bool = False  # Compare sampled plans with per-example clean targets.
     reconstruction_eval: bool = False  # Run oracle/shuffled plan PPL and clean-token reconstruction diagnostics.
     reconstruction_num_samples: int = None  # None = reuse num_samples.
     train_sampling_eval_freq: int = 0  # Step interval for lightweight gPPL/plan/token-recon eval. 0 disables.

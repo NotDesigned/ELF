@@ -16,6 +16,7 @@ from generation import (
     _capture_rng_state,
     _evaluation_sampling_dimensions,
     _evaluation_generators,
+    _sampled_plan_diagnostics,
     _token_denoising_l2_stats,
     _teacher_forced_token_stats,
     _restore_rng_state,
@@ -180,6 +181,40 @@ def test_token_rng_is_independent_from_plan_rng_consumption():
 
     assert torch.equal(first_a, first_b)
     assert torch.equal(second_a, second_b)
+
+
+def test_sampled_plan_diagnostics_detect_identity_and_collapse():
+    clean = torch.eye(4)
+    aligned = _sampled_plan_diagnostics(clean.clone(), clean)
+    collapsed = _sampled_plan_diagnostics(
+        clean.mean(dim=0, keepdim=True).expand_as(clean), clean,
+    )
+
+    assert aligned["sampled_plan_num_samples"] == 4
+    assert aligned["sampled_plan_var_ratio"] == pytest.approx(1.0)
+    assert aligned["sampled_clean_plan_cosine"] == pytest.approx(1.0)
+    assert aligned["sampled_clean_plan_cosine_std"] == pytest.approx(0.0)
+    assert aligned["sampled_clean_plan_mse"] == pytest.approx(0.0)
+    assert aligned["sampled_clean_plan_retrieval_top1"] == pytest.approx(1.0)
+    assert aligned["sampled_clean_plan_retrieval_top1_count"] == 4
+    assert aligned["sampled_clean_plan_retrieval_chance"] == pytest.approx(0.25)
+    assert aligned["sampled_clean_plan_retrieval_lift"] == pytest.approx(4.0)
+    assert aligned["sampled_clean_plan_retrieval_margin"] == pytest.approx(1.0)
+    assert collapsed["sampled_plan_var_ratio"] == pytest.approx(0.0)
+    assert collapsed["sampled_clean_plan_retrieval_top1"] == pytest.approx(0.25)
+    assert collapsed["sampled_clean_plan_retrieval_top1_count"] == 1
+    assert collapsed["sampled_clean_plan_retrieval_lift"] == pytest.approx(1.0)
+    assert collapsed["sampled_clean_plan_retrieval_margin"] == pytest.approx(0.0)
+
+
+def test_sampled_plan_diagnostics_reject_invalid_pairs():
+    with pytest.raises(ValueError, match="shapes differ"):
+        _sampled_plan_diagnostics(torch.zeros(2, 3), torch.zeros(2, 4))
+    with pytest.raises(ValueError, match="at least two"):
+        _sampled_plan_diagnostics(torch.zeros(1, 3), torch.zeros(1, 3))
+    invalid = torch.tensor([[0.0, float("nan")], [1.0, 2.0]])
+    with pytest.raises(ValueError, match="finite"):
+        _sampled_plan_diagnostics(invalid, torch.zeros_like(invalid))
 
 
 def test_sde_token_path_is_paired_with_and_without_plan_latent():

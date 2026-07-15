@@ -88,6 +88,32 @@ def test_discovers_and_summarizes_run(tmp_path):
     assert row["plan_ppl_gap"] == 5.5
 
 
+def test_sampled_plan_diagnostics_reach_flat_summary(tmp_path):
+    run_dir = make_run(tmp_path)
+    metrics_path = (
+        run_dir / "train_sampling_eval" / "generation" / "metrics.jsonl"
+    )
+    record = json.loads(metrics_path.read_text(encoding="utf-8"))
+    record.update({
+        "sampled_plan_num_samples": 256,
+        "sampled_plan_var_ratio": 0.2,
+        "sampled_clean_plan_cosine": 0.1,
+        "sampled_clean_plan_retrieval_top1": 0.02,
+        "sampled_clean_plan_retrieval_chance": 1 / 256,
+        "sampled_clean_plan_retrieval_margin": -0.3,
+    })
+    metrics_path.write_text(json.dumps(record) + "\n", encoding="utf-8")
+
+    row = summarize_run(run_dir)
+
+    assert row["sampled_plan_num_samples"] == 256
+    assert row["sampled_plan_var_ratio"] == 0.2
+    assert row["sampled_clean_plan_cosine"] == 0.1
+    assert row["sampled_clean_plan_retrieval_top1"] == 0.02
+    assert row["sampled_clean_plan_retrieval_chance"] == pytest.approx(1 / 256)
+    assert row["sampled_clean_plan_retrieval_margin"] == -0.3
+
+
 def test_clean_model_summary_does_not_require_plan_intervention_metrics(tmp_path):
     run_dir = make_run(tmp_path)
     manifest_path = run_dir / "manifest.yaml"

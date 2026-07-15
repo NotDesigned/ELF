@@ -9,6 +9,7 @@ import numpy as np
 import torch
 import torch.distributed as dist
 import torch.nn as nn
+import torch.nn.functional as F
 from tqdm import tqdm
 
 from configs.config import Config, SamplingConfig
@@ -113,6 +114,71 @@ def _evaluation_rng_metadata(generator: torch.Generator) -> dict:
         "rng_protocol": "split_token_plan_v1",
         "plan_rng_offset": _PLAN_RNG_OFFSET,
     }
+
+
+def _sampled_plan_diagnostics(
+    sampled_plan: torch.Tensor,
+    clean_plan: torch.Tensor,
+) -> dict[str, float | int]:
+    """Measure whether sampled plans preserve per-example clean-plan identity."""
+    if sampled_plan.shape != clean_plan.shape:
+        raise ValueError(
+            "sampled and clean plan shapes differ: "
+            f"{tuple(sampled_plan.shape)} != {tuple(clean_plan.shape)}"
+        )
+    if sampled_plan.ndim < 2 or sampled_plan.shape[0] < 2:
+        raise ValueError("sampled plan diagnostics require at least two samples")
+    sampled = sampled_plan.detach().float().reshape(sampled_plan.shape[0], -1)
+    clean = clean_plan.detach().float().reshape(clean_plan.shape[0], -1)
+    if not torch.isfinite(sampled).all() or not torch.isfinite(clean).all():
+        raise ValueError("sampled plan diagnostics require finite latents")
+
+    sampled_var = sampled.var(dim=0, unbiased=False).mean()
+    clean_var = clean.var(dim=0, unbiased=False).mean()
+    per_example_cosine = F.cosine_similarity(sampled, clean, dim=1)
+    per_example_mse = (sampled - clean).pow(2).mean(dim=1)
+    similarity = F.normalize(sampled, dim=1) @ F.normalize(clean, dim=1).T
+    indices = torch.arange(sampled.shape[0], device=similarity.device)
+    true_similarity = similarity[indices, indices]
+    negative_similarity = similarity.masked_fill(
+        torch.eye(
+            sampled.shape[0], dtype=torch.bool, device=similarity.device,
+        ),
+        float("-inf"),
+    ).max(dim=1).values
+
+    retrieval_hits = similarity.argmax(dim=1) == indices
+    retrieval_top1 = retrieval_hits.float().mean()
+    retrieval_chance = 1.0 / float(sampled.shape[0])
+    metrics: dict[str, float | int] = {
+        "sampled_plan_num_samples": int(sampled.shape[0]),
+        "sampled_plan_batch_var": float(sampled_var.item()),
+        "clean_plan_batch_var": float(clean_var.item()),
+        "sampled_clean_plan_cosine": float(per_example_cosine.mean().item()),
+        "sampled_clean_plan_cosine_std": float(
+            per_example_cosine.std(unbiased=False).item()
+        ),
+        "sampled_clean_plan_mse": float(per_example_mse.mean().item()),
+        "sampled_clean_plan_mse_std": float(
+            per_example_mse.std(unbiased=False).item()
+        ),
+        "sampled_clean_plan_retrieval_top1": float(retrieval_top1.item()),
+        "sampled_clean_plan_retrieval_top1_count": int(
+            retrieval_hits.sum().item()
+        ),
+        "sampled_clean_plan_retrieval_chance": retrieval_chance,
+        "sampled_clean_plan_retrieval_lift": float(
+            retrieval_top1.item() / retrieval_chance
+        ),
+        "sampled_clean_plan_retrieval_margin": float(
+            (true_similarity - negative_similarity).mean().item()
+        ),
+    }
+    if float(clean_var.item()) > 0.0:
+        metrics["sampled_plan_var_ratio"] = float(
+            (sampled_var / clean_var).item()
+        )
+    return metrics
 
 
 def _paired_nonempty_texts(generated_texts, reference_texts) -> tuple[list[str], list[str]]:
@@ -460,6 +526,7 @@ def run_generation(
         else:
             test_generation_cond(
                 **common_kwargs, encoder=encoder, dataset=eval_dataset,
+                sentence_encoder=sentence_encoder,
             )
 
     if bool(getattr(config, "reconstruction_eval", False)):
@@ -778,6 +845,7 @@ def test_generation_cond(
     config: Config,
     sampling_config: SamplingConfig,
     dataset,
+    sentence_encoder=None,
     num_samples: int = 64,
     batch_size: int = 64,
 ):
@@ -828,6 +896,9 @@ def test_generation_cond(
     cfg_list = sampling_config.cfgs
     steps_list = sampling_config.num_sampling_steps
     self_cond_cfg_scales_list = sampling_config.self_cond_cfg_scales
+    collect_plan_diagnostics = bool(
+        getattr(config, "eval_sampled_plan_diagnostics", False)
+    )
 
     for num_sampling_steps, cfg_scale, self_cond_cfg_scale in itertools.product(
         steps_list, cfg_list, self_cond_cfg_scales_list
@@ -836,6 +907,7 @@ def test_generation_cond(
                   f"SC-CFG: {self_cond_cfg_scale} ---")
 
         local_generated = []
+        local_plan_records = []
         generation_time = 0.0
         decode_time = 0.0
         samples_processed = 0
@@ -884,6 +956,35 @@ def test_generation_cond(
             else:
                 latent, plan_latent = latent_out, None
             generation_time += time.time() - gen_start
+
+            if (
+                plan_latent is not None
+                and collect_plan_diagnostics
+            ):
+                clean_plan_latent = _clean_plan_latent(
+                    model=model,
+                    x0=cond_seq,
+                    input_ids=input_ids,
+                    loss_mask=_batch_loss_mask(
+                        attention_mask, cond_seq_mask_arr, config,
+                    ),
+                    tokenizer=tokenizer,
+                    sentence_encoder=sentence_encoder,
+                    config=config,
+                )
+                if clean_plan_latent is None:
+                    raise ValueError(
+                        "sampled plan diagnostics require a clean plan target"
+                    )
+                sample_ids = [int(i) for i in batch["index"]]
+                for sample_id, sampled_item, clean_item in zip(
+                    sample_ids, plan_latent, clean_plan_latent,
+                ):
+                    local_plan_records.append((
+                        sample_id,
+                        sampled_item.detach().float().cpu(),
+                        clean_item.detach().float().cpu(),
+                    ))
 
             gen_length = config.max_length - config.max_input_length
             cond_len_per_sample = cond_seq_mask_arr.to(torch.int32).sum(dim=1)
@@ -934,8 +1035,24 @@ def test_generation_cond(
                 all_generated = all_generated[:total_samples]
             else:
                 all_generated = []
+            if collect_plan_diagnostics:
+                gathered_plans = [None] * world
+                dist.all_gather_object(gathered_plans, local_plan_records)
+                if rank == 0:
+                    all_plan_records = []
+                    for shard in gathered_plans:
+                        all_plan_records.extend(shard)
+                    all_plan_records.sort(key=lambda row: row[0])
+                    all_plan_records = all_plan_records[:total_samples]
+                else:
+                    all_plan_records = []
+            else:
+                all_plan_records = []
         else:
             all_generated = local_generated
+            all_plan_records = (
+                local_plan_records if collect_plan_diagnostics else []
+            )
 
         log_for_0(f"Generation: {generation_time:.2f}s ({num_sampling_steps} steps) | Decode: {decode_time:.2f}s")
         log_for_0("-" * 70)
@@ -962,12 +1079,29 @@ def test_generation_cond(
             upload_output_dir_to_hf(config.output_dir, config.hf_repo_id, reason="generation")
 
             cond_eval_results = None
+            if all_plan_records:
+                sampled_plan_metrics = _sampled_plan_diagnostics(
+                    torch.stack([row[1] for row in all_plan_records]),
+                    torch.stack([row[2] for row in all_plan_records]),
+                )
+                cond_eval_results = dict(sampled_plan_metrics)
+                log_for_0(
+                    "Sampled-plan diagnostics: "
+                    f"var_ratio={sampled_plan_metrics.get('sampled_plan_var_ratio')} "
+                    f"cosine={sampled_plan_metrics['sampled_clean_plan_cosine']:.4f} "
+                    f"retrieval_top1="
+                    f"{sampled_plan_metrics['sampled_clean_plan_retrieval_top1']:.4f}"
+                )
             if config.online_eval and all_generated:
                 hypotheses = [gen for _, _, gen, _ in all_generated]
                 references = [orig for _, orig, _, _ in all_generated]
                 bleu_score = compute_bleu(hypotheses, references)
                 rouge_scores = compute_rouge(hypotheses, references)
-                cond_eval_results = {"bleu": bleu_score, **rouge_scores}
+                cond_eval_results = {
+                    **(cond_eval_results or {}),
+                    "bleu": bleu_score,
+                    **rouge_scores,
+                }
                 nonempty_hypotheses = [
                     text for text in hypotheses if isinstance(text, str) and text.strip()
                 ]
@@ -1023,12 +1157,16 @@ def test_generation_cond(
                     table.add_data(tid, ctx, orig, gen)
                 wandb_tables[f"generated_samples_cond_steps{num_sampling_steps}_cfg{cfg_scale}"] = table
                 if cond_eval_results is not None:
-                    wandb_tables.update({
-                        f"generation/{name}/bleu": cond_eval_results["bleu"],
-                        f"generation/{name}/rouge1": cond_eval_results["rouge1"],
-                        f"generation/{name}/rouge2": cond_eval_results["rouge2"],
-                        f"generation/{name}/rougeL": cond_eval_results["rougeL"],
-                    })
+                    if all(
+                        key in cond_eval_results
+                        for key in ("bleu", "rouge1", "rouge2", "rougeL")
+                    ):
+                        wandb_tables.update({
+                            f"generation/{name}/bleu": cond_eval_results["bleu"],
+                            f"generation/{name}/rouge1": cond_eval_results["rouge1"],
+                            f"generation/{name}/rouge2": cond_eval_results["rouge2"],
+                            f"generation/{name}/rougeL": cond_eval_results["rougeL"],
+                        })
                     if "g_ppl" in cond_eval_results:
                         wandb_tables.update({
                             f"generation/{name}/g_ppl": cond_eval_results["g_ppl"],
@@ -1036,6 +1174,9 @@ def test_generation_cond(
                         })
                     if "mauve" in cond_eval_results:
                         wandb_tables[f"generation/{name}/mauve"] = cond_eval_results["mauve"]
+                    for key, value in cond_eval_results.items():
+                        if key.startswith("sampled_") or key.startswith("clean_plan_"):
+                            wandb_tables[f"generation/{name}/{key}"] = value
             if cond_eval_results is not None:
                 metrics_line = {
                     "epoch": epoch_val,

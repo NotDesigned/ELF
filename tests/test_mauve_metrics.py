@@ -192,3 +192,20 @@ def test_campaign_summary_collects_conditional_similarity_metrics():
     assert candidates["g_ppl"] == 31.0
     assert candidates["bleu"] == 4.5
     assert candidates["rougeL"] == 18.0
+
+
+def test_campaign_summary_collects_sampled_plan_diagnostics():
+    candidates = dict(_metric_candidates({
+        "mode": "generation_refine_decode",
+        "sampled_plan_var_ratio": 0.2,
+        "sampled_clean_plan_cosine": 0.1,
+        "sampled_clean_plan_retrieval_top1": 0.02,
+        "sampled_clean_plan_retrieval_margin": -0.3,
+    }))
+
+    assert candidates == {
+        "sampled_plan_var_ratio": 0.2,
+        "sampled_clean_plan_cosine": 0.1,
+        "sampled_clean_plan_retrieval_top1": 0.02,
+        "sampled_clean_plan_retrieval_margin": -0.3,
+    }

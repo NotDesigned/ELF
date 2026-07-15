@@ -58,6 +58,19 @@ EVAL_AUX_KEYS = (
     "token_denoising_l2",
     "oracle_plan_token_denoising_l2",
     "shuffled_plan_token_denoising_l2",
+    "sampled_plan_num_samples",
+    "sampled_plan_batch_var",
+    "clean_plan_batch_var",
+    "sampled_plan_var_ratio",
+    "sampled_clean_plan_cosine",
+    "sampled_clean_plan_cosine_std",
+    "sampled_clean_plan_mse",
+    "sampled_clean_plan_mse_std",
+    "sampled_clean_plan_retrieval_top1",
+    "sampled_clean_plan_retrieval_top1_count",
+    "sampled_clean_plan_retrieval_chance",
+    "sampled_clean_plan_retrieval_lift",
+    "sampled_clean_plan_retrieval_margin",
     *_DENOISING_PROBE_KEYS,
 )
 EVAL_PRIMARY_BY_MODE = {
@@ -100,6 +113,7 @@ SCIENTIFIC_CONFIG_KEYS = (
     "eval_mauve",
     "eval_mauve_model",
     "eval_mauve_seed",
+    "eval_sampled_plan_diagnostics",
 )
 
 # ``summarize_run`` owns only scientific and evaluation projections when it is
@@ -707,7 +721,13 @@ def collect_eval_evidence(
                 for aux_metric in EVAL_AUX_KEYS:
                     expected_mode = (
                         "generation_refine_decode"
-                        if aux_metric in {"mauve", "bleu", "rouge1", "rouge2", "rougeL"}
+                        if (
+                            aux_metric in {
+                                "mauve", "bleu", "rouge1", "rouge2", "rougeL",
+                            }
+                            or aux_metric.startswith("sampled_")
+                            or aux_metric.startswith("clean_plan_")
+                        )
                         else "clean_token_reconstruction"
                     )
                     aux = [
