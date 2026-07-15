@@ -100,7 +100,7 @@ defaults:
       self_cond_cfg_scale: 3.0
       time_schedule: logit_normal
       time_warp_gamma: 1.5
-  image_id: sha256:6e51928b422310235d6f5e1c96fda6d375956208fdc94993b817c0e753882ad2
+  image_id: sha256:2d73cc75c7d88216c302301ad751565601eb477d5d9d73762d7828d8b78c8995
   resources: {gpus: 1, nodes: 1, cpus: 8, max_time: 4h}
   env:
     ELF_EVAL_DATA_ID: sha256:ecff221a9bcea13f64ddce845e1b4918c6fc618608de3568413503ea7888bdf5
@@ -129,7 +129,7 @@ profiles:
       priority: NORMAL
       quota_type: spot
       wait: true
-      image: registry.cn-sh-01.sensecore.cn/ccr-zhicheng-02/elf:runtime-7478e8e7c345510d46d4762c29f83954ba15890b0272756ef27539715a74cd40
+      image: registry.cn-sh-01.sensecore.cn/ccr-zhicheng-02/elf:runtime-87bd30153ef858b2266683df1f0d8ca42121fdfc85f8b876fb2536ac3a6a5209
       storage_mount: 01995896-d54c-7816-90b3-0ce73bce9936/L202500224:/data
 
 runs:
