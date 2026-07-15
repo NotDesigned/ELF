@@ -23,7 +23,18 @@ from configs.config import Config, apply_config_overrides, load_config_from_yaml
 
 
 def parse_training_metric_line(line: str) -> dict[str, Any] | None:
-    """Parse the human-readable metric record emitted by ELF training."""
+    """Parse human-readable metric records emitted by ELF training or eval."""
+    eval_patterns = (
+        (r"\bgPPL:\s*([-+0-9.eE]+)", "g_ppl"),
+        (r"\boracle_plan_ppl:\s*([-+0-9.eE]+)", "oracle_plan_ppl"),
+        (r"\bshuffled_plan_ppl:\s*([-+0-9.eE]+)", "shuffled_plan_ppl"),
+        (r"\bToken reconstruction PPL:\s*([-+0-9.eE]+)", "token_recon_ppl"),
+    )
+    for pattern, key in eval_patterns:
+        eval_match = re.search(pattern, line)
+        if eval_match:
+            return {key: float(eval_match.group(1))}
+
     match = re.search(r"Step\s+(\d+):\s+(.*)$", line)
     if not match:
         return None

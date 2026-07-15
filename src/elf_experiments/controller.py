@@ -1415,6 +1415,7 @@ def annotate_collection(
         summary.get("step"),
         summary.get("latest_metric"),
         summary.get("latest_completed_checkpoint"),
+        summary.get("evaluation_metrics_by_variant") or None,
     )
     annotated["model_state"] = (
         "UNKNOWN" if summary.get("evidence_unavailable_reason")
@@ -1642,7 +1643,7 @@ def has_model_metric(model: dict[str, Any]) -> bool:
     return any(
         model.get(field) is not None
         for field in ("step", "optimizer_step", "latest_metric")
-    )
+    ) or bool(model.get("evaluation_metrics_by_variant"))
 
 
 def watch_runs(

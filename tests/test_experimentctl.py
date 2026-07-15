@@ -1218,6 +1218,28 @@ def test_parses_structured_training_metric_from_sensecore_log():
     }
 
 
+@pytest.mark.parametrize(
+    ("line", "expected"),
+    [
+        ("INFO - generation - gPPL: 152.9692", {"g_ppl": 152.9692}),
+        (
+            "INFO - generation - oracle_plan_ppl: 132.7387",
+            {"oracle_plan_ppl": 132.7387},
+        ),
+        (
+            "INFO - generation - shuffled_plan_ppl: 133.2057",
+            {"shuffled_plan_ppl": 133.2057},
+        ),
+        (
+            "INFO - generation - Token reconstruction PPL: 20.0156",
+            {"token_recon_ppl": 20.0156},
+        ),
+    ],
+)
+def test_parses_evaluation_metric_lines(line, expected):
+    assert parse_training_metric_line(line) == expected
+
+
 def test_collection_separates_stale_runtime_from_scheduler_truth():
     result = annotate_collection({"state": "RUNNING", "step": 10}, {"state": "CANCELLED"})
     assert result["runtime_state"] == "RUNNING"
@@ -1415,6 +1437,23 @@ def test_first_metric_gate_does_not_accept_checkpoint_only_evidence():
         "model_state": "OBSERVED", "latest_completed_checkpoint": "/ckpt"
     }) is False
     assert experimentctl.has_model_metric({"step": 0}) is True
+    assert experimentctl.has_model_metric({
+        "evaluation_metrics_by_variant": {"generation": {"g_ppl": 12.5}}
+    }) is True
+
+
+def test_collection_treats_evaluation_metrics_as_model_evidence():
+    result = annotate_collection(
+        {
+            "state": "SUCCEEDED",
+            "evaluation_metrics_by_variant": {
+                "generation": {"g_ppl": 12.5},
+            },
+        },
+        {"state": "SUCCEEDED"},
+    )
+
+    assert result["model_state"] == "OBSERVED"
 
 
 def test_watch_first_metric_gate_fails_when_run_terminates_without_metric(
