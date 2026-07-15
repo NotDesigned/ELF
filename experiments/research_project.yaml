@@ -23,6 +23,11 @@ controller:
       - yaml
     require_clean_git: true
 campaigns:
+  - name: fusion-independent-plan-denoiser-smoke-h200-20260715-c2
+    file: experiments/campaigns/fusion_independent_plan_denoiser_smoke_h200_20260715_c2.yml
+    role_notes:
+      shared: clean H200 smoke after immutable source staging was verified
+      independent: matched-depth independent prior using the same staged source and H200 resource shape
   - name: fusion-independent-plan-denoiser-smoke-h200-20260715-c1
     file: experiments/campaigns/fusion_independent_plan_denoiser_smoke_h200_20260715.yml
     role_notes:
