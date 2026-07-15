@@ -13,4 +13,4 @@ mauve-text>=0.4.0,<0.5.0
 wandb>=0.16.6
 muon-optimizer>=0.1.0
 pytest>=8.0.0
-ml-experiment-control @ git+https://github.com/NotDesigned/ml-experiment-control.git@3eb335587fc9e2ef655db738a81e5f104e82b7f3
+ml-experiment-control @ git+https://github.com/NotDesigned/ml-experiment-control.git@121eeceb4aac3c6f74fd6f3cdf338bf4ef20874d

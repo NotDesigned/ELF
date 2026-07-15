@@ -501,6 +501,12 @@ set -e
 
 if [[ "$exit_code" -eq 0 ]]; then
     record_lifecycle SUCCEEDED process_exited --exit-code "$exit_code"
+    if ! python -m elf_experiments.terminal_evidence "$OUTPUT_DIR"; then
+        exit_code=86
+        record_lifecycle FAILED process_exited \
+            --exit-code "$exit_code" \
+            --reason terminal_evidence_emission_failed
+    fi
 else
     record_lifecycle FAILED process_exited --exit-code "$exit_code" --reason "${ELF_RUN_MODE}_process_nonzero_exit"
 fi
