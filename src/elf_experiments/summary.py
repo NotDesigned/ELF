@@ -88,6 +88,9 @@ FAMILY_DIMENSION_KEYS = (
     "sampling_method", "num_sampling_steps", "cfg", "self_cond_cfg_scale",
     "time_schedule", "time_warp_gamma",
 )
+PLAN_FIRST_FAMILY_DIMENSION_KEYS = (
+    "plan_sampling_mode", "plan_num_sampling_steps", "total_model_evaluations",
+)
 _SAMPLE_FILE_RE = re.compile(r"_(?P<epoch>\d+)_(?P<step>\d+)\.jsonl$")
 
 
@@ -303,7 +306,14 @@ def _sampling_dimensions(record: dict[str, Any]) -> dict[str, Any] | None:
         raw = record.get("variant_dimensions")
     if not isinstance(raw, dict):
         raw = record.get("sampling_dimensions")
-    if not isinstance(raw, dict) or set(raw) != set(FAMILY_DIMENSION_KEYS):
+    if not isinstance(raw, dict):
+        return None
+    raw_keys = set(raw)
+    valid_keysets = {
+        frozenset(FAMILY_DIMENSION_KEYS),
+        frozenset((*FAMILY_DIMENSION_KEYS, *PLAN_FIRST_FAMILY_DIMENSION_KEYS)),
+    }
+    if frozenset(raw_keys) not in valid_keysets:
         return None
     dimensions = dict(raw)
     if any(

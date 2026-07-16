@@ -77,6 +77,20 @@ class SamplingModel(nn.Module):
         return torch.zeros_like(x), None
 
 
+class TraceSamplingModel(SamplingModel):
+    def __init__(self):
+        super().__init__()
+        self.calls = []
+
+    def forward(self, x, t, plan_t=None, **kwargs):
+        self.calls.append({
+            "token_t": t.detach().clone(),
+            "plan_t": None if plan_t is None else plan_t.detach().clone(),
+            "token_z": x.detach().clone(),
+        })
+        return super().forward(x, t, plan_t=plan_t, **kwargs)
+
+
 def generation_config(**overrides):
     cfg = SimpleNamespace(
         use_sentence_plan=True,
@@ -151,6 +165,35 @@ def test_evaluation_sampling_dimensions_are_exact_normalized_scalars():
     }
     assert binding["status"] == "RESOLVED"
     assert _exact_observation_errors(observation) == []
+
+
+def test_plan_first_sampling_dimensions_record_separate_nfe_budget():
+    sampling_config = SamplingConfig(
+        sampling_method="sde",
+        num_sampling_steps=[32],
+        cfgs=[1],
+        self_cond_cfg_scales=[3],
+        time_schedule="logit_normal",
+        sde_gamma=1.5,
+        plan_sampling_mode="plan_first",
+        plan_num_sampling_steps=32,
+    )
+
+    dimensions = _evaluation_sampling_dimensions(
+        sampling_config,
+        num_sampling_steps=32,
+        cfg_scale=1,
+        self_cond_cfg_scale=3,
+    )
+
+    assert dimensions["plan_sampling_mode"] == "plan_first"
+    assert dimensions["plan_num_sampling_steps"] == 32
+    assert dimensions["total_model_evaluations"] == 64
+    binding = _record_binding({
+        "mode": "generation_refine_decode",
+        "sampling_dimensions": dimensions,
+    })
+    assert binding["status"] == "RESOLVED"
 
 
 def test_rng_state_restore_replays_paired_cpu_noise():
@@ -355,6 +398,76 @@ def test_generate_samples_returns_plan_latent_when_enabled():
     token_z, plan_z = out
     assert token_z.shape == z.shape
     assert plan_z.shape == (2, 3)
+
+
+def test_plan_first_sampling_advances_plan_then_freezes_it_for_tokens():
+    model = TraceSamplingModel()
+    initial_token_z = torch.randn(2, 4, 3)
+    token_steps = torch.tensor([0.0, 0.5, 1.0])
+    sampling = SimpleNamespace(
+        sampling_method="ode",
+        sde_gamma=0.0,
+        time_schedule="uniform",
+        plan_sampling_mode="plan_first",
+        plan_num_sampling_steps=2,
+    )
+
+    _generate_samples_single_batch(
+        model=model,
+        generator=torch.Generator(device="cpu").manual_seed(31),
+        plan_generator=torch.Generator(device="cpu").manual_seed(32),
+        z=initial_token_z.clone(),
+        t_steps=token_steps,
+        cond_seq=None,
+        cond_seq_mask=None,
+        config=generation_config(denoiser_p_mean=-1.5, denoiser_p_std=0.8),
+        sampling_config=sampling,
+        cfg_scale=1.0,
+        self_cond_cfg_scale=1.0,
+    )
+
+    assert len(model.calls) == 4
+    plan_calls, token_calls = model.calls[:2], model.calls[2:]
+    assert all(torch.equal(call["token_t"], torch.zeros(2)) for call in plan_calls)
+    assert torch.allclose(plan_calls[0]["plan_t"], torch.zeros(2))
+    assert torch.allclose(plan_calls[1]["plan_t"], torch.full((2,), 0.5))
+    assert all(torch.equal(call["token_z"], initial_token_z) for call in plan_calls)
+    assert torch.allclose(token_calls[0]["token_t"], torch.zeros(2))
+    assert torch.allclose(token_calls[1]["token_t"], torch.full((2,), 0.5))
+    assert all(torch.allclose(call["plan_t"], torch.ones(2)) for call in token_calls)
+
+
+def test_plan_first_sde_churn_does_not_move_token_during_plan_phase():
+    model = TraceSamplingModel()
+    initial_token_z = torch.randn(2, 4, 3)
+    sampling = SimpleNamespace(
+        sampling_method="sde",
+        sde_gamma=1.0,
+        time_schedule="uniform",
+        plan_sampling_mode="plan_first",
+        plan_num_sampling_steps=2,
+    )
+
+    _generate_samples_single_batch(
+        model=model,
+        generator=torch.Generator(device="cpu").manual_seed(41),
+        plan_generator=torch.Generator(device="cpu").manual_seed(42),
+        z=initial_token_z.clone(),
+        t_steps=torch.tensor([0.0, 0.5, 1.0]),
+        cond_seq=None,
+        cond_seq_mask=None,
+        config=generation_config(denoiser_p_mean=-1.5, denoiser_p_std=0.8),
+        sampling_config=sampling,
+        cfg_scale=1.0,
+        self_cond_cfg_scale=1.0,
+    )
+
+    assert len(model.calls) == 4
+    assert all(torch.equal(call["token_t"], torch.zeros(2)) for call in model.calls[:2])
+    assert all(torch.equal(call["token_z"], initial_token_z) for call in model.calls[:2])
+    assert torch.allclose(model.calls[0]["plan_t"], torch.zeros(2))
+    assert torch.allclose(model.calls[1]["plan_t"], torch.full((2,), 0.5))
+    assert all(torch.allclose(call["plan_t"], torch.ones(2)) for call in model.calls[2:])
 
 
 def test_hierarchical_sampling_passes_prefix_mask_to_every_model_step():

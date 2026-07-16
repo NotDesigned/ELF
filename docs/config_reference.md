@@ -149,6 +149,12 @@ Each `SamplingConfig` mapping supports:
 | `self_cond_cfg_scales` | `[1.0]` | Non-negative self-conditioning CFG sweep. |
 | `time_schedule` | `logit_normal` | Sampling schedule: `logit_normal` or `uniform`. |
 | `sde_gamma` | `0.0` | Non-negative SDE churn fraction; zero is pure ODE. |
+| `plan_sampling_mode` | `joint` | `joint` advances plan and token together. `plan_first` freezes the token field/time/self-conditioning while denoising plan to `plan_t=1`, then freezes plan while denoising tokens. |
+| `plan_num_sampling_steps` | `None` | Positive plan-only step count for `plan_first`; `None` reuses each token `num_sampling_steps` value. Invalid in `joint` mode. |
+
+Plan-first records include separate plan/token step counts and total model
+evaluations in their sampling-family identity. Oracle/shuffled runs already
+receive a fixed clean plan and therefore skip the plan-only phase.
 
 ## Logging, checkpoints, output, and W&B
 

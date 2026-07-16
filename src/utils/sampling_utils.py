@@ -302,7 +302,7 @@ def _ode_step(
     model, z, t, t_next, x_pred_prev,
     config, cfg_scale, self_cond_cfg_scale,
     cond_seq, cond_seq_mask, plan_z=None, plan_t=None, plan_t_next=None,
-    freeze_plan_z: bool = False,
+    freeze_plan_z: bool = False, freeze_token_z: bool = False,
 ):
     """Single ODE (Euler) step for sampling."""
     t_batch = torch.full((z.shape[0],), float(t), dtype=z.dtype, device=z.device)
@@ -312,7 +312,7 @@ def _ode_step(
         cond_seq=cond_seq, cond_seq_mask=cond_seq_mask,
         plan_z=plan_z, plan_t=plan_t,
     )
-    z_next = z + (t_next - t) * v_pred
+    z_next = z if freeze_token_z else z + (t_next - t) * v_pred
     if plan_z is None:
         return z_next, x_pred
     if freeze_plan_z:
@@ -331,6 +331,7 @@ def _sde_step(
     cond_seq, cond_seq_mask, gamma, generator, plan_z=None,
     plan_generator=None,
     plan_t=None, plan_t_next=None, freeze_plan_z: bool = False,
+    freeze_token_z: bool = False,
 ):
     """Per-step SDE-style sampler with hybrid (t-and-step) noise scaling.
 
@@ -338,19 +339,44 @@ def _sde_step(
     signal-preservation fraction, constant in t. gamma=0 degenerates to a plain ODE step.
     Uniform-N-step equivalence with old multiplicative gamma_old: gamma_hybrid = gamma_old * N.
     """
-    h = float(t_next - t)
+    h = 0.0 if freeze_token_z else float(t_next - t)
     alpha = max(0.0, min(1.0, 1.0 - gamma * h))
-    t_back = alpha * float(t)
-    eps = torch.randn(
-        z.shape, generator=generator, dtype=z.dtype, device=z.device,
-    ) * config.denoiser_noise_scale
-    z_back = restore_cond(alpha * z + (1.0 - alpha) * eps, cond_seq, cond_seq_mask)
+    t_back = float(t) if freeze_token_z else alpha * float(t)
+    if freeze_token_z:
+        z_back = z
+    else:
+        eps = torch.randn(
+            z.shape, generator=generator, dtype=z.dtype, device=z.device,
+        ) * config.denoiser_noise_scale
+        z_back = restore_cond(alpha * z + (1.0 - alpha) * eps, cond_seq, cond_seq_mask)
     plan_z_back = None
     plan_t_back = None
     if plan_z is not None:
         if freeze_plan_z:
             plan_z_back = plan_z
             plan_t_back = plan_t
+        elif freeze_token_z and plan_t is not None and plan_t_next is not None:
+            # Strict plan-first phase: token time/state stay at full noise while
+            # the plan follows its own SDE clock.  Deriving plan_t_back from the
+            # frozen token time would otherwise pin it at zero and silently
+            # turn this phase into ODE sampling.
+            plan_h = float((plan_t_next - plan_t)[0].item())
+            plan_alpha_scalar = max(
+                0.0, min(1.0, 1.0 - gamma * plan_h),
+            )
+            plan_alpha = torch.full(
+                (plan_z.shape[0], 1), plan_alpha_scalar,
+                dtype=plan_z.dtype, device=plan_z.device,
+            )
+            plan_t_back = plan_t * plan_alpha_scalar
+            plan_eps = torch.randn(
+                plan_z.shape,
+                generator=plan_generator if plan_generator is not None else generator,
+                dtype=plan_z.dtype,
+                device=plan_z.device,
+            )
+            plan_eps = plan_eps * float(getattr(config, "plan_noise_scale", 1.0))
+            plan_z_back = plan_alpha * plan_z + (1.0 - plan_alpha) * plan_eps
         else:
             plan_eps = torch.randn(
                 plan_z.shape,
@@ -374,7 +400,7 @@ def _sde_step(
         cond_seq=cond_seq, cond_seq_mask=cond_seq_mask,
         plan_z=plan_z_back, plan_t=plan_t_back if plan_t_back is not None else plan_t,
     )
-    z_next = z_back + (t_next - t_back) * v_pred
+    z_next = z if freeze_token_z else z_back + (t_next - t_back) * v_pred
     if plan_z is None:
         return z_next, x_pred
     if freeze_plan_z:

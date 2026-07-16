@@ -59,7 +59,7 @@ def _evaluation_sampling_dimensions(
     derived family digest is stable across YAML values such as ``1`` and
     ``1.0``; never require a collector to reverse-engineer directory labels.
     """
-    return {
+    dimensions = {
         "sampling_method": str(sampling_config.sampling_method),
         "num_sampling_steps": int(num_sampling_steps),
         "cfg": float(cfg_scale),
@@ -67,6 +67,18 @@ def _evaluation_sampling_dimensions(
         "time_schedule": str(sampling_config.time_schedule),
         "time_warp_gamma": float(getattr(sampling_config, "sde_gamma", 0.0)),
     }
+    plan_sampling_mode = str(
+        getattr(sampling_config, "plan_sampling_mode", "joint")
+    ).lower()
+    if plan_sampling_mode == "plan_first":
+        plan_steps = getattr(sampling_config, "plan_num_sampling_steps", None)
+        plan_steps = num_sampling_steps if plan_steps is None else int(plan_steps)
+        dimensions.update({
+            "plan_sampling_mode": "plan_first",
+            "plan_num_sampling_steps": plan_steps,
+            "total_model_evaluations": int(num_sampling_steps) + plan_steps,
+        })
+    return dimensions
 
 
 def _capture_rng_state(generator: torch.Generator) -> tuple:
@@ -479,10 +491,13 @@ def _token_reconstruction_run_name(self_cond_cfg_scale: float, suffix: str) -> s
 
 
 def _plan_conditioned_run_name(sampling_method, num_sampling_steps, cfg_scale, self_cond_cfg_scale,
-                               time_schedule, sde_gamma, plan_mode: str, suffix: str):
+                               time_schedule, sde_gamma, plan_mode: str, suffix: str,
+                               plan_sampling_mode="joint", plan_num_sampling_steps=None):
     return _build_run_name(
         sampling_method, num_sampling_steps, cfg_scale, self_cond_cfg_scale,
         time_schedule, sde_gamma, suffix=f"{plan_mode}-plan-{suffix}",
+        plan_sampling_mode=plan_sampling_mode,
+        plan_num_sampling_steps=plan_num_sampling_steps,
     )
 
 
@@ -650,6 +665,13 @@ def test_generation_uncond(
             if local_processed >= local_num_samples:
                 break
             current_batch = min(batch_size, local_num_samples - local_processed)
+            z = torch.randn(
+                (current_batch, config.max_length, d_model),
+                generator=token_generator, dtype=param_dtype, device=device,
+            ) * config.denoiser_noise_scale
+            # Draw the initial token state before schedule samples so matched
+            # joint/plan-first variants share the same initial token noise even
+            # when they use different token-step counts.
             t_steps = get_sampling_steps(
                 n_steps=num_sampling_steps,
                 time_schedule=time_schedule,
@@ -657,10 +679,6 @@ def test_generation_uncond(
                 device=device, dtype=param_dtype,
                 generator=token_generator,
             )
-            z = torch.randn(
-                (current_batch, config.max_length, d_model),
-                generator=token_generator, dtype=param_dtype, device=device,
-            ) * config.denoiser_noise_scale
 
             gen_start = time.time()
             latent_out = _generate_samples_single_batch(
@@ -716,6 +734,8 @@ def test_generation_uncond(
         name = _build_run_name(
             sampling_method, num_sampling_steps, cfg_scale, self_cond_cfg_scale,
             time_schedule, getattr(sampling_config, "sde_gamma", 0.0), suffix="uncond",
+            plan_sampling_mode=getattr(sampling_config, "plan_sampling_mode", "joint"),
+            plan_num_sampling_steps=getattr(sampling_config, "plan_num_sampling_steps", None),
         )
 
         out_path = os.path.join(config.output_dir, name, f"all_generated_{epoch_val}_{step_val}.jsonl")
@@ -928,14 +948,6 @@ def test_generation_cond(
             attention_mask = torch.from_numpy(np.array(batch["attention_mask"])).to(device).float()
             cond_seq_mask_arr = torch.from_numpy(np.array(batch["cond_seq_mask"])).to(device).float()
 
-            t_steps = get_sampling_steps(
-                n_steps=num_sampling_steps,
-                time_schedule=time_schedule,
-                P_mean=config.denoiser_p_mean, P_std=config.denoiser_p_std,
-                device=device, dtype=next(model.parameters()).dtype,
-                generator=token_generator,
-            )
-
             cond_seq = encode_text(
                 input_ids=input_ids, attention_mask=encoder_attention_mask,
                 encoder=encoder, latent_mean=encode_latent_mean, latent_std=encode_latent_std,
@@ -945,6 +957,13 @@ def test_generation_cond(
                 (bsz, config.max_length, d_model), generator=token_generator,
                 dtype=next(model.parameters()).dtype, device=device,
             ) * config.denoiser_noise_scale
+            t_steps = get_sampling_steps(
+                n_steps=num_sampling_steps,
+                time_schedule=time_schedule,
+                P_mean=config.denoiser_p_mean, P_std=config.denoiser_p_std,
+                device=device, dtype=next(model.parameters()).dtype,
+                generator=token_generator,
+            )
 
             gen_start = time.time()
             latent_out = _generate_samples_single_batch(
@@ -1065,6 +1084,8 @@ def test_generation_cond(
         name = _build_run_name(
             sampling_method, num_sampling_steps, cfg_scale, self_cond_cfg_scale,
             time_schedule, getattr(sampling_config, "sde_gamma", 0.0), suffix="cond",
+            plan_sampling_mode=getattr(sampling_config, "plan_sampling_mode", "joint"),
+            plan_num_sampling_steps=getattr(sampling_config, "plan_num_sampling_steps", None),
         )
 
         if _rank() == 0:
@@ -1364,6 +1385,10 @@ def test_plan_conditioned_generation(
             )
             encode_time += time.time() - enc_start
 
+            z = torch.randn(
+                (bsz, config.max_length, d_model), generator=token_generator,
+                dtype=param_dtype, device=device,
+            ) * config.denoiser_noise_scale
             t_steps = get_sampling_steps(
                 n_steps=num_sampling_steps,
                 time_schedule=time_schedule,
@@ -1371,10 +1396,6 @@ def test_plan_conditioned_generation(
                 device=device, dtype=param_dtype,
                 generator=token_generator,
             )
-            z = torch.randn(
-                (bsz, config.max_length, d_model), generator=token_generator,
-                dtype=param_dtype, device=device,
-            ) * config.denoiser_noise_scale
 
             cond_seq = x0 if is_conditional else None
             cond_seq_mask_for_sampling = cond_seq_mask_arr if is_conditional else None
@@ -1460,6 +1481,8 @@ def test_plan_conditioned_generation(
             sampling_method, num_sampling_steps, cfg_scale, self_cond_cfg_scale,
             time_schedule, getattr(sampling_config, "sde_gamma", 0.0),
             plan_mode=plan_mode, suffix=suffix,
+            plan_sampling_mode=getattr(sampling_config, "plan_sampling_mode", "joint"),
+            plan_num_sampling_steps=getattr(sampling_config, "plan_num_sampling_steps", None),
         )
         out_path = os.path.join(config.output_dir, name, f"all_generated_{epoch_val}_{step_val}.jsonl")
 

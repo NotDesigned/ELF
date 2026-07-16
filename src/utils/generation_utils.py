@@ -4,7 +4,10 @@ import torch
 import torch.nn as nn
 
 from configs.config import Config, SamplingConfig
-from utils.sampling_utils import restore_cond, _ode_step, _sde_step, plan_time_from_token_time
+from utils.sampling_utils import (
+    restore_cond, _ode_step, _sde_step, get_sampling_steps,
+    plan_time_from_token_time,
+)
 
 
 # ============================================
@@ -68,8 +71,17 @@ def _generate_samples_single_batch(
     fixed_plan_z: bool = False,
     plan_generator: Optional[torch.Generator] = None,
 ) -> torch.Tensor:
-    """Generate samples for a single batch (PyTorch Euler / SDE rollout)."""
+    """Generate samples for a single batch (PyTorch Euler / SDE rollout).
+
+    ``plan_first`` is a strict two-stage rollout.  The token field, token time,
+    and token self-conditioning stay at their initial-noise state while the
+    plan advances from noise to clean.  The resulting plan is then frozen at
+    ``plan_t=1`` while the token field advances from noise to clean.
+    """
     method = sampling_config.sampling_method
+    plan_sampling_mode = str(
+        getattr(sampling_config, "plan_sampling_mode", "joint")
+    ).lower()
     batch_size, max_length, d_model = z.shape
     if cond_seq is None:
         cond_seq = torch.zeros((batch_size, max_length, d_model), dtype=z.dtype, device=z.device)
@@ -100,12 +112,14 @@ def _generate_samples_single_batch(
             plan_z = plan_z * float(getattr(config, "plan_noise_scale", 1.0))
     elif initial_plan_z is not None:
         raise ValueError("initial_plan_z was provided but use_sentence_plan=False")
+    if plan_sampling_mode == "plan_first" and plan_z is None:
+        raise ValueError("plan_sampling_mode='plan_first' requires use_sentence_plan=True")
 
     n = t_steps.shape[0]
     sde_gamma = getattr(sampling_config, "sde_gamma", 0.0)
     fixed_plan_t = (
         torch.ones((batch_size,), dtype=z.dtype, device=z.device)
-        if fixed_plan_z and plan_z is not None else None
+        if (fixed_plan_z or plan_sampling_mode == "plan_first") and plan_z is not None else None
     )
 
     def _plan_time(value: float) -> Optional[torch.Tensor]:
@@ -118,6 +132,69 @@ def _generate_samples_single_batch(
 
     use_bf16 = bool(getattr(config, "use_bf16", True)) and z.is_cuda
     with torch.amp.autocast('cuda', dtype=torch.bfloat16, enabled=use_bf16):
+        if plan_sampling_mode == "plan_first" and not fixed_plan_z:
+            plan_num_steps = getattr(sampling_config, "plan_num_sampling_steps", None)
+            if plan_num_steps is None:
+                plan_num_steps = n - 1
+            plan_steps = get_sampling_steps(
+                n_steps=int(plan_num_steps),
+                time_schedule=sampling_config.time_schedule,
+                P_mean=config.denoiser_p_mean,
+                P_std=config.denoiser_p_std,
+                device=z.device,
+                dtype=z.dtype,
+                generator=plan_generator if plan_generator is not None else generator,
+            )
+            token_noise_t = 0.0
+            # Do not carry token predictions out of this phase: doing so would
+            # let plan-only model calls initialize token self-conditioning.
+            for i in range(plan_steps.shape[0] - 2):
+                plan_t = torch.full(
+                    (batch_size,), float(plan_steps[i].item()),
+                    dtype=z.dtype, device=z.device,
+                )
+                plan_t_next = torch.full(
+                    (batch_size,), float(plan_steps[i + 1].item()),
+                    dtype=z.dtype, device=z.device,
+                )
+                if method == "sde":
+                    step_out = _sde_step(
+                        z=z, t=token_noise_t, t_next=token_noise_t,
+                        x_pred_prev=None, gamma=sde_gamma,
+                        generator=generator, plan_generator=plan_generator,
+                        plan_z=plan_z, plan_t=plan_t,
+                        plan_t_next=plan_t_next, freeze_token_z=True,
+                        **step_kwargs,
+                    )
+                elif method == "ode":
+                    step_out = _ode_step(
+                        z=z, t=token_noise_t, t_next=token_noise_t,
+                        x_pred_prev=None, plan_z=plan_z, plan_t=plan_t,
+                        plan_t_next=plan_t_next, freeze_token_z=True,
+                        **step_kwargs,
+                    )
+                else:
+                    raise ValueError(f"Invalid sampling method: {method}")
+                z, _, plan_z, _ = step_out
+
+            # Last plan step is deterministic, matching the token sampler's
+            # final-step convention.
+            plan_t = torch.full(
+                (batch_size,), float(plan_steps[-2].item()),
+                dtype=z.dtype, device=z.device,
+            )
+            plan_t_next = torch.full(
+                (batch_size,), float(plan_steps[-1].item()),
+                dtype=z.dtype, device=z.device,
+            )
+            z, _, plan_z, _ = _ode_step(
+                z=z, t=token_noise_t, t_next=token_noise_t,
+                x_pred_prev=None, plan_z=plan_z, plan_t=plan_t,
+                plan_t_next=plan_t_next, freeze_token_z=True,
+                **step_kwargs,
+            )
+            x_pred = restore_cond(torch.zeros_like(z), cond_seq, cond_seq_mask)
+
         for i in range(n - 2):
             t = t_steps[i].item()
             t_next = t_steps[i + 1].item()
@@ -129,13 +206,13 @@ def _generate_samples_single_batch(
                     gamma=sde_gamma, generator=generator, **step_kwargs,
                     plan_generator=plan_generator,
                     plan_z=plan_z, plan_t=plan_t, plan_t_next=plan_t_next,
-                    freeze_plan_z=fixed_plan_z,
+                    freeze_plan_z=(fixed_plan_z or plan_sampling_mode == "plan_first"),
                 )
             elif method == "ode":
                 step_out = _ode_step(
                     z=z, t=t, t_next=t_next, x_pred_prev=x_pred,
                     plan_z=plan_z, plan_t=plan_t, plan_t_next=plan_t_next,
-                    freeze_plan_z=fixed_plan_z,
+                    freeze_plan_z=(fixed_plan_z or plan_sampling_mode == "plan_first"),
                     **step_kwargs,
                 )
             else:
@@ -153,7 +230,7 @@ def _generate_samples_single_batch(
         step_out = _ode_step(
             z=z, t=t, t_next=t_next, x_pred_prev=x_pred,
             plan_z=plan_z, plan_t=plan_t, plan_t_next=plan_t_next,
-            freeze_plan_z=fixed_plan_z,
+            freeze_plan_z=(fixed_plan_z or plan_sampling_mode == "plan_first"),
             **step_kwargs,
         )
         if plan_z is None:
@@ -208,8 +285,19 @@ def _dlm_decode_batch(z: torch.Tensor, model: nn.Module, t_final_val,
 
 
 def _build_run_name(sampling_method, num_sampling_steps, cfg_scale, self_cond_cfg_scale,
-                    time_schedule, sde_gamma, suffix):
+                    time_schedule, sde_gamma, suffix,
+                    plan_sampling_mode="joint", plan_num_sampling_steps=None):
     ts_str = f"-ts_{time_schedule}"
     sccfg_str = f"-sccfg{self_cond_cfg_scale}" if self_cond_cfg_scale != 1.0 else ""
     sde_str = f"-gamma{sde_gamma}" if sampling_method == "sde" else ""
-    return f"{sampling_method}-steps{num_sampling_steps}-cfg{cfg_scale}{sccfg_str}{ts_str}{sde_str}-{suffix}"
+    plan_str = ""
+    if str(plan_sampling_mode).lower() == "plan_first":
+        resolved_plan_steps = (
+            num_sampling_steps if plan_num_sampling_steps is None
+            else int(plan_num_sampling_steps)
+        )
+        plan_str = f"-planfirst{resolved_plan_steps}"
+    return (
+        f"{sampling_method}-steps{num_sampling_steps}-cfg{cfg_scale}{sccfg_str}"
+        f"{ts_str}{sde_str}{plan_str}-{suffix}"
+    )

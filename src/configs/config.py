@@ -27,6 +27,8 @@ class SamplingConfig:
     self_cond_cfg_scales: list = [1.0]
     time_schedule: str = "logit_normal"  # 'logit_normal' or 'uniform'
     sde_gamma: float = 0.0  # Per-step SDE churn fraction; 0.0 -> pure ODE. Used when sampling_method == "sde".
+    plan_sampling_mode: str = "joint"  # "joint" or strict two-stage "plan_first".
+    plan_num_sampling_steps: int | None = None  # Separate plan-only NFE for plan_first; defaults to token steps.
 
 
 _CONFIG_FIELDS = set()
@@ -104,6 +106,27 @@ def validate_sampling_config(sampling_config: SamplingConfig, source: str = "sam
     sampling_config.sde_gamma = float(getattr(sampling_config, "sde_gamma", 0.0))
     if sampling_config.sde_gamma < 0.0:
         raise ValueError(f"{source}: sde_gamma must be non-negative, got {sampling_config.sde_gamma}")
+    sampling_config.plan_sampling_mode = str(
+        getattr(sampling_config, "plan_sampling_mode", "joint")
+    ).lower()
+    if sampling_config.plan_sampling_mode not in {"joint", "plan_first"}:
+        raise ValueError(
+            f"{source}: plan_sampling_mode must be 'joint' or 'plan_first', "
+            f"got {sampling_config.plan_sampling_mode!r}"
+        )
+    plan_steps = getattr(sampling_config, "plan_num_sampling_steps", None)
+    if plan_steps is not None:
+        if isinstance(plan_steps, bool) or int(plan_steps) != plan_steps or int(plan_steps) <= 0:
+            raise ValueError(
+                f"{source}: plan_num_sampling_steps must be a positive integer or null, "
+                f"got {plan_steps!r}"
+            )
+        sampling_config.plan_num_sampling_steps = int(plan_steps)
+        if sampling_config.plan_sampling_mode != "plan_first":
+            raise ValueError(
+                f"{source}: plan_num_sampling_steps is only valid when "
+                "plan_sampling_mode='plan_first'"
+            )
     return sampling_config
 
 

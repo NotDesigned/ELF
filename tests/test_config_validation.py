@@ -211,6 +211,33 @@ def test_sampling_config_validation_fails_early(tmp_path):
         load_sampling_configs(str(sampling_path))
 
 
+def test_plan_first_sampling_config_validates_mode_and_plan_steps(tmp_path):
+    valid_path = write_yaml(
+        tmp_path / "plan-first.yml",
+        [{
+            "sampling_method": "sde",
+            "num_sampling_steps": [32],
+            "plan_sampling_mode": "plan_first",
+            "plan_num_sampling_steps": 32,
+        }],
+    )
+    sampling = load_sampling_configs(str(valid_path))[0]
+    assert sampling.plan_sampling_mode == "plan_first"
+    assert sampling.plan_num_sampling_steps == 32
+
+    invalid_path = write_yaml(
+        tmp_path / "joint-with-plan-steps.yml",
+        [{
+            "sampling_method": "ode",
+            "num_sampling_steps": [32],
+            "plan_sampling_mode": "joint",
+            "plan_num_sampling_steps": 32,
+        }],
+    )
+    with pytest.raises(ValueError, match="only valid"):
+        load_sampling_configs(str(invalid_path))
+
+
 def test_empty_sampling_config_file_raises(tmp_path):
     sampling_path = write_yaml(tmp_path / "empty_sampling.yml", [])
 
