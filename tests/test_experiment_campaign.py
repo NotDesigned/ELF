@@ -230,6 +230,10 @@ def test_latent_bottleneck_r3_retains_common_and_arm_overrides():
         overrides = list(run["config_overrides"])
         assert required_common <= set(overrides)
         assert len(overrides) == 16
+        assert run["checkpoint"] == {
+            "expected_first_minutes": 90,
+            "max_uncheckpointed_minutes": 90,
+        }
         assert sum(value.startswith("model_depth=") for value in overrides) == 1
         assert sum(value.startswith("warm_start=") for value in overrides) == 1
 

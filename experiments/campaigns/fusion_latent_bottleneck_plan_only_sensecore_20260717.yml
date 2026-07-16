@@ -91,6 +91,9 @@ defaults:
     USE_WANDB: "false"
   storage:
     run_dir: /data/elf/runs/{run_id}
+  checkpoint:
+    expected_first_minutes: 90
+    max_uncheckpointed_minutes: 90
   retry: {max_infra_retries: 1}
 
 profiles:
