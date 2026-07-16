@@ -134,6 +134,22 @@ def validate_config(config) -> Config:
     """Fail fast on invalid experiment settings."""
     if config.model not in {"ELF-B", "ELF-M", "ELF-L"}:
         raise ValueError(f"model must be one of ['ELF-B', 'ELF-M', 'ELF-L'], got {config.model!r}")
+    preset_depth = {"ELF-B": 12, "ELF-M": 24, "ELF-L": 32}[config.model]
+    if config.model_depth is not None:
+        _validate_positive_int(config.model_depth, "model_depth")
+        if int(config.model_depth) > preset_depth:
+            raise ValueError(
+                f"model_depth must not exceed the {config.model} preset depth "
+                f"of {preset_depth}, got {config.model_depth}"
+            )
+    model_depth = int(config.model_depth or preset_depth)
+    if config.model_active_depth is not None:
+        _validate_positive_int(config.model_active_depth, "model_active_depth")
+        if int(config.model_active_depth) > model_depth:
+            raise ValueError(
+                f"model_active_depth must not exceed the instantiated model depth "
+                f"of {model_depth}, got {config.model_active_depth}"
+            )
     if config.pad_token not in {"pad", "eos"}:
         raise ValueError(f"pad_token must be 'pad' or 'eos', got {config.pad_token!r}")
     if config.encoder_checkpoint is not None:
@@ -186,9 +202,9 @@ def validate_config(config) -> Config:
         )
     if float(config.plan_time_warp_gamma) < 1.0:
         raise ValueError(f"plan_time_warp_gamma must be >= 1.0, got {config.plan_time_warp_gamma!r}")
-    if config.plan_training_mode not in {"joint", "plan_first"}:
+    if config.plan_training_mode not in {"joint", "plan_first", "oracle"}:
         raise ValueError(
-            "plan_training_mode must be 'joint' or 'plan_first', "
+            "plan_training_mode must be 'joint', 'plan_first', or 'oracle', "
             f"got {config.plan_training_mode!r}"
         )
     _validate_probability(config.plan_first_plan_phase_prob, "plan_first_plan_phase_prob")
@@ -218,6 +234,21 @@ def validate_config(config) -> Config:
                 "plan_first training samples plan time independently; use "
                 "plan_time_schedule='aligned' and plan_time_warp_gamma=1.0"
             )
+    if config.plan_training_mode == "oracle":
+        if not bool(config.use_sentence_plan):
+            raise ValueError("plan_training_mode='oracle' requires use_sentence_plan=true")
+        if config.sentence_encoder_type != "sentence_t5":
+            raise ValueError(
+                "plan_training_mode='oracle' requires frozen sentence_encoder_type='sentence_t5'"
+            )
+        if config.plan_attention_topology not in {
+            "hierarchical_prefix", "strict_hierarchical_prefix",
+        }:
+            raise ValueError(
+                "plan_training_mode='oracle' requires a hierarchical plan attention topology"
+            )
+        if float(config.plan_loss_weight) != 0.0:
+            raise ValueError("plan_training_mode='oracle' requires plan_loss_weight=0")
 
     for field_name in ("decoder_prob", "label_drop_prob", "self_cond_prob"):
         _validate_probability(getattr(config, field_name), field_name)
@@ -385,6 +416,12 @@ class Config:
 
     # Model architecture
     model: str = "ELF-B"
+    # Instantiate fewer transformer blocks while retaining the preset width.
+    # Warm-start loading copies the matching prefix of a deeper checkpoint.
+    model_depth: int = None
+    # Eval-time early exit for capacity probes. All blocks remain instantiated
+    # so full-depth checkpoints keep exactly the same state-dict schema.
+    model_active_depth: int = None
     bottleneck_dim: int = 128  # Bottleneck dimension for text projection
     num_time_tokens: int = 4  # Number of in-context time conditioning tokens
     num_self_cond_cfg_tokens: int = 4  # Number of in-context self-cond CFG tokens
@@ -411,7 +448,7 @@ class Config:
     plan_noise_scale: float = 1.0
     plan_time_schedule: str = "aligned"  # "aligned" or "noise_power"; maps token t -> plan t.
     plan_time_warp_gamma: float = 1.0  # For noise_power: plan_t = 1 - (1 - token_t) ** gamma.
-    plan_training_mode: str = "joint"  # "joint" or matched two-phase "plan_first".
+    plan_training_mode: str = "joint"  # "joint", matched "plan_first", or clean-plan "oracle".
     plan_first_plan_phase_prob: float = 0.5  # Among non-decoder rows, allocate this fraction to plan-only denoising.
     plan_aux_passes: int = 1  # Extra detached plan-denoiser passes for learned+none topology.
     plan_aux_token_context: str = "denoiser_z"  # "denoiser_z", "resampled_z", "mixed_z", or "clean_x0"

@@ -1985,6 +1985,11 @@ def test_token_reconstruction_clean(
         metrics_line = {
             "epoch": epoch_val, "step": step_val,
             "mode": "clean_token_reconstruction",
+            "model_active_depth": int(
+                getattr(config, "model_active_depth", None)
+                or getattr(config, "model_depth", None)
+                or {"ELF-B": 12, "ELF-M": 24, "ELF-L": 32}[config.model]
+            ),
             **_evaluation_rng_metadata(generator),
             **diagnostic_metrics,
         }

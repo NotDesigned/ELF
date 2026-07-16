@@ -81,9 +81,10 @@ def train_step(
     use_sentence_plan = bool(getattr(config, "use_sentence_plan", False))
     sentence_encoder_type = getattr(config, "sentence_encoder_type", "sentence_t5")
     plan_training_mode = str(getattr(config, "plan_training_mode", "joint")).lower()
-    if plan_training_mode not in {"joint", "plan_first"}:
+    if plan_training_mode not in {"joint", "plan_first", "oracle"}:
         raise ValueError(
-            f"plan_training_mode must be 'joint' or 'plan_first', got {plan_training_mode!r}"
+            "plan_training_mode must be 'joint', 'plan_first', or 'oracle', "
+            f"got {plan_training_mode!r}"
         )
 
     gen = state.dropout_generator
@@ -275,7 +276,7 @@ def train_step(
         plan_emb_norm = s0_detached_for_metrics.norm(dim=-1).mean()
 
         plan_noise = torch.randn_like(s0) * float(getattr(config, "plan_noise_scale", 1.0))
-        if plan_training_mode == "plan_first":
+        if plan_training_mode in {"plan_first", "oracle"}:
             # Plan-phase rows use an independently sampled plan clock while
             # token-phase rows condition on the completed target plan.
             plan_t_denoiser = torch.where(
@@ -414,7 +415,7 @@ def train_step(
             (plan_pred.float() - plan_target.float()) ** 2
         ).mean(dim=-1)
         plan_pred_detached = plan_pred.detach().float()
-        if plan_training_mode == "plan_first":
+        if plan_training_mode in {"plan_first", "oracle"}:
             plan_weights = plan_phase_active.float()
             plan_count = torch.clamp(plan_weights.sum(), min=1.0)
             plan_loss = (plan_mse_per_example * plan_weights).sum() / plan_count

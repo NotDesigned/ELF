@@ -79,7 +79,11 @@ def main():
     _, local_batch_size = resolve_batch_sizes(config, world, context="evaluation")
 
     log_for_0(f"Config loaded from {args.config}")
-    log_for_0(f"Model: {config.model}")
+    log_for_0(
+        f"Model: {config.model} "
+        f"(depth={config.model_depth or 'preset'}, "
+        f"active_depth={config.model_active_depth or 'full'})"
+    )
     log_for_0(f"Encoder Model: {config.encoder_model_name}")
     log_for_0(f"Encoder Checkpoint: {config.encoder_checkpoint}")
     log_for_0(f"Max length: {config.max_length}")

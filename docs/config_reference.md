@@ -44,6 +44,8 @@ schema rather than treating training flags as scheduler configuration.
 | Field | Default | Meaning |
 | --- | --- | --- |
 | `model` | `ELF-B` | Architecture preset: `ELF-B`, `ELF-M`, or `ELF-L`. |
+| `model_depth` | `null` | Instantiate fewer transformer blocks at the preset width. A warm start from a deeper model loads the matching block prefix; this changes parameter count and checkpoint schema. |
+| `model_active_depth` | `null` | Optional early-exit depth for capacity probes. The full model is still instantiated, so checkpoint keys and shapes remain compatible; `null` uses the preset's full depth. |
 | `bottleneck_dim` | `128` | Positive text projection bottleneck dimension. |
 | `num_time_tokens` | `4` | In-context time-conditioning token count. |
 | `num_self_cond_cfg_tokens` | `4` | Self-conditioning CFG token count; zero disables them. |
@@ -72,7 +74,7 @@ schema rather than treating training flags as scheduler configuration.
 | `plan_noise_scale` | `1.0` | Positive plan diffusion noise scale. |
 | `plan_time_schedule` | `aligned` | Plan time: `aligned` or `noise_power`. |
 | `plan_time_warp_gamma` | `1.0` | For `noise_power`, uses `1-(1-t)^gamma`; must be at least one. |
-| `plan_training_mode` | `joint` | `joint` trains aligned token/plan states; `plan_first` trains a mixture of plan-only (`token_t=0`) and token-only (`plan_t=1`) states matching strict two-stage sampling. |
+| `plan_training_mode` | `joint` | `joint` trains aligned token/plan states; `plan_first` trains a matched plan-only/token-only mixture; `oracle` always gives token/decoder rows the clean frozen T5 continuation plan and disables plan reconstruction loss. |
 | `plan_first_plan_phase_prob` | `0.5` | In `plan_first` mode, fraction of non-decoder rows allocated to plan-only denoising; must be strictly between zero and one. |
 | `plan_aux_passes` | `1` | Detached auxiliary plan-denoiser passes. |
 | `plan_aux_token_context` | `denoiser_z` | `denoiser_z`, `resampled_z`, `mixed_z`, or `clean_x0`. |

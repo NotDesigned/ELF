@@ -193,6 +193,7 @@ class ELF(nn.Module):
         max_length: int,
         hidden_size: int = 1024,
         depth: int = 24,
+        active_depth: int | None = None,
         num_heads: int = 16,
         mlp_ratio: float = 4.0,
         attn_drop: float = 0.0,
@@ -219,6 +220,12 @@ class ELF(nn.Module):
         self.max_length = max_length
         self.hidden_size = hidden_size
         self.depth = depth
+        self.active_depth = depth if active_depth is None else int(active_depth)
+        if not 1 <= self.active_depth <= depth:
+            raise ValueError(
+                f"active_depth must be between 1 and the instantiated depth {depth}, "
+                f"got {active_depth!r}"
+            )
         self.num_heads = num_heads
         self.mlp_ratio = mlp_ratio
         self.attn_drop = attn_drop
@@ -713,7 +720,7 @@ class ELF(nn.Module):
                 )
 
         use_checkpoint = self.gradient_checkpointing and self.training and torch.is_grad_enabled()
-        for block in self.blocks:
+        for block in self.blocks[:self.active_depth]:
             if use_checkpoint:
                 def _block_forward(hidden: torch.Tensor, block: ELFBlock = block) -> torch.Tensor:
                     return block(hidden, rope_fn=self.feat_rope, attention_mask=attention_mask,
@@ -766,9 +773,9 @@ class ELF(nn.Module):
 
 
 # Model factory functions
-def ELF_B(**kwargs): return ELF(depth=12, hidden_size=768,  num_heads=12, **kwargs)
-def ELF_M(**kwargs): return ELF(depth=24, hidden_size=1056, num_heads=16, **kwargs)
-def ELF_L(**kwargs): return ELF(depth=32, hidden_size=1280, num_heads=16, **kwargs)
+def ELF_B(**kwargs): return ELF(depth=kwargs.pop("depth", None) or 12, hidden_size=768,  num_heads=12, **kwargs)
+def ELF_M(**kwargs): return ELF(depth=kwargs.pop("depth", None) or 24, hidden_size=1056, num_heads=16, **kwargs)
+def ELF_L(**kwargs): return ELF(depth=kwargs.pop("depth", None) or 32, hidden_size=1280, num_heads=16, **kwargs)
 
 ELF_models = {
     'ELF-B': ELF_B, 'ELF-M': ELF_M, 'ELF-L': ELF_L,
@@ -784,6 +791,8 @@ def build_elf_from_config(config, *, text_encoder_dim: int, vocab_size: int) -> 
     return ELF_models[config.model](
         text_encoder_dim=text_encoder_dim,
         max_length=config.max_length,
+        depth=getattr(config, "model_depth", None),
+        active_depth=getattr(config, "model_active_depth", None),
         attn_drop=config.attn_dropout,
         proj_drop=config.proj_dropout,
         num_time_tokens=config.num_time_tokens,

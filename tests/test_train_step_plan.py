@@ -33,6 +33,8 @@ def test_shared_train_eval_model_factory_preserves_attention_topology(monkeypatc
     config = Config()
     config.use_sentence_plan = True
     config.plan_attention_topology = "hierarchical_prefix"
+    config.model_depth = 6
+    config.model_active_depth = 6
 
     built = model_module.build_elf_from_config(
         config, text_encoder_dim=512, vocab_size=32100,
@@ -40,8 +42,83 @@ def test_shared_train_eval_model_factory_preserves_attention_topology(monkeypatc
 
     assert built is sentinel
     assert captured["plan_attention_topology"] == "hierarchical_prefix"
+    assert captured["depth"] == 6
+    assert captured["active_depth"] == 6
     assert captured["text_encoder_dim"] == 512
     assert captured["vocab_size"] == 32100
+
+
+def test_active_depth_preserves_checkpoint_schema_and_skips_late_blocks():
+    full = ELF(
+        text_encoder_dim=4,
+        max_length=6,
+        hidden_size=32,
+        depth=3,
+        num_heads=4,
+        mlp_ratio=2.0,
+        bottleneck_dim=8,
+        num_time_tokens=1,
+        num_self_cond_cfg_tokens=0,
+        vocab_size=32,
+    )
+    early_exit = ELF(
+        text_encoder_dim=4,
+        max_length=6,
+        hidden_size=32,
+        depth=3,
+        active_depth=2,
+        num_heads=4,
+        mlp_ratio=2.0,
+        bottleneck_dim=8,
+        num_time_tokens=1,
+        num_self_cond_cfg_tokens=0,
+        vocab_size=32,
+    )
+    early_exit.load_state_dict(full.state_dict(), strict=True)
+    assert early_exit.state_dict().keys() == full.state_dict().keys()
+
+    calls = [0, 0, 0]
+    hooks = []
+    for index, block in enumerate(early_exit.blocks):
+        hooks.append(block.register_forward_hook(
+            lambda _module, _args, _output, index=index: calls.__setitem__(index, calls[index] + 1)
+        ))
+    try:
+        early_exit(
+            torch.randn(2, 6, 4),
+            torch.full((2,), 0.5),
+            attention_mask=torch.ones(2, 6),
+            cond_seq_mask=torch.zeros(2, 6),
+        )
+    finally:
+        for hook in hooks:
+            hook.remove()
+
+    assert calls == [1, 1, 0]
+
+
+def test_model_depth_instantiates_an_actually_smaller_checkpoint():
+    full = model_module.ELF_B(
+        text_encoder_dim=4,
+        max_length=6,
+        num_time_tokens=1,
+        num_self_cond_cfg_tokens=0,
+        vocab_size=32,
+    )
+    shallow = model_module.ELF_B(
+        text_encoder_dim=4,
+        max_length=6,
+        depth=3,
+        num_time_tokens=1,
+        num_self_cond_cfg_tokens=0,
+        vocab_size=32,
+    )
+
+    assert len(full.blocks) == 12
+    assert len(shallow.blocks) == 3
+    assert sum(p.numel() for p in shallow.parameters()) < sum(p.numel() for p in full.parameters())
+    assert "blocks.2.attn.qkv.weight" in shallow.state_dict()
+    assert "blocks.3.attn.qkv.weight" not in shallow.state_dict()
 
 
 class ToyTokenizer:
@@ -358,6 +435,37 @@ def test_plan_first_training_token_phase_uses_completed_plan_and_masks_plan_loss
         plan_attention_topology="hierarchical_prefix",
         plan_training_mode="plan_first",
         plan_first_plan_phase_prob=0.0,
+    )
+
+    _, metrics = run_tiny_train_step(
+        config,
+        model=captured,
+        tokenizer=ToyTokenizer(),
+        sentence_encoder=ToySentenceEncoder(),
+    )
+
+    assert captured.main_call is not None
+    assert torch.all(captured.main_call["token_t"] > 0)
+    assert torch.all(captured.main_call["token_t"] < 1)
+    assert torch.equal(captured.main_call["plan_t"], torch.ones(2))
+    assert metrics["l2_token_count"].item() > 0
+    assert metrics["plan_loss"].item() == pytest.approx(0.0)
+    assert metrics["plan_phase_fraction"].item() == pytest.approx(0.0)
+    assert metrics["token_phase_fraction"].item() == pytest.approx(1.0)
+
+
+def test_oracle_training_always_uses_clean_plan_and_trains_all_denoiser_rows():
+    captured = MainForwardCapture(tiny_model(
+        sentence_encoder_type="sentence_t5",
+        num_self_cond_cfg_tokens=0,
+        plan_attention_topology="hierarchical_prefix",
+    ))
+    config = tiny_config(
+        sentence_encoder_type="sentence_t5",
+        num_self_cond_cfg_tokens=0,
+        plan_attention_topology="hierarchical_prefix",
+        plan_training_mode="oracle",
+        plan_loss_weight=0.0,
     )
 
     _, metrics = run_tiny_train_step(

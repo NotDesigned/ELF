@@ -102,6 +102,42 @@ def test_independent_plan_denoiser_config_validation():
         validate_config(cfg)
 
 
+def test_model_active_depth_validation():
+    cfg = Config()
+    cfg.model_active_depth = 6
+    assert validate_config(cfg).model_active_depth == 6
+
+    cfg.model_active_depth = 0
+    with pytest.raises(ValueError, match="model_active_depth"):
+        validate_config(cfg)
+
+    cfg.model_active_depth = 13
+    with pytest.raises(ValueError, match="instantiated model depth of 12"):
+        validate_config(cfg)
+
+
+def test_model_depth_validation_and_active_depth_bound():
+    cfg = Config()
+    cfg.model_depth = 6
+    assert validate_config(cfg).model_depth == 6
+
+    cfg.model_active_depth = 7
+    with pytest.raises(ValueError, match="instantiated model depth of 6"):
+        validate_config(cfg)
+
+    cfg.model_active_depth = None
+    cfg.model_depth = 13
+    with pytest.raises(ValueError, match="ELF-B preset depth of 12"):
+        validate_config(cfg)
+
+
+def test_model_depth_command_line_overrides_are_integers():
+    cfg = apply_config_overrides(Config(), ["model_depth=6", "model_active_depth=3"])
+
+    assert cfg.model_depth == 6
+    assert cfg.model_active_depth == 3
+
+
 def test_plan_attention_topology_validation():
     cfg = Config()
     cfg.use_sentence_plan = True
@@ -202,6 +238,21 @@ def test_plan_first_training_config_requires_matched_hierarchical_setup():
     cfg.plan_first_plan_phase_prob = 0.5
     cfg.plan_attention_topology = "joint"
     with pytest.raises(ValueError, match="hierarchical"):
+        validate_config(cfg)
+
+
+def test_oracle_training_requires_clean_frozen_plan_without_plan_loss():
+    cfg = Config()
+    cfg.use_sentence_plan = True
+    cfg.sentence_encoder_type = "sentence_t5"
+    cfg.plan_attention_topology = "hierarchical_prefix"
+    cfg.plan_training_mode = "oracle"
+    cfg.plan_loss_weight = 0.0
+
+    assert validate_config(cfg).plan_training_mode == "oracle"
+
+    cfg.plan_loss_weight = 1.0
+    with pytest.raises(ValueError, match="plan_loss_weight=0"):
         validate_config(cfg)
 
 
@@ -322,6 +373,7 @@ def test_owt_elfb_ablation_configs_are_unique_and_expected():
         "tier5_hierarchical_prefix_lead_g3_len256.yml",
         "tier5_prefix128_joint_aligned_len256.yml",
         "tier5_prefix128_hierarchical_aligned_len256.yml",
+        "tier5_prefix128_hierarchical_oracle_len256.yml",
         "tier5_prefix128_hierarchical_plan_first_len256.yml",
         "tier5_prefix128_hierarchical_lead_g3_len256.yml",
         "tier5_prefix128_strict_hierarchical_aligned_len256.yml",

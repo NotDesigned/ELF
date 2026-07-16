@@ -1,0 +1,15 @@
+base_config: tier5_prefix128_hierarchical_aligned_len256.yml
+
+# Oracle capacity probe: every token denoising and CE row receives the clean,
+# frozen Sentence-T5 embedding of the ground-truth continuation. There is no
+# plan-denoising objective; only token-generation losses train the shared trunk
+# and plan-input adapter.
+plan_training_mode: oracle
+plan_loss_weight: 0.0
+plan_aux_passes: 0
+
+output_dir: outputs/ablations/owt_elfb/tier5_prefix128_hierarchical_oracle_len256
+resume: null
+warm_start: null
+wandb_run_name: tier5_owt_elfb_prefix128_hierarchical_oracle_len256
+wandb_tag: tier5,owt,elfb,sentence_t5,prefix128,hierarchical_prefix,oracle,len256
