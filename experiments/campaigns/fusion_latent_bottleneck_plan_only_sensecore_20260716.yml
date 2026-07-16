@@ -1,7 +1,7 @@
 schema_version: 1
-campaign: fusion-latent-bottleneck-plan-only-sensecore-20260716-c1
+campaign: fusion-latent-bottleneck-plan-only-sensecore-20260716-c2
 project: elf
-source_id: auto
+source_id: cc1692c10e5dc57dc466022b496efcfe3ee98a36
 local_root: outputs/experiment_campaigns
 
 research_contract:
@@ -115,7 +115,7 @@ profiles:
       storage_mount: 01995896-d54c-7816-90b3-0ce73bce9936/L202500224:/data
 
 runs:
-  - run_id: elf-latent-bn-t6-p12-s42-sco-0716-r1
+  - run_id: elf-latent-bn-t6-p12-s42-sco-0716-r2
     research_role: token6_plan12
     profile: sensecore-4gpu-spot
     config_overrides:
@@ -123,7 +123,7 @@ runs:
       - plan_denoiser_depth=12
       - warm_start=/data/elf/runs/elf-oracle-cap-train-d6-s42-sco-0716-r2/checkpoint_19017
 
-  - run_id: elf-latent-bn-t12-p12-s42-sco-0716-r1
+  - run_id: elf-latent-bn-t12-p12-s42-sco-0716-r2
     research_role: token12_plan12
     profile: sensecore-4gpu-spot
     config_overrides:
