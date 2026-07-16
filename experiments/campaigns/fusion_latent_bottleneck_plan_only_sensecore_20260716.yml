@@ -1,0 +1,132 @@
+schema_version: 1
+campaign: fusion-latent-bottleneck-plan-only-sensecore-20260716-c1
+project: elf
+source_id: auto
+local_root: outputs/experiment_campaigns
+
+research_contract:
+  schema_version: 1
+  question: >-
+    With Token-ELF frozen, can a 12-layer prefix-conditioned Plan-ELF denoise
+    sample-specific Sentence-T5 continuation plans through one 768-D latent
+    bottleneck, and does the conclusion persist for 6-layer and 12-layer token
+    decoders?
+  required_roles: [token6_plan12, token12_plan12]
+  required_metrics:
+    common:
+      - train_loss
+      - train_plan_loss
+      - train_plan_phase_fraction
+      - train_token_phase_fraction
+      - train_plan_pred_batch_var
+      - steps_per_sec
+      - g_ppl
+      - oracle_plan_ppl
+      - shuffled_plan_ppl
+      - sampled_plan_num_samples
+      - sampled_plan_var_ratio
+      - sampled_clean_plan_cosine
+      - sampled_clean_plan_retrieval_lift
+      - generation_nonempty_fraction
+  required_artifacts:
+    common:
+      train_metrics: {min_records: 1}
+      evaluation_metrics: {min_records: 4}
+      generated_samples: {min_nonempty_records: 192}
+  terminal_checks:
+    - {metric: steps_per_sec, op: gt, value: 0}
+    - {metric: train_plan_phase_fraction, op: gt, value: 0.95}
+    - {metric: train_token_phase_fraction, op: lte, value: 1.0e-8}
+    - {metric: sampled_plan_num_samples, op: gte, value: 64}
+    - {metric: generation_nonempty_fraction, op: gt, value: 0.95}
+  early_stop:
+    - metrics: [train_loss, train_plan_loss]
+      op: any_nonfinite
+  checkpoint: {required_on_success: true}
+  comparison:
+    match_fields:
+      - source_id
+      - image_id
+      - resolved_config.seed
+      - resolved_config.data_path
+      - resolved_config.max_length
+      - resolved_config.max_input_length
+      - resolved_config.global_batch_size
+      - resolved_config.epochs
+      - resolved_config.plan_training_mode
+      - resolved_config.plan_denoiser_type
+      - resolved_config.plan_denoiser_conditioning
+      - resolved_config.plan_denoiser_depth
+      - resolved_config.plan_denoiser_hidden_size
+      - resolved_config.plan_denoiser_num_heads
+      - resolved_config.num_plan_tokens
+      - resolved_config.sampling_configs_path
+      - backend.kind
+      - backend.worker_spec
+      - backend.worker_nodes
+      - backend.quota_type
+
+defaults:
+  config: src/configs/training_configs/ablations/owt_elfb/tier5_prefix128_latent_bottleneck_plan_only_len256.yml
+  image_id: sha256:f4ad7dad10458a5ba65607e29dd6a074f1a27b82ec5f1f8c1574c07cbf9ae435
+  resources: {gpus: 4, nodes: 1, cpus: 56, max_time: 6h}
+  config_overrides:
+    - epochs=1
+    - global_batch_size=512
+    - grad_accum_steps=1
+    - warm_start_use_ema=false
+    - save_freq=0.25
+    - eval_freq=1
+    - num_samples=64
+    - reconstruction_eval=false
+    - eval_sampled_plan_diagnostics=true
+    - eval_mauve=false
+    - sampling_configs_path=src/configs/sampling_configs/cond_sampling_plan_first32_token32.yml
+    - train_sampling_eval_freq=0
+    - use_wandb=false
+  env:
+    LOG_FREQ: "100"
+    NUM_WORKERS: "8"
+    REQUIRE_OFFLINE_CACHE: "1"
+    USE_WANDB: "false"
+  storage:
+    run_dir: /data/elf/runs/{run_id}
+  retry: {max_infra_retries: 1}
+
+profiles:
+  sensecore-4gpu-spot:
+    storage:
+      data_root: /data
+      project_data_root: /data/elf
+      hf_home: /data/.cache/huggingface
+      hf_datasets_cache: /data/.cache/huggingface/datasets
+    backend:
+      kind: sensecore
+      workspace: share-space-01e
+      aec2: computing-cluster-01e
+      job_name: "{run_id}"
+      display_name: "{run_id}"
+      worker_spec: N6lS.Iu.I10.4.56c832g
+      worker_nodes: 1
+      priority: NORMAL
+      quota_type: spot
+      wait: true
+      image: registry.cn-sh-01.sensecore.cn/ccr-zhicheng-02/elf:runtime-cc1692c
+      storage_mount: 01995896-d54c-7816-90b3-0ce73bce9936/L202500224:/data
+
+runs:
+  - run_id: elf-latent-bn-t6-p12-s42-sco-0716-r1
+    research_role: token6_plan12
+    profile: sensecore-4gpu-spot
+    config_overrides:
+      - model_depth=6
+      - plan_denoiser_depth=12
+      - warm_start=/data/elf/runs/elf-oracle-cap-train-d6-s42-sco-0716-r2/checkpoint_19017
+
+  - run_id: elf-latent-bn-t12-p12-s42-sco-0716-r1
+    research_role: token12_plan12
+    profile: sensecore-4gpu-spot
+    config_overrides:
+      - model_depth=12
+      - plan_denoiser_depth=12
+      - warm_start=/data/elf/runs/elf-oracle-cap-train-d12-s42-sco-0716-r2/checkpoint_19017
