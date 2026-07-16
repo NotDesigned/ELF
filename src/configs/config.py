@@ -186,6 +186,38 @@ def validate_config(config) -> Config:
         )
     if float(config.plan_time_warp_gamma) < 1.0:
         raise ValueError(f"plan_time_warp_gamma must be >= 1.0, got {config.plan_time_warp_gamma!r}")
+    if config.plan_training_mode not in {"joint", "plan_first"}:
+        raise ValueError(
+            "plan_training_mode must be 'joint' or 'plan_first', "
+            f"got {config.plan_training_mode!r}"
+        )
+    _validate_probability(config.plan_first_plan_phase_prob, "plan_first_plan_phase_prob")
+    if config.plan_training_mode == "plan_first":
+        if not bool(config.use_sentence_plan):
+            raise ValueError("plan_training_mode='plan_first' requires use_sentence_plan=true")
+        if config.plan_attention_topology not in {
+            "hierarchical_prefix", "strict_hierarchical_prefix",
+        }:
+            raise ValueError(
+                "plan_training_mode='plan_first' requires a hierarchical plan attention topology"
+            )
+        if config.sentence_encoder_type != "sentence_t5":
+            raise ValueError(
+                "plan_training_mode='plan_first' currently requires sentence_encoder_type='sentence_t5'"
+            )
+        if not 0.0 < float(config.plan_first_plan_phase_prob) < 1.0:
+            raise ValueError(
+                "plan_first_plan_phase_prob must be strictly between 0 and 1 in plan_first mode"
+            )
+        if float(config.decoder_prob) >= 1.0:
+            raise ValueError("plan_training_mode='plan_first' requires decoder_prob < 1")
+        if float(config.plan_loss_weight) <= 0.0:
+            raise ValueError("plan_training_mode='plan_first' requires plan_loss_weight > 0")
+        if config.plan_time_schedule != "aligned" or float(config.plan_time_warp_gamma) != 1.0:
+            raise ValueError(
+                "plan_first training samples plan time independently; use "
+                "plan_time_schedule='aligned' and plan_time_warp_gamma=1.0"
+            )
 
     for field_name in ("decoder_prob", "label_drop_prob", "self_cond_prob"):
         _validate_probability(getattr(config, field_name), field_name)
@@ -379,6 +411,8 @@ class Config:
     plan_noise_scale: float = 1.0
     plan_time_schedule: str = "aligned"  # "aligned" or "noise_power"; maps token t -> plan t.
     plan_time_warp_gamma: float = 1.0  # For noise_power: plan_t = 1 - (1 - token_t) ** gamma.
+    plan_training_mode: str = "joint"  # "joint" or matched two-phase "plan_first".
+    plan_first_plan_phase_prob: float = 0.5  # Among non-decoder rows, allocate this fraction to plan-only denoising.
     plan_aux_passes: int = 1  # Extra detached plan-denoiser passes for learned+none topology.
     plan_aux_token_context: str = "denoiser_z"  # "denoiser_z", "resampled_z", "mixed_z", or "clean_x0"
     sentence_encoder_grad: str = "none"  # "none", "detached_target", or "full" 

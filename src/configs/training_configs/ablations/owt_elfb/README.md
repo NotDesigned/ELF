@@ -145,6 +145,7 @@ The prefix-conditioned counterpart uses a deterministic 128/128 split for full
 | `tier5_prefix128_joint_aligned_len256.yml` | first 128 valid tokens | joint plan/future | aligned |
 | `tier5_prefix128_hierarchical_aligned_len256.yml` | first 128 valid tokens | `(prefix + plan) -> future` two-block | aligned |
 | `tier5_prefix128_strict_hierarchical_aligned_len256.yml` | first 128 valid tokens | `prefix -> plan -> future` strict | aligned |
+| `tier5_prefix128_hierarchical_plan_first_len256.yml` | first 128 valid tokens | `(prefix + plan) -> future` two-block | strict two-phase training |
 
 The strict variant changes only the noisy shared denoiser. Clean token target
 encoding still uses the dataset encoder mask (future rows may read the full
@@ -153,6 +154,15 @@ continuation. Inside every denoiser block, control queries read controls only,
 prefix queries read controls plus prefix, plan queries read controls, prefix,
 and plan, and future queries read all valid keys. This removes the plan ->
 prefix feedback edge retained by the original two-block topology.
+
+The matched plan-first variant keeps the better-performing two-block attention
+topology and changes the training state distribution. Among non-decoder rows,
+half are plan-phase rows with `token_t=0` and an independently sampled
+`plan_t`; only plan reconstruction is active. The other half are token-phase
+rows with sampled `token_t` and a completed clean plan at `plan_t=1`; only
+token denoising is active. Decoder rows also receive a completed clean plan.
+This separates phase allocation from `plan_loss_weight` and reports the actual
+plan/token phase fractions in `train_metrics.jsonl`.
 | `tier5_prefix128_hierarchical_aligned_len256.yml` | first 128 valid tokens | prefix/plan -> future | aligned |
 | `tier5_prefix128_hierarchical_lead_g3_len256.yml` | first 128 valid tokens | prefix/plan -> future | `noise_power`, gamma=3 |
 

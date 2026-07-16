@@ -1224,7 +1224,8 @@ def test_parses_structured_training_metric_from_sensecore_log():
     record = parse_training_metric_line(
         "INFO - engine - Step 120: loss=3.1, l2=1.2, ce=9.8, plan=0.0, "
         "plan_aux=0.0, emb_var=0.000e+00, pred_var=0.0, emb_norm=0.00, "
-        "pred_norm=0.00, lr=2.5e-05, steps/sec=2.95"
+        "pred_norm=0.00, p_phase=0.49, t_phase=0.51, "
+        "lr=2.5e-05, steps/sec=2.95"
     )
     assert record == {
         "step": 120,
@@ -1237,6 +1238,8 @@ def test_parses_structured_training_metric_from_sensecore_log():
         "train_plan_pred_batch_var": 0.0,
         "train_plan_emb_norm": 0.0,
         "train_plan_pred_norm": 0.0,
+        "train_plan_phase_fraction": 0.49,
+        "train_token_phase_fraction": 0.51,
         "lr": 2.5e-05,
         "steps_per_sec": 2.95,
     }

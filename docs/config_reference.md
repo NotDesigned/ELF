@@ -72,6 +72,8 @@ schema rather than treating training flags as scheduler configuration.
 | `plan_noise_scale` | `1.0` | Positive plan diffusion noise scale. |
 | `plan_time_schedule` | `aligned` | Plan time: `aligned` or `noise_power`. |
 | `plan_time_warp_gamma` | `1.0` | For `noise_power`, uses `1-(1-t)^gamma`; must be at least one. |
+| `plan_training_mode` | `joint` | `joint` trains aligned token/plan states; `plan_first` trains a mixture of plan-only (`token_t=0`) and token-only (`plan_t=1`) states matching strict two-stage sampling. |
+| `plan_first_plan_phase_prob` | `0.5` | In `plan_first` mode, fraction of non-decoder rows allocated to plan-only denoising; must be strictly between zero and one. |
 | `plan_aux_passes` | `1` | Detached auxiliary plan-denoiser passes. |
 | `plan_aux_token_context` | `denoiser_z` | `denoiser_z`, `resampled_z`, `mixed_z`, or `clean_x0`. |
 | `sentence_encoder_grad` | `none` | Gradient topology: `none`, `detached_target`, or `full`. |

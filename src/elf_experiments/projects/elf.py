@@ -44,6 +44,7 @@ def parse_training_metric_line(line: str) -> dict[str, Any] | None:
         "plan": "train_plan_loss", "plan_aux": "train_plan_aux_loss",
         "emb_var": "train_plan_emb_batch_var", "pred_var": "train_plan_pred_batch_var",
         "emb_norm": "train_plan_emb_norm", "pred_norm": "train_plan_pred_norm",
+        "p_phase": "train_plan_phase_fraction", "t_phase": "train_token_phase_fraction",
         "lr": "lr", "steps/sec": "steps_per_sec",
     }
     for key, value in re.findall(r"([A-Za-z0-9_/]+)=([-+0-9.eE]+)", match.group(2)):

@@ -80,6 +80,11 @@ def train_step(
     decoder_noise_scale = config.decoder_noise_scale
     use_sentence_plan = bool(getattr(config, "use_sentence_plan", False))
     sentence_encoder_type = getattr(config, "sentence_encoder_type", "sentence_t5")
+    plan_training_mode = str(getattr(config, "plan_training_mode", "joint")).lower()
+    if plan_training_mode not in {"joint", "plan_first"}:
+        raise ValueError(
+            f"plan_training_mode must be 'joint' or 'plan_first', got {plan_training_mode!r}"
+        )
 
     gen = state.dropout_generator
 
@@ -141,17 +146,6 @@ def train_step(
             "cond_seq_mask": topology_cond_seq_mask,
         }
 
-    cond_seq_mask = cond_seq_mask.unsqueeze(-1)  # (B, S, 1)
-
-    denoiser_z = add_noise(x0, noise, t, config, cond_seq_mask=cond_seq_mask)
-
-    drop = label_drop_mask.unsqueeze(1)  # (B, 1)
-    if config.label_drop_prob > 0:
-        denoiser_z = torch.where(drop.unsqueeze(-1) & (cond_seq_mask > 0), torch.zeros_like(denoiser_z), denoiser_z)
-        x0 = torch.where(drop.unsqueeze(-1) & (cond_seq_mask > 0), torch.zeros_like(x0), x0)
-
-    decoder_targets = input_ids  # (B, S)
-
     # Per-example branching: each example independently picks decoder (CE) vs.
     # denoiser (L2) instead of one scalar bernoulli per step. Smooths training
     decoder_step_active = torch.bernoulli(
@@ -160,6 +154,39 @@ def train_step(
     ).to(device=device, dtype=dtype)  # (B,) — 1.0 = decoder mode, 0.0 = denoiser
     decoder_mask_B11 = decoder_step_active.view(-1, 1, 1)
     decoder_mask_B1 = decoder_step_active.view(-1, 1)
+    denoiser_step_active = 1.0 - decoder_step_active
+
+    # Matched strict plan-first training visits the same two state families as
+    # inference. Plan-phase rows hold the token field at pure noise (t=0) and
+    # train only the plan reconstruction. Token-phase rows hold the plan at its
+    # completed state (plan_t=1) and train only token denoising. Decoder rows
+    # continue to consume a completed plan.
+    if plan_training_mode == "plan_first":
+        plan_phase_draw = torch.bernoulli(
+            torch.full(
+                (batch_size,),
+                float(getattr(config, "plan_first_plan_phase_prob", 0.5)),
+                dtype=torch.float32,
+            ),
+            generator=gen,
+        ).to(device=device, dtype=dtype)
+        plan_phase_active = denoiser_step_active * plan_phase_draw
+        token_phase_active = denoiser_step_active * (1.0 - plan_phase_draw)
+        denoiser_t = torch.where(plan_phase_active.bool(), torch.zeros_like(t), t)
+    else:
+        plan_phase_active = torch.zeros_like(decoder_step_active)
+        token_phase_active = denoiser_step_active
+        denoiser_t = t
+
+    cond_seq_mask = cond_seq_mask.unsqueeze(-1)  # (B, S, 1)
+    denoiser_z = add_noise(x0, noise, denoiser_t, config, cond_seq_mask=cond_seq_mask)
+
+    drop = label_drop_mask.unsqueeze(1)  # (B, 1)
+    if config.label_drop_prob > 0:
+        denoiser_z = torch.where(drop.unsqueeze(-1) & (cond_seq_mask > 0), torch.zeros_like(denoiser_z), denoiser_z)
+        x0 = torch.where(drop.unsqueeze(-1) & (cond_seq_mask > 0), torch.zeros_like(x0), x0)
+
+    decoder_targets = input_ids  # (B, S)
 
     # Decoder-branch input: logit-normal-noised latent (decoder_z) at t=1
     decoder_z_vals = (
@@ -170,7 +197,7 @@ def train_step(
     decoder_noise = torch.randn(x0.shape, dtype=dtype, device=device) * decoder_noise_scale
     decoder_z = decoder_lambda_t * x0 + (1 - decoder_lambda_t) * decoder_noise
 
-    t_expanded = t.reshape(-1, 1, 1)
+    t_expanded = denoiser_t.reshape(-1, 1, 1)
     v_target = (x0 - denoiser_z) / torch.clamp(1 - t_expanded, min=t_eps)
 
     if self_cond_prob > 0:
@@ -248,7 +275,14 @@ def train_step(
         plan_emb_norm = s0_detached_for_metrics.norm(dim=-1).mean()
 
         plan_noise = torch.randn_like(s0) * float(getattr(config, "plan_noise_scale", 1.0))
-        plan_t_denoiser = plan_time_from_token_time(t, config)
+        if plan_training_mode == "plan_first":
+            # Plan-phase rows use an independently sampled plan clock while
+            # token-phase rows condition on the completed target plan.
+            plan_t_denoiser = torch.where(
+                plan_phase_active.bool(), t, torch.ones_like(t),
+            )
+        else:
+            plan_t_denoiser = plan_time_from_token_time(t, config)
         plan_t_expanded = plan_t_denoiser.reshape(-1, 1)
         plan_z_denoiser = plan_t_expanded * s0 + (1.0 - plan_t_expanded) * plan_noise
         plan_z_mixed = decoder_mask_B1 * s0 + (1.0 - decoder_mask_B1) * plan_z_denoiser
@@ -331,9 +365,8 @@ def train_step(
     # Per-example branching: build a mixed input (decoder_z for decoder-mode
     # rows, denoiser_z for denoiser-mode rows). One forward computes both
     # heads; we mask CE / L2 losses to their respective rows. 
-    denoiser_t = t
     decoder_t = torch.ones_like(t)
-    t_mixed = decoder_step_active * decoder_t + (1.0 - decoder_step_active) * t  # (B,)
+    t_mixed = decoder_step_active * decoder_t + (1.0 - decoder_step_active) * denoiser_t  # (B,)
     z_mixed = decoder_mask_B11 * decoder_z + (1.0 - decoder_mask_B11) * denoiser_z
     if use_sentence_plan:
         plan_t_mixed = decoder_step_active * decoder_t + (1.0 - decoder_step_active) * plan_t_denoiser
@@ -377,10 +410,28 @@ def train_step(
         )
     if use_sentence_plan:
         net_out, decoder_logits, plan_pred = model_out
-        plan_loss = ((plan_pred.float() - plan_target.float()) ** 2).mean(dim=-1).mean()
+        plan_mse_per_example = (
+            (plan_pred.float() - plan_target.float()) ** 2
+        ).mean(dim=-1)
         plan_pred_detached = plan_pred.detach().float()
-        plan_pred_batch_var = plan_pred_detached.var(dim=0, unbiased=False).mean()
-        plan_pred_norm = plan_pred_detached.norm(dim=-1).mean()
+        if plan_training_mode == "plan_first":
+            plan_weights = plan_phase_active.float()
+            plan_count = torch.clamp(plan_weights.sum(), min=1.0)
+            plan_loss = (plan_mse_per_example * plan_weights).sum() / plan_count
+            plan_weights_B1 = plan_weights.unsqueeze(-1)
+            plan_pred_mean = (
+                plan_pred_detached * plan_weights_B1
+            ).sum(dim=0) / plan_count
+            plan_pred_batch_var = (
+                ((plan_pred_detached - plan_pred_mean) ** 2) * plan_weights_B1
+            ).sum(dim=0).mean() / plan_count
+            plan_pred_norm = (
+                plan_pred_detached.norm(dim=-1) * plan_weights
+            ).sum() / plan_count
+        else:
+            plan_loss = plan_mse_per_example.mean()
+            plan_pred_batch_var = plan_pred_detached.var(dim=0, unbiased=False).mean()
+            plan_pred_norm = plan_pred_detached.norm(dim=-1).mean()
         plan_loss_for_backward = plan_loss
         if grad_mode == "none" and sentence_encoder_type == "learned" and s0.requires_grad:
             # STAR-LDM topology: the main pass keeps Enc in the field/CE graph,
@@ -469,10 +520,13 @@ def train_step(
     # Masks: each position is "alive" for exactly one branch.
     loss_mask_f = loss_mask.to(ce_per_token.dtype)
     ce_mask = loss_mask_f * decoder_mask_B1
-    l2_mask = loss_mask_f * (1.0 - decoder_mask_B1)
+    l2_mask = loss_mask_f * token_phase_active.view(-1, 1)
 
-    # Combined loss with a single denominator. In expectation this is
-    # decoder_prob * mean_CE + (1 - decoder_prob) * mean_L2.
+    # Combined token-field loss with a single denominator. Joint mode retains
+    # decoder_prob * mean_CE + (1 - decoder_prob) * mean_L2. In plan-first
+    # mode, plan-phase rows intentionally contribute no token-field loss; the
+    # separately normalized plan objective below keeps phase allocation and
+    # plan_loss_weight as independent controls.
     total_sum = (ce_per_token * ce_mask).sum() + (l2_per_token * l2_mask).sum()
     loss = total_sum / torch.clamp(loss_mask_f.sum(), min=1.0)
     loss = loss + float(getattr(config, "plan_loss_weight", 1.0)) * plan_loss_for_backward
@@ -484,6 +538,9 @@ def train_step(
     l2_token_count = l2_mask.sum().detach()
     ce_loss_val = ce_loss_sum / torch.clamp(ce_token_count, min=1.0)
     l2_loss_val = l2_loss_sum / torch.clamp(l2_token_count, min=1.0)
+    denoiser_phase_count = torch.clamp(denoiser_step_active.sum().detach(), min=1.0)
+    plan_phase_fraction = plan_phase_active.sum().detach() / denoiser_phase_count
+    token_phase_fraction = token_phase_active.sum().detach() / denoiser_phase_count
 
     (loss / accumulation_divisor).backward()
     state.micro_step = int(getattr(state, "micro_step", state.step)) + 1
@@ -516,6 +573,8 @@ def train_step(
         "plan_emb_norm": plan_emb_norm.detach(),
         "plan_pred_batch_var": plan_pred_batch_var.detach(),
         "plan_pred_norm": plan_pred_norm.detach(),
+        "plan_phase_fraction": plan_phase_fraction,
+        "token_phase_fraction": token_phase_fraction,
         "l2_loss_sum": l2_loss_sum,
         "l2_token_count": l2_token_count,
         "optimizer_step": torch.tensor(state.optimizer_step, device=loss.device),

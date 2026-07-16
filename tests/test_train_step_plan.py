@@ -78,6 +78,24 @@ class SyncTrackingWrapper(nn.Module):
         return self.module(*args, **kwargs)
 
 
+class MainForwardCapture(nn.Module):
+    """Capture the loss-bearing mixed forward without changing model behavior."""
+
+    def __init__(self, module):
+        super().__init__()
+        self.module = module
+        self.main_call = None
+
+    def forward(self, *args, **kwargs):
+        if kwargs.get("decoder_step_active") is not None:
+            self.main_call = {
+                "token_t": args[1].detach().clone(),
+                "plan_t": kwargs["plan_t"].detach().clone(),
+                "plan_z": kwargs["plan_z"].detach().clone(),
+            }
+        return self.module(*args, **kwargs)
+
+
 def tiny_batch():
     input_ids = torch.tensor(
         [
@@ -295,6 +313,68 @@ def test_strict_hierarchical_train_step_runs_with_prefix_mask_plumbed():
 
     assert torch.isfinite(metrics["loss"])
     assert torch.isfinite(metrics["plan_loss"])
+
+
+def test_plan_first_training_plan_phase_freezes_token_and_masks_token_loss():
+    captured = MainForwardCapture(tiny_model(
+        sentence_encoder_type="sentence_t5",
+        num_self_cond_cfg_tokens=0,
+        plan_attention_topology="hierarchical_prefix",
+    ))
+    config = tiny_config(
+        sentence_encoder_type="sentence_t5",
+        num_self_cond_cfg_tokens=0,
+        plan_attention_topology="hierarchical_prefix",
+        plan_training_mode="plan_first",
+        plan_first_plan_phase_prob=1.0,
+    )
+
+    _, metrics = run_tiny_train_step(
+        config,
+        model=captured,
+        tokenizer=ToyTokenizer(),
+        sentence_encoder=ToySentenceEncoder(),
+    )
+
+    assert captured.main_call is not None
+    assert torch.equal(captured.main_call["token_t"], torch.zeros(2))
+    assert torch.all(captured.main_call["plan_t"] > 0)
+    assert torch.all(captured.main_call["plan_t"] < 1)
+    assert metrics["l2_token_count"].item() == pytest.approx(0.0)
+    assert metrics["plan_loss"].item() > 0
+    assert metrics["plan_phase_fraction"].item() == pytest.approx(1.0)
+    assert metrics["token_phase_fraction"].item() == pytest.approx(0.0)
+
+
+def test_plan_first_training_token_phase_uses_completed_plan_and_masks_plan_loss():
+    captured = MainForwardCapture(tiny_model(
+        sentence_encoder_type="sentence_t5",
+        num_self_cond_cfg_tokens=0,
+        plan_attention_topology="hierarchical_prefix",
+    ))
+    config = tiny_config(
+        sentence_encoder_type="sentence_t5",
+        num_self_cond_cfg_tokens=0,
+        plan_attention_topology="hierarchical_prefix",
+        plan_training_mode="plan_first",
+        plan_first_plan_phase_prob=0.0,
+    )
+
+    _, metrics = run_tiny_train_step(
+        config,
+        model=captured,
+        tokenizer=ToyTokenizer(),
+        sentence_encoder=ToySentenceEncoder(),
+    )
+
+    assert captured.main_call is not None
+    assert torch.all(captured.main_call["token_t"] > 0)
+    assert torch.all(captured.main_call["token_t"] < 1)
+    assert torch.equal(captured.main_call["plan_t"], torch.ones(2))
+    assert metrics["l2_token_count"].item() > 0
+    assert metrics["plan_loss"].item() == pytest.approx(0.0)
+    assert metrics["plan_phase_fraction"].item() == pytest.approx(0.0)
+    assert metrics["token_phase_fraction"].item() == pytest.approx(1.0)
 
 
 def train_state(model):

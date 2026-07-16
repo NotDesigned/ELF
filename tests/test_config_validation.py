@@ -185,6 +185,26 @@ def test_plan_time_scheduler_noise_power_leads_and_validates():
         validate_config(cfg)
 
 
+def test_plan_first_training_config_requires_matched_hierarchical_setup():
+    cfg = Config()
+    cfg.use_sentence_plan = True
+    cfg.sentence_encoder_type = "sentence_t5"
+    cfg.plan_attention_topology = "hierarchical_prefix"
+    cfg.plan_training_mode = "plan_first"
+    cfg.plan_first_plan_phase_prob = 0.5
+
+    assert validate_config(cfg).plan_training_mode == "plan_first"
+
+    cfg.plan_first_plan_phase_prob = 1.0
+    with pytest.raises(ValueError, match="strictly between"):
+        validate_config(cfg)
+
+    cfg.plan_first_plan_phase_prob = 0.5
+    cfg.plan_attention_topology = "joint"
+    with pytest.raises(ValueError, match="hierarchical"):
+        validate_config(cfg)
+
+
 def test_encoder_checkpoint_is_not_silently_ignored():
     cfg = Config()
     cfg.encoder_checkpoint = "some/encoder/checkpoint"
@@ -302,6 +322,7 @@ def test_owt_elfb_ablation_configs_are_unique_and_expected():
         "tier5_hierarchical_prefix_lead_g3_len256.yml",
         "tier5_prefix128_joint_aligned_len256.yml",
         "tier5_prefix128_hierarchical_aligned_len256.yml",
+        "tier5_prefix128_hierarchical_plan_first_len256.yml",
         "tier5_prefix128_hierarchical_lead_g3_len256.yml",
         "tier5_prefix128_strict_hierarchical_aligned_len256.yml",
     }
@@ -323,6 +344,8 @@ def test_owt_elfb_ablation_configs_are_unique_and_expected():
             cfg.plan_attention_topology,
             cfg.plan_time_schedule,
             float(cfg.plan_time_warp_gamma),
+            cfg.plan_training_mode,
+            float(cfg.plan_first_plan_phase_prob),
             int(cfg.num_plan_tokens),
             bool(cfg.plan_learned_encoder_norm),
             float(cfg.plan_loss_weight),

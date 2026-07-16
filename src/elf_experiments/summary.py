@@ -32,6 +32,8 @@ TRAIN_KEYS = (
     "train_plan_emb_norm",
     "train_plan_pred_batch_var",
     "train_plan_pred_norm",
+    "train_plan_phase_fraction",
+    "train_token_phase_fraction",
     "lr",
     "steps_per_sec",
 )

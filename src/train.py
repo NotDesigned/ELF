@@ -269,6 +269,8 @@ def run_training(config, *, force_cpu: bool = False):
             f"slots={config.num_plan_tokens}, dim={config.sentence_emb_dim}, "
             f"time={getattr(config, 'plan_time_schedule', 'aligned')}"
             f"(gamma={getattr(config, 'plan_time_warp_gamma', 1.0)}), "
+            f"training={getattr(config, 'plan_training_mode', 'joint')}"
+            f"(plan_phase_prob={getattr(config, 'plan_first_plan_phase_prob', 0.5)}), "
             f"grad={getattr(config, 'sentence_encoder_grad', 'none')}, "
             f"aux_passes={getattr(config, 'plan_aux_passes', 1)}, "
             f"aux_context={getattr(config, 'plan_aux_token_context', 'denoiser_z')}"
@@ -601,6 +603,8 @@ def run_training(config, *, force_cpu: bool = False):
                     torch.stack([m["plan_emb_norm"] for m in train_metrics]).mean(),
                     torch.stack([m["plan_pred_batch_var"] for m in train_metrics]).mean(),
                     torch.stack([m["plan_pred_norm"] for m in train_metrics]).mean(),
+                    torch.stack([m["plan_phase_fraction"] for m in train_metrics]).mean(),
+                    torch.stack([m["token_phase_fraction"] for m in train_metrics]).mean(),
                     torch.stack([m["ce_loss_sum"] for m in train_metrics]).sum(),
                     torch.stack([m["ce_token_count"] for m in train_metrics]).sum(),
                     torch.stack([m["l2_loss_sum"] for m in train_metrics]).sum(),
@@ -615,6 +619,7 @@ def run_training(config, *, force_cpu: bool = False):
                     avg_loss, avg_plan, avg_plan_aux,
                     avg_plan_emb_var, avg_plan_emb_norm,
                     avg_plan_pred_var, avg_plan_pred_norm,
+                    avg_plan_phase_fraction, avg_token_phase_fraction,
                     ce_loss_sum, ce_token_count, l2_loss_sum, l2_token_count,
                 ) = (float(x) for x in stacked.tolist())
                 avg_ce = ce_loss_sum / max(ce_token_count, 1.0)
@@ -629,6 +634,8 @@ def run_training(config, *, force_cpu: bool = False):
                     "plan": f"{avg_plan:.4f}", "plan_aux": f"{avg_plan_aux:.4f}",
                     "emb_var": f"{avg_plan_emb_var:.2e}", "pred_var": f"{avg_plan_pred_var:.2e}",
                     "emb_norm": f"{avg_plan_emb_norm:.2f}", "pred_norm": f"{avg_plan_pred_norm:.2f}",
+                    "p_phase": f"{avg_plan_phase_fraction:.3f}",
+                    "t_phase": f"{avg_token_phase_fraction:.3f}",
                     "sps": f"{steps_per_sec:.1f}", "lr": f"{current_lr:.2e}",
                 }
                 log_for_0(postfix_dict)
@@ -650,6 +657,8 @@ def run_training(config, *, force_cpu: bool = False):
                         "train_plan_emb_norm": avg_plan_emb_norm,
                         "train_plan_pred_batch_var": avg_plan_pred_var,
                         "train_plan_pred_norm": avg_plan_pred_norm,
+                        "train_plan_phase_fraction": avg_plan_phase_fraction,
+                        "train_token_phase_fraction": avg_token_phase_fraction,
                         "lr": current_lr,
                         "steps_per_sec": steps_per_sec,
                     }
@@ -663,6 +672,8 @@ def run_training(config, *, force_cpu: bool = False):
                         f"plan={avg_plan:.4f}, plan_aux={avg_plan_aux:.4f}, "
                         f"emb_var={avg_plan_emb_var:.3e}, pred_var={avg_plan_pred_var:.3e}, "
                         f"emb_norm={avg_plan_emb_norm:.2f}, pred_norm={avg_plan_pred_norm:.2f}, "
+                        f"p_phase={avg_plan_phase_fraction:.3f}, "
+                        f"t_phase={avg_token_phase_fraction:.3f}, "
                         f"lr={current_lr:.2e}, steps/sec={steps_per_sec:.2f}"
                     )
                     if config.use_wandb and wandb is not None:
