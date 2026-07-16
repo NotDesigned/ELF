@@ -161,15 +161,24 @@ def test_strict_hierarchical_campaign_is_a_matched_two_arm_ablation(suffix, gpus
         assert differences <= allowed_config_differences, (role, differences)
 
 
-def test_research_project_campaign_catalog_matches_campaign_files():
+def test_research_project_campaign_catalog_covers_every_campaign_file():
     project = yaml.safe_load(
         (REPO_ROOT / "experiments/research_project.yaml").read_text(encoding="utf-8")
     )
 
+    catalog_paths = []
     for entry in project["campaigns"]:
         campaign_path = REPO_ROOT / entry["file"]
         campaign = yaml.safe_load(campaign_path.read_text(encoding="utf-8"))
         assert entry["name"] == campaign["campaign"], campaign_path
+        catalog_paths.append(campaign_path.resolve())
+
+    authored_paths = {
+        path.resolve()
+        for path in (REPO_ROOT / "experiments/campaigns").glob("*.yml")
+    }
+    assert len(catalog_paths) == len(set(catalog_paths)), "duplicate campaign catalog path"
+    assert set(catalog_paths) == authored_paths
 
 
 def test_stage_a_formal_matrix_retains_all_common_overrides():

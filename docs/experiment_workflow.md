@@ -93,6 +93,23 @@ environment at `/opt/ml-expd/venv/bin/python`. Training itself still runs in
 the backend SIF; the daemon environment only resolves campaigns, stages source,
 and manages scheduler/evidence operations.
 
+Every authored file under `experiments/campaigns/` must also be present in
+`experiments/research_project.yaml`. This is a control-plane invariant, not
+documentation bookkeeping: the daemon can continuously index and poll only
+Campaigns/Runs that enter its registered Project catalog or its canonical Run
+root. The repository test suite rejects an uncatalogued campaign file.
+
+When the Seoul daemon is the active control plane, scheduler mutation must be
+performed through its authorized Campaign/Run Action path. The commands below
+are the controller capabilities used by that path and remain available for
+offline diagnosis or explicit break-glass operation. A client-side direct
+`submit` does not transfer its Run/Attempt state into the daemon and therefore
+must not be treated as daemon-observed. After every daemon submission, verify
+that `research-console run show --project elf RUN_ID` resolves the exact Run
+before relying on background polling. A historical direct submission must be
+imported into `/var/lib/ml-expd/runs/elf` by an operator, reindexed, and audited;
+launching a GPU-only result collector is not the normal recovery path.
+
 The controller freezes campaign metadata locally before scheduler submission
 and exposes the same operations for SenseCore and WYD Slurm:
 

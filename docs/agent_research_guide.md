@@ -39,6 +39,10 @@ quota, partition, credentials, or run IDs are usable now.
   redacted command, asset, and checkpoint-policy identities in a v2 Run
   manifest. Legacy v1 manifests are observation-only for automated recovery.
 - Keep credentials in SCO, Docker, or SSH native stores, never campaign data.
+- Keep every authored Campaign in `experiments/research_project.yaml`. In a
+  daemon-attached session, submit through the daemon Action path and prove the
+  resulting Run is visible there before waiting for background polling. Direct
+  controller submission is an explicit break-glass path, not a daemon submit.
 - Treat scheduler, process, checkpoint, training metric, and evaluation states
   as separate evidence layers. W&B is an optional mirror, not canonical state.
 - Resume only a checkpoint with a valid `.complete` marker. Never silently

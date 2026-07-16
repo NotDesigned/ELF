@@ -24,6 +24,33 @@ controller:
       - yaml
     require_clean_git: true
 campaigns:
+  - name: fusion-latent-bottleneck-plan-only-sensecore-20260716-c2
+    file: experiments/campaigns/fusion_latent_bottleneck_plan_only_sensecore_20260716.yml
+  - name: fusion-oracle-capacity-probe-train-sensecore-20260716-c2
+    file: experiments/campaigns/fusion_oracle_capacity_probe_train_sensecore_20260716.yml
+  - name: fusion-prefix128-matched-plan-first-train-sensecore-20260716-c1
+    file: experiments/campaigns/fusion_prefix128_matched_plan_first_train_sensecore_20260716.yml
+    role_notes:
+      aligned_continue: matched continuation control trained with aligned plan/token time
+      planfirst_continue: matched continuation trained with separate plan and token phases
+  - name: fusion-prefix128-plan-first-sampling-smoke-sensecore-20260716-c3
+    file: experiments/campaigns/fusion_prefix128_plan_first_sampling_smoke_sensecore_20260716.yml
+  - name: fusion-prefix128-sampled-plan-eval-sensecore-20260716-c1
+    file: experiments/campaigns/fusion_prefix128_sampled_plan_eval_sensecore_20260716.yml
+  - name: fusion-prefix128-sampled-plan-eval-smoke-sensecore-20260716-c1
+    file: experiments/campaigns/fusion_prefix128_sampled_plan_eval_smoke_sensecore_20260716.yml
+  - name: fusion-clean-vs-t5-plan-quality-stage-a-h200-20260715-c3
+    file: experiments/campaigns/fusion_clean_vs_t5_plan_quality_stage_a_h200_20260715.yml
+  - name: fusion-clean-vs-t5-plan-quality-stage-a-smoke-h200-20260715-c3
+    file: experiments/campaigns/fusion_clean_vs_t5_plan_quality_stage_a_smoke_h200_20260715.yml
+  - name: fusion-len256-gate-slurm-20260711
+    file: experiments/campaigns/fusion_len256_gate_slurm_20260711.yml
+  - name: fusion-len256-gate-slurm-v2-20260711
+    file: experiments/campaigns/fusion_len256_gate_slurm_v2_20260711.yml
+  - name: backend-smoke-sensecore-20260711
+    file: experiments/campaigns/backend_smoke_sensecore_20260711.yml
+  - name: backend-smoke-slurm-20260711
+    file: experiments/campaigns/backend_smoke_slurm_20260711.yml
   - name: fusion-strict-hierarchical-prefix128-h200-20260716-c1
     file: experiments/campaigns/fusion_strict_hierarchical_prefix128_h200_20260716.yml
     role_notes:
