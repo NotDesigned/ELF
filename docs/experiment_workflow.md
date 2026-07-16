@@ -109,6 +109,9 @@ that `research-console run show --project elf RUN_ID` resolves the exact Run
 before relying on background polling. A historical direct submission must be
 imported into `/var/lib/ml-expd/runs/elf` by an operator, reindexed, and audited;
 launching a GPU-only result collector is not the normal recovery path.
+Daemon scheduler/evidence polling and the optional W&B publisher are separate:
+`observability=DISABLED` may be expected when W&B mirroring is off, but Doctor
+must still report `collector: owner and polling` for an active Project.
 
 The controller freezes campaign metadata locally before scheduler submission
 and exposes the same operations for SenseCore and WYD Slurm:
