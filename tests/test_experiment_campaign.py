@@ -206,6 +206,34 @@ def test_stage_a_formal_matrix_retains_all_common_overrides():
         ) == 1
 
 
+def test_latent_bottleneck_r3_retains_common_and_arm_overrides():
+    campaign = load_and_resolve_campaign(
+        REPO_ROOT
+        / "experiments/campaigns/"
+        "fusion_latent_bottleneck_plan_only_sensecore_20260717.yml"
+    )
+    required_common = {
+        "epochs=1",
+        "global_batch_size=512",
+        "grad_accum_steps=1",
+        "save_freq=0.25",
+        "num_samples=64",
+        "reconstruction_eval=false",
+        "eval_sampled_plan_diagnostics=true",
+        "eval_mauve=false",
+        "sampling_configs_path="
+        "src/configs/sampling_configs/cond_sampling_plan_first32_token32.yml",
+    }
+
+    assert len(campaign["runs"]) == 2
+    for run in campaign["runs"]:
+        overrides = list(run["config_overrides"])
+        assert required_common <= set(overrides)
+        assert len(overrides) == 16
+        assert sum(value.startswith("model_depth=") for value in overrides) == 1
+        assert sum(value.startswith("warm_start=") for value in overrides) == 1
+
+
 def test_deep_merge_is_recursive_replaces_lists_and_does_not_mutate_inputs():
     base = {"backend": {"kind": "test-backend", "time": "1:00"}, "overrides": ["epochs=1"]}
     override = {"backend": {"time": "2:00"}, "overrides": []}
@@ -258,6 +286,44 @@ def test_resolve_campaign_merges_defaults_profiles_and_run_in_order():
             },
         }
     ]
+
+
+def test_resolve_campaign_can_explicitly_append_config_overrides():
+    payload = {
+        "runs": [
+            {
+                "run_id": "a0",
+                "config_overrides_append": ["model_depth=6"],
+            }
+        ],
+        "defaults": {
+            "config_overrides": ["epochs=1", "model_depth=12"],
+        },
+    }
+
+    resolved = resolve_campaign(payload)
+
+    assert resolved["runs"][0]["config_overrides"] == [
+        "epochs=1",
+        "model_depth=12",
+        "model_depth=6",
+    ]
+    assert "config_overrides_append" not in resolved["runs"][0]
+
+
+def test_resolve_campaign_rejects_replace_and_append_in_one_layer():
+    payload = {
+        "runs": [
+            {
+                "run_id": "a0",
+                "config_overrides": ["epochs=1"],
+                "config_overrides_append": ["model_depth=6"],
+            }
+        ],
+    }
+
+    with pytest.raises(ValueError, match="cannot define both"):
+        resolve_campaign(payload)
 
 
 def test_matrix_expands_cartesian_product_and_preserves_runtime_placeholders():

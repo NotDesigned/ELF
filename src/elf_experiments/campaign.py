@@ -38,6 +38,40 @@ def deep_merge(base: Mapping[str, Any], override: Mapping[str, Any]) -> dict[str
     return result
 
 
+def _merge_campaign_layer(
+    base: Mapping[str, Any], override: Mapping[str, Any], *, layer: str
+) -> dict[str, Any]:
+    """Merge one authoring layer and explicitly append config overrides.
+
+    Lists normally replace earlier lists.  ``config_overrides_append`` is the
+    opt-in exception for the common campaign pattern where defaults freeze
+    shared runtime settings and a profile or run adds only its varying fields.
+    Keeping this explicit preserves the existing ability to replace or clear a
+    default ``config_overrides`` list.
+    """
+    authored = copy.deepcopy(dict(override))
+    appended = authored.pop("config_overrides_append", None)
+    if appended is None:
+        return deep_merge(base, authored)
+    if "config_overrides" in authored:
+        raise ValueError(
+            f"{layer} cannot define both config_overrides and "
+            "config_overrides_append"
+        )
+    if not isinstance(appended, list) or not all(
+        isinstance(item, str) for item in appended
+    ):
+        raise ValueError(f"{layer} config_overrides_append must be a list of strings")
+    merged = deep_merge(base, authored)
+    inherited = merged.get("config_overrides", [])
+    if not isinstance(inherited, list) or not all(
+        isinstance(item, str) for item in inherited
+    ):
+        raise ValueError(f"{layer} inherited config_overrides must be a list of strings")
+    merged["config_overrides"] = [*inherited, *appended]
+    return merged
+
+
 def _lookup(context: Mapping[str, Any], path: str) -> tuple[bool, Any]:
     value: Any = context
     for component in path.split("."):
@@ -144,8 +178,16 @@ def resolve_campaign(payload: Mapping[str, Any]) -> dict[str, Any]:
         for name in selected:
             if name not in profiles:
                 raise ValueError(f"run references unknown profile: {name}")
-            resolved = deep_merge(resolved, profiles[name])
-        resolved_runs.append(deep_merge(resolved, authored))
+            resolved = _merge_campaign_layer(
+                resolved, profiles[name], layer=f"profile {name!r}"
+            )
+        resolved_runs.append(
+            _merge_campaign_layer(
+                resolved,
+                authored,
+                layer=f"run {authored.get('run_id', '<unresolved>')!r}",
+            )
+        )
 
     result = copy.deepcopy(dict(payload))
     result.pop("defaults", None)

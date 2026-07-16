@@ -24,6 +24,8 @@ controller:
       - yaml
     require_clean_git: true
 campaigns:
+  - name: fusion-latent-bottleneck-plan-only-sensecore-20260717-c3
+    file: experiments/campaigns/fusion_latent_bottleneck_plan_only_sensecore_20260717.yml
   - name: fusion-latent-bottleneck-plan-only-sensecore-20260716-c2
     file: experiments/campaigns/fusion_latent_bottleneck_plan_only_sensecore_20260716.yml
   - name: fusion-oracle-capacity-probe-train-sensecore-20260716-c2
