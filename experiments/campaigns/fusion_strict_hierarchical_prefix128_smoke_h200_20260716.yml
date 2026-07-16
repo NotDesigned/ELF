@@ -1,5 +1,5 @@
 schema_version: 1
-campaign: fusion-strict-hierarchical-prefix128-smoke-h200-20260716-c1
+campaign: fusion-strict-hierarchical-prefix128-smoke-h200-20260716-c2
 project: elf
 source_id: auto
 local_root: outputs/experiment_campaigns
@@ -113,11 +113,11 @@ profiles:
       sif_path: /datapool/liangluocheng/elf/images/0ddac1ccfce3bce3f21f3f55075247564522ff7d73cfc56dde7e41a0202af954.sif
 
 runs:
-  - run_id: elf-prefix128-two-block-triangular-smoke-s42-h200-20260716-r1
+  - run_id: elf-prefix128-two-block-triangular-smoke-s42-h200-20260716-r2
     research_role: two_block_triangular
     profile: wyd-h200
     config: src/configs/training_configs/ablations/owt_elfb/tier5_prefix128_hierarchical_aligned_len256.yml
-  - run_id: elf-prefix128-strict-prefix-plan-future-smoke-s42-h200-20260716-r1
+  - run_id: elf-prefix128-strict-prefix-plan-future-smoke-s42-h200-20260716-r2
     research_role: strict_prefix_plan_future
     profile: wyd-h200
     config: src/configs/training_configs/ablations/owt_elfb/tier5_prefix128_strict_hierarchical_aligned_len256.yml

@@ -29,7 +29,7 @@ campaigns:
     role_notes:
       two_block_triangular: original aligned mask with prefix and plan in one upstream block
       strict_prefix_plan_future: aligned mask with plan-to-prefix feedback removed
-  - name: fusion-strict-hierarchical-prefix128-smoke-h200-20260716-c1
+  - name: fusion-strict-hierarchical-prefix128-smoke-h200-20260716-c2
     file: experiments/campaigns/fusion_strict_hierarchical_prefix128_smoke_h200_20260716.yml
     role_notes:
       two_block_triangular: one-GPU operational control for the existing mask
