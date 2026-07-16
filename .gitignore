@@ -17,6 +17,7 @@ env/
 outputs/
 output_dir/
 wandb/
+papers/
 runs/
 checkpoints/
 *.log
