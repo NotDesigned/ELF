@@ -243,6 +243,7 @@ def tiny_model(
     plan_adapter_type="slot_mlp",
     plan_denoiser_type="shared",
     plan_attention_topology="joint",
+    plan_denoiser_conditioning="none",
 ):
     return ELF(
         text_encoder_dim=4,
@@ -264,6 +265,7 @@ def tiny_model(
         plan_slot_dit_depth=1,
         plan_denoiser_type=plan_denoiser_type,
         plan_denoiser_depth=1,
+        plan_denoiser_conditioning=plan_denoiser_conditioning,
         plan_attention_topology=plan_attention_topology,
     )
 
@@ -594,6 +596,36 @@ def test_independent_plan_denoiser_output_does_not_depend_on_token_field():
     )
 
     assert torch.equal(plan_a, plan_b)
+
+
+def test_prefix_conditioned_plan_denoiser_reads_prefix_but_not_future():
+    torch.manual_seed(2028)
+    model = tiny_model(
+        sentence_encoder_type="sentence_t5",
+        plan_denoiser_type="independent",
+        plan_denoiser_conditioning="prefix",
+        plan_attention_topology="hierarchical_prefix",
+    ).eval()
+    plan_z = torch.randn(2, 8)
+    plan_t = torch.tensor([0.2, 0.7])
+    token_t = torch.tensor([0.3, 0.6])
+    cond = torch.tensor([[1, 1, 0, 0, 0, 0]] * 2, dtype=torch.float32)
+    valid = torch.ones_like(cond)
+    x = torch.randn(2, 6, 4)
+    changed_prefix = x.clone(); changed_prefix[:, :2] += 3.0
+    changed_future = x.clone(); changed_future[:, 2:] += 3.0
+
+    def predict(value):
+        return model(
+            value, token_t, plan_z=plan_z, plan_t=plan_t,
+            attention_mask=valid, cond_seq_mask=cond,
+            self_cond_cfg_scale=torch.ones(2), return_plan=True,
+            deterministic=True,
+        )[2]
+
+    baseline = predict(x)
+    assert not torch.equal(baseline, predict(changed_prefix))
+    torch.testing.assert_close(baseline, predict(changed_future), rtol=0, atol=0)
 
 
 def test_independent_plan_loss_does_not_train_shared_token_trunk():

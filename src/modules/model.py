@@ -115,12 +115,20 @@ class SlotDiT(nn.Module):
 
 
 class IndependentPlanDenoiser(nn.Module):
-    """Plan-only ELF stack with parameters independent from the token trunk."""
+    """Plan-only ELF stack with an optional prefix-only conditioning channel.
+
+    The module returns exactly one sentence latent.  Even when it reads the
+    observed token prefix, no intermediate Plan-ELF state is exposed to the
+    token trunk; this is the semantic latent bottleneck used by plan-first
+    sampling.
+    """
 
     def __init__(self, sentence_emb_dim: int, hidden_size: int, num_heads: int,
                  depth: int, num_plan_tokens: int, mlp_ratio: float = 4.0,
                  attn_drop: float = 0.0, proj_drop: float = 0.0,
-                 gradient_checkpointing: bool = False):
+                 gradient_checkpointing: bool = False,
+                 conditioning: str = "none", text_encoder_dim: int = 0,
+                 bottleneck_dim: int = 128, max_length: int = 0):
         super().__init__()
         if depth <= 0:
             raise ValueError("plan_denoiser_depth must be positive")
@@ -128,6 +136,10 @@ class IndependentPlanDenoiser(nn.Module):
         self.hidden_size = hidden_size
         self.num_plan_tokens = num_plan_tokens
         self.gradient_checkpointing = gradient_checkpointing
+        self.conditioning = conditioning
+        self.text_encoder_dim = text_encoder_dim
+        if conditioning not in {"none", "prefix"}:
+            raise ValueError("plan_denoiser_conditioning must be 'none' or 'prefix'")
         self.plan_in = _make_linear(
             sentence_emb_dim, hidden_size * num_plan_tokens, bias=True,
         )
@@ -149,9 +161,51 @@ class IndependentPlanDenoiser(nn.Module):
             hidden_size * num_plan_tokens, sentence_emb_dim, bias=True,
         )
         NORMAL_INIT_002(self.plan_tokens)
+        if conditioning == "prefix":
+            if text_encoder_dim <= 0 or max_length <= 0:
+                raise ValueError("prefix-conditioned plan denoising requires token dimensions")
+            self.prefix_proj = BottleneckTextProj(
+                text_encoder_dim, hidden_size, bottleneck_dim,
+            )
+            self.prefix_rope = TextRotaryEmbeddingFast(
+                dim=hidden_size // num_heads,
+                pt_seq_len=max_length,
+                num_empty_token=num_plan_tokens,
+            )
+        else:
+            self.prefix_proj = None
+            self.prefix_rope = None
+
+    def _prefix_attention_mask(self, cond_seq_mask: torch.Tensor,
+                               attention_mask: Optional[torch.Tensor]) -> torch.Tensor:
+        prefix_valid = cond_seq_mask.bool()
+        if attention_mask is not None:
+            prefix_valid = prefix_valid & attention_mask.bool()
+        batch_size, field_length = prefix_valid.shape
+        plan_valid = torch.ones(
+            batch_size, self.num_plan_tokens, dtype=torch.bool,
+            device=prefix_valid.device,
+        )
+        key_valid = torch.cat([plan_valid, prefix_valid], dim=1)
+        # Prefix states encode only the observed prefix. Plan queries may read
+        # both those states and one another; future/padding keys are invisible.
+        plan_queries = torch.cat(
+            [plan_valid, torch.zeros_like(prefix_valid)], dim=1,
+        )
+        prefix_keys = torch.cat(
+            [torch.zeros_like(plan_valid), prefix_valid], dim=1,
+        )
+        allowed = (
+            plan_queries.unsqueeze(-1) & key_valid.unsqueeze(1)
+        ) | (
+            (~plan_queries).unsqueeze(-1) & prefix_keys.unsqueeze(1)
+        )
+        return allowed & key_valid.unsqueeze(1)
 
     def forward(self, plan_z: torch.Tensor, plan_t: torch.Tensor,
-                deterministic: bool = True) -> torch.Tensor:
+                deterministic: bool = True, token_z: Optional[torch.Tensor] = None,
+                attention_mask: Optional[torch.Tensor] = None,
+                cond_seq_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
         if plan_z.shape[-1] != self.sentence_emb_dim:
             raise ValueError(
                 f"plan_z dim {plan_z.shape[-1]} does not match "
@@ -164,23 +218,39 @@ class IndependentPlanDenoiser(nn.Module):
             )
             time_emb = self.time_embedder(plan_t)
             hidden = hidden + self.plan_tokens.expand(batch_size, -1, -1) + time_emb.unsqueeze(1)
+            plan_token_count = hidden.shape[1]
+            block_mask = None
+            rope_fn = None
+            if self.conditioning == "prefix":
+                if token_z is None or cond_seq_mask is None:
+                    raise ValueError(
+                        "prefix-conditioned plan denoising requires token_z and cond_seq_mask"
+                    )
+                if token_z.shape[-1] == 2 * self.text_encoder_dim:
+                    token_z = token_z[..., :self.text_encoder_dim]
+                if token_z.shape[-1] != self.text_encoder_dim:
+                    raise ValueError("token_z has the wrong embedding dimension")
+                prefix_hidden = self.prefix_proj(token_z.float())
+                hidden = torch.cat([hidden, prefix_hidden], dim=1)
+                block_mask = self._prefix_attention_mask(cond_seq_mask, attention_mask)
+                rope_fn = self.prefix_rope
         use_checkpoint = self.gradient_checkpointing and self.training and torch.is_grad_enabled()
         for block in self.blocks:
             if use_checkpoint:
                 def _block_forward(value: torch.Tensor, block: ELFBlock = block) -> torch.Tensor:
                     return block(
-                        value, rope_fn=None, attention_mask=None,
+                        value, rope_fn=rope_fn, attention_mask=block_mask,
                         deterministic=deterministic,
                     )
 
                 hidden = checkpoint(_block_forward, hidden, use_reentrant=False)
             else:
                 hidden = block(
-                    hidden, rope_fn=None, attention_mask=None,
+                    hidden, rope_fn=rope_fn, attention_mask=block_mask,
                     deterministic=deterministic,
                 )
         with torch.amp.autocast('cuda', enabled=False):
-            hidden = self.out_norm(hidden.float())
+            hidden = self.out_norm(hidden[:, :plan_token_count].float())
             return self.plan_out(hidden.reshape(batch_size, -1))
 
 
@@ -212,6 +282,9 @@ class ELF(nn.Module):
         plan_slot_dit_depth: int = 2,
         plan_denoiser_type: str = "shared",
         plan_denoiser_depth: int = 12,
+        plan_denoiser_hidden_size: int | None = None,
+        plan_denoiser_num_heads: int | None = None,
+        plan_denoiser_conditioning: str = "none",
         plan_attention_topology: str = "joint",
         plan_learned_encoder_norm: bool = True,
     ):
@@ -320,16 +393,24 @@ class ELF(nn.Module):
                 self.register_parameter("plan_encoder_query", None)
                 self.plan_encoder_output_norm = nn.Identity()
             if self.plan_denoiser_type == "independent":
+                plan_hidden_size = int(plan_denoiser_hidden_size or hidden_size)
+                plan_num_heads = int(plan_denoiser_num_heads or num_heads)
+                if plan_hidden_size % plan_num_heads != 0:
+                    raise ValueError("plan_denoiser_hidden_size must be divisible by plan_denoiser_num_heads")
                 self.independent_plan_denoiser = IndependentPlanDenoiser(
                     sentence_emb_dim=sentence_emb_dim,
-                    hidden_size=hidden_size,
-                    num_heads=num_heads,
+                    hidden_size=plan_hidden_size,
+                    num_heads=plan_num_heads,
                     depth=plan_denoiser_depth,
                     num_plan_tokens=self.num_plan_tokens,
                     mlp_ratio=mlp_ratio,
                     attn_drop=attn_drop,
                     proj_drop=proj_drop,
                     gradient_checkpointing=gradient_checkpointing,
+                    conditioning=plan_denoiser_conditioning,
+                    text_encoder_dim=text_encoder_dim,
+                    bottleneck_dim=bottleneck_dim,
+                    max_length=max_length,
                 )
                 if self.sentence_encoder_type == "sentence_t5":
                     # The frozen target arm does not need the shared plan
@@ -601,6 +682,9 @@ class ELF(nn.Module):
         cannot.
         """
         B = x.shape[0]
+        plan_token_z = x
+        plan_field_attention_mask = attention_mask
+        plan_cond_seq_mask = cond_seq_mask
 
         if learned_plan_encode:
             if not self.use_sentence_plan or self.sentence_encoder_type != "learned":
@@ -747,6 +831,9 @@ class ELF(nn.Module):
         ):
             independent_plan_pred = self.independent_plan_denoiser(
                 plan_z, plan_t, deterministic=deterministic,
+                token_z=plan_token_z,
+                attention_mask=plan_field_attention_mask,
+                cond_seq_mask=plan_cond_seq_mask,
             )
 
         # Factored decoder unembedding: hidden -> text_encoder_dim -> vocab
@@ -809,6 +896,9 @@ def build_elf_from_config(config, *, text_encoder_dim: int, vocab_size: int) -> 
         plan_slot_dit_depth=int(getattr(config, "plan_slot_dit_depth", 2)),
         plan_denoiser_type=getattr(config, "plan_denoiser_type", "shared"),
         plan_denoiser_depth=int(getattr(config, "plan_denoiser_depth", 12)),
+        plan_denoiser_hidden_size=getattr(config, "plan_denoiser_hidden_size", None),
+        plan_denoiser_num_heads=getattr(config, "plan_denoiser_num_heads", None),
+        plan_denoiser_conditioning=getattr(config, "plan_denoiser_conditioning", "none"),
         plan_attention_topology=getattr(config, "plan_attention_topology", "joint"),
         plan_learned_encoder_norm=bool(getattr(config, "plan_learned_encoder_norm", True)),
     )

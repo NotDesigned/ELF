@@ -102,6 +102,17 @@ def test_independent_plan_denoiser_config_validation():
         validate_config(cfg)
 
 
+def test_plan_only_requires_prefix_conditioned_independent_denoiser():
+    cfg = Config()
+    cfg.use_sentence_plan = True
+    cfg.plan_training_mode = "plan_only"
+    cfg.plan_denoiser_type = "independent"
+    with pytest.raises(ValueError, match="plan_denoiser_conditioning"):
+        validate_config(cfg)
+    cfg.plan_denoiser_conditioning = "prefix"
+    assert validate_config(cfg).plan_training_mode == "plan_only"
+
+
 def test_model_active_depth_validation():
     cfg = Config()
     cfg.model_active_depth = 6
@@ -375,6 +386,7 @@ def test_owt_elfb_ablation_configs_are_unique_and_expected():
         "tier5_prefix128_hierarchical_aligned_len256.yml",
         "tier5_prefix128_hierarchical_oracle_len256.yml",
         "tier5_prefix128_hierarchical_plan_first_len256.yml",
+        "tier5_prefix128_latent_bottleneck_plan_only_len256.yml",
         "tier5_prefix128_hierarchical_lead_g3_len256.yml",
         "tier5_prefix128_strict_hierarchical_aligned_len256.yml",
     }
@@ -393,6 +405,7 @@ def test_owt_elfb_ablation_configs_are_unique_and_expected():
             cfg.plan_adapter_type,
             cfg.plan_denoiser_type,
             int(cfg.plan_denoiser_depth),
+            cfg.plan_denoiser_conditioning,
             cfg.plan_attention_topology,
             cfg.plan_time_schedule,
             float(cfg.plan_time_warp_gamma),

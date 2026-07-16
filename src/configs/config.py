@@ -180,6 +180,20 @@ def validate_config(config) -> Config:
             "plan_denoiser_type must be 'shared' or 'independent', "
             f"got {config.plan_denoiser_type!r}"
         )
+    if config.plan_denoiser_conditioning not in {"none", "prefix"}:
+        raise ValueError(
+            "plan_denoiser_conditioning must be 'none' or 'prefix', "
+            f"got {config.plan_denoiser_conditioning!r}"
+        )
+    _validate_positive_int(config.plan_denoiser_depth, "plan_denoiser_depth")
+    if config.plan_denoiser_hidden_size is not None:
+        _validate_positive_int(config.plan_denoiser_hidden_size, "plan_denoiser_hidden_size")
+    if config.plan_denoiser_num_heads is not None:
+        _validate_positive_int(config.plan_denoiser_num_heads, "plan_denoiser_num_heads")
+    plan_hidden = int(config.plan_denoiser_hidden_size or {"ELF-B": 768, "ELF-M": 1056, "ELF-L": 1280}[config.model])
+    plan_heads = int(config.plan_denoiser_num_heads or {"ELF-B": 12, "ELF-M": 16, "ELF-L": 16}[config.model])
+    if plan_hidden % plan_heads:
+        raise ValueError("plan_denoiser_hidden_size must be divisible by plan_denoiser_num_heads")
     if config.plan_attention_topology not in {
         "joint",
         "hierarchical_prefix",
@@ -202,9 +216,9 @@ def validate_config(config) -> Config:
         )
     if float(config.plan_time_warp_gamma) < 1.0:
         raise ValueError(f"plan_time_warp_gamma must be >= 1.0, got {config.plan_time_warp_gamma!r}")
-    if config.plan_training_mode not in {"joint", "plan_first", "oracle"}:
+    if config.plan_training_mode not in {"joint", "plan_first", "plan_only", "oracle"}:
         raise ValueError(
-            "plan_training_mode must be 'joint', 'plan_first', or 'oracle', "
+            "plan_training_mode must be 'joint', 'plan_first', 'plan_only', or 'oracle', "
             f"got {config.plan_training_mode!r}"
         )
     _validate_probability(config.plan_first_plan_phase_prob, "plan_first_plan_phase_prob")
@@ -249,6 +263,17 @@ def validate_config(config) -> Config:
             )
         if float(config.plan_loss_weight) != 0.0:
             raise ValueError("plan_training_mode='oracle' requires plan_loss_weight=0")
+    if config.plan_training_mode == "plan_only":
+        if not bool(config.use_sentence_plan):
+            raise ValueError("plan_training_mode='plan_only' requires use_sentence_plan=true")
+        if config.sentence_encoder_type != "sentence_t5":
+            raise ValueError("plan_training_mode='plan_only' requires sentence_encoder_type='sentence_t5'")
+        if config.plan_denoiser_type != "independent":
+            raise ValueError("plan_training_mode='plan_only' requires plan_denoiser_type='independent'")
+        if config.plan_denoiser_conditioning != "prefix":
+            raise ValueError("plan_training_mode='plan_only' requires plan_denoiser_conditioning='prefix'")
+        if float(config.plan_loss_weight) <= 0:
+            raise ValueError("plan_training_mode='plan_only' requires plan_loss_weight > 0")
 
     for field_name in ("decoder_prob", "label_drop_prob", "self_cond_prob"):
         _validate_probability(getattr(config, field_name), field_name)
@@ -441,6 +466,9 @@ class Config:
     plan_slot_dit_depth: int = 2
     plan_denoiser_type: str = "shared"  # "shared" or plan-only "independent"
     plan_denoiser_depth: int = 12
+    plan_denoiser_hidden_size: int = None
+    plan_denoiser_num_heads: int = None
+    plan_denoiser_conditioning: str = "none"  # "none" or observed-prefix-only
     # joint; two-block (prefix+plan)->future; or strict control->prefix->plan->future.
     plan_attention_topology: str = "joint"
     plan_learned_encoder_norm: bool = True
@@ -448,7 +476,7 @@ class Config:
     plan_noise_scale: float = 1.0
     plan_time_schedule: str = "aligned"  # "aligned" or "noise_power"; maps token t -> plan t.
     plan_time_warp_gamma: float = 1.0  # For noise_power: plan_t = 1 - (1 - token_t) ** gamma.
-    plan_training_mode: str = "joint"  # "joint", matched "plan_first", or clean-plan "oracle".
+    plan_training_mode: str = "joint"  # "joint", "plan_first", "plan_only", or clean-plan "oracle".
     plan_first_plan_phase_prob: float = 0.5  # Among non-decoder rows, allocate this fraction to plan-only denoising.
     plan_aux_passes: int = 1  # Extra detached plan-denoiser passes for learned+none topology.
     plan_aux_token_context: str = "denoiser_z"  # "denoiser_z", "resampled_z", "mixed_z", or "clean_x0"

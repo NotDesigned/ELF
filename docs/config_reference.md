@@ -68,13 +68,16 @@ schema rather than treating training flags as scheduler configuration.
 | `plan_slot_dit_depth` | `2` | DiT depth when using `slot_dit`. |
 | `plan_denoiser_type` | `shared` | Plan predictor: `shared` reads plan slots after the ELF trunk; `independent` uses a separate plan-only ELF stack. |
 | `plan_denoiser_depth` | `12` | Depth of the plan-only stack when `plan_denoiser_type=independent`; use 12 to match ELF-B trunk depth. |
+| `plan_denoiser_hidden_size` | `null` | Independent Plan-ELF width; `null` inherits the token ELF preset width. |
+| `plan_denoiser_num_heads` | `null` | Independent Plan-ELF attention heads; `null` inherits the token ELF preset. |
+| `plan_denoiser_conditioning` | `none` | `none` denoises the plan unconditionally; `prefix` lets Plan-ELF read only observed prefix states and still returns one sentence latent. |
 | `plan_attention_topology` | `joint` | `joint` allows bidirectional plan/token attention; `hierarchical_prefix` enforces `(prefix + plan) -> future`; `strict_hierarchical_prefix` enforces control -> prefix -> plan -> future only in the noisy denoiser. |
 | `plan_learned_encoder_norm` | `true` | Normalize learned plan-encoder output. |
 | `plan_loss_weight` | `1.0` | Non-negative multiplier for plan loss. |
 | `plan_noise_scale` | `1.0` | Positive plan diffusion noise scale. |
 | `plan_time_schedule` | `aligned` | Plan time: `aligned` or `noise_power`. |
 | `plan_time_warp_gamma` | `1.0` | For `noise_power`, uses `1-(1-t)^gamma`; must be at least one. |
-| `plan_training_mode` | `joint` | `joint` trains aligned token/plan states; `plan_first` trains a matched plan-only/token-only mixture; `oracle` always gives token/decoder rows the clean frozen T5 continuation plan and disables plan reconstruction loss. |
+| `plan_training_mode` | `joint` | `joint` trains aligned token/plan states; `plan_first` trains a matched mixture; `plan_only` freezes Token-ELF and trains a prefix-conditioned independent Plan-ELF; `oracle` gives token rows the clean frozen T5 plan. |
 | `plan_first_plan_phase_prob` | `0.5` | In `plan_first` mode, fraction of non-decoder rows allocated to plan-only denoising; must be strictly between zero and one. |
 | `plan_aux_passes` | `1` | Detached auxiliary plan-denoiser passes. |
 | `plan_aux_token_context` | `denoiser_z` | `denoiser_z`, `resampled_z`, `mixed_z`, or `clean_x0`. |

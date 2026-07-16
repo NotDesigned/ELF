@@ -81,9 +81,9 @@ def train_step(
     use_sentence_plan = bool(getattr(config, "use_sentence_plan", False))
     sentence_encoder_type = getattr(config, "sentence_encoder_type", "sentence_t5")
     plan_training_mode = str(getattr(config, "plan_training_mode", "joint")).lower()
-    if plan_training_mode not in {"joint", "plan_first", "oracle"}:
+    if plan_training_mode not in {"joint", "plan_first", "plan_only", "oracle"}:
         raise ValueError(
-            "plan_training_mode must be 'joint', 'plan_first', or 'oracle', "
+            "plan_training_mode must be 'joint', 'plan_first', 'plan_only', or 'oracle', "
             f"got {plan_training_mode!r}"
         )
 
@@ -153,6 +153,8 @@ def train_step(
         torch.full((batch_size,), decoder_prob, dtype=torch.float32),
         generator=gen,
     ).to(device=device, dtype=dtype)  # (B,) — 1.0 = decoder mode, 0.0 = denoiser
+    if plan_training_mode == "plan_only":
+        decoder_step_active = torch.zeros_like(decoder_step_active)
     decoder_mask_B11 = decoder_step_active.view(-1, 1, 1)
     decoder_mask_B1 = decoder_step_active.view(-1, 1)
     denoiser_step_active = 1.0 - decoder_step_active
@@ -162,7 +164,11 @@ def train_step(
     # train only the plan reconstruction. Token-phase rows hold the plan at its
     # completed state (plan_t=1) and train only token denoising. Decoder rows
     # continue to consume a completed plan.
-    if plan_training_mode == "plan_first":
+    if plan_training_mode == "plan_only":
+        plan_phase_active = torch.ones_like(decoder_step_active)
+        token_phase_active = torch.zeros_like(decoder_step_active)
+        denoiser_t = torch.zeros_like(t)
+    elif plan_training_mode == "plan_first":
         plan_phase_draw = torch.bernoulli(
             torch.full(
                 (batch_size,),
@@ -276,7 +282,7 @@ def train_step(
         plan_emb_norm = s0_detached_for_metrics.norm(dim=-1).mean()
 
         plan_noise = torch.randn_like(s0) * float(getattr(config, "plan_noise_scale", 1.0))
-        if plan_training_mode in {"plan_first", "oracle"}:
+        if plan_training_mode in {"plan_first", "plan_only", "oracle"}:
             # Plan-phase rows use an independently sampled plan clock while
             # token-phase rows condition on the completed target plan.
             plan_t_denoiser = torch.where(
@@ -415,7 +421,7 @@ def train_step(
             (plan_pred.float() - plan_target.float()) ** 2
         ).mean(dim=-1)
         plan_pred_detached = plan_pred.detach().float()
-        if plan_training_mode in {"plan_first", "oracle"}:
+        if plan_training_mode in {"plan_first", "plan_only", "oracle"}:
             plan_weights = plan_phase_active.float()
             plan_count = torch.clamp(plan_weights.sum(), min=1.0)
             plan_loss = (plan_mse_per_example * plan_weights).sum() / plan_count

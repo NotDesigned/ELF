@@ -115,6 +115,7 @@ def _log_model_parameter_summary(model) -> None:
         "plan_out.",
         "plan_encoder_query",
         "plan_encoder_output_norm.",
+        "independent_plan_denoiser.",
     )
     plan_params = _count_named_params(model, plan_prefixes)
     if plan_params == 0:
@@ -354,6 +355,13 @@ def run_training(config, *, force_cpu: bool = False):
     model = build_elf_from_config(
         config, text_encoder_dim=encoder_config.d_model, vocab_size=vocab_size,
     ).to(device)
+
+    if getattr(config, "plan_training_mode", "joint") == "plan_only":
+        if model.independent_plan_denoiser is None:
+            raise ValueError("plan_only training requires an independent plan denoiser")
+        model.requires_grad_(False)
+        model.independent_plan_denoiser.requires_grad_(True)
+        log_for_0("Plan-only training: token ELF frozen; only Plan-ELF is trainable")
 
     _log_model_parameter_summary(model)
 
