@@ -66,7 +66,7 @@ schema rather than treating training flags as scheduler configuration.
 | `plan_slot_dit_depth` | `2` | DiT depth when using `slot_dit`. |
 | `plan_denoiser_type` | `shared` | Plan predictor: `shared` reads plan slots after the ELF trunk; `independent` uses a separate plan-only ELF stack. |
 | `plan_denoiser_depth` | `12` | Depth of the plan-only stack when `plan_denoiser_type=independent`; use 12 to match ELF-B trunk depth. |
-| `plan_attention_topology` | `joint` | `joint` allows bidirectional plan/token attention; `hierarchical_prefix` enforces prefix/plan -> future block-triangular attention. |
+| `plan_attention_topology` | `joint` | `joint` allows bidirectional plan/token attention; `hierarchical_prefix` enforces `(prefix + plan) -> future`; `strict_hierarchical_prefix` enforces control -> prefix -> plan -> future only in the noisy denoiser. |
 | `plan_learned_encoder_norm` | `true` | Normalize learned plan-encoder output. |
 | `plan_loss_weight` | `1.0` | Non-negative multiplier for plan loss. |
 | `plan_noise_scale` | `1.0` | Positive plan diffusion noise scale. |

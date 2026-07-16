@@ -187,7 +187,10 @@ def _dlm_decode_batch(z: torch.Tensor, model: nn.Module, t_final_val,
             raise ValueError("plan_z is required for decoding when use_sentence_plan=True")
         plan_kwargs = {"plan_z": plan_z, "plan_t": t_final}
     topology_kwargs = {}
-    if str(getattr(config, "plan_attention_topology", "joint")) == "hierarchical_prefix":
+    if str(getattr(config, "plan_attention_topology", "joint")) in {
+        "hierarchical_prefix",
+        "strict_hierarchical_prefix",
+    }:
         if cond_seq_mask is None:
             cond_seq_mask = torch.zeros(
                 z.shape[:2], dtype=z.dtype, device=z.device,

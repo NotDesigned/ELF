@@ -1,0 +1,13 @@
+base_config: tier5_prefix128_hierarchical_aligned_len256.yml
+
+# Keep the clean target encoders unchanged, but make the noisy shared denoiser
+# strictly causal across information groups:
+# controls -> observed prefix -> plan -> future.
+# In particular, observed-prefix queries cannot read plan keys.
+plan_attention_topology: strict_hierarchical_prefix
+
+output_dir: outputs/ablations/owt_elfb/tier5_prefix128_strict_hierarchical_aligned_len256
+resume: null
+warm_start: null
+wandb_run_name: tier5_owt_elfb_prefix128_strict_hierarchical_aligned_len256
+wandb_tag: tier5,owt,elfb,sentence_t5,prefix128,strict_hierarchical_prefix,aligned,len256

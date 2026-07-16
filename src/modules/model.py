@@ -267,9 +267,14 @@ class ELF(nn.Module):
                 raise ValueError("plan_adapter_type must be 'slot_mlp' or 'slot_dit'")
             if self.plan_denoiser_type not in {"shared", "independent"}:
                 raise ValueError("plan_denoiser_type must be 'shared' or 'independent'")
-            if self.plan_attention_topology not in {"joint", "hierarchical_prefix"}:
+            if self.plan_attention_topology not in {
+                "joint",
+                "hierarchical_prefix",
+                "strict_hierarchical_prefix",
+            }:
                 raise ValueError(
-                    "plan_attention_topology must be 'joint' or 'hierarchical_prefix'"
+                    "plan_attention_topology must be 'joint', 'hierarchical_prefix', "
+                    "or 'strict_hierarchical_prefix'"
                 )
             if self.num_plan_tokens <= 0:
                 raise ValueError("num_plan_tokens must be positive when use_sentence_plan=True")
@@ -470,6 +475,103 @@ class ELF(nn.Module):
         )
         return no_future_leak & key_is_valid.unsqueeze(1)
 
+    @staticmethod
+    def build_strict_hierarchical_attention_mask(
+        *,
+        field_attention_mask: Optional[torch.Tensor],
+        cond_seq_mask: torch.Tensor,
+        control_token_count: int,
+        plan_token_count: int,
+    ) -> torch.Tensor:
+        """Build a strict control -> prefix -> plan -> future denoising mask.
+
+        Control tokens (time, self-conditioning, and model mode) remain
+        exogenous and can only read other controls. Observed-prefix rows read
+        controls and observed-prefix keys. Plan rows additionally read plan
+        keys, and future rows may read every valid key. Applying this mask in
+        every block prevents plan -> prefix feedback and prevents either plan
+        or prefix states from becoming an indirect future-information channel.
+
+        This mask constrains only the noisy shared denoiser. The clean target
+        encoders run before this model and retain their own bidirectional
+        attention, so future-aware target representations remain unchanged.
+        """
+        if cond_seq_mask.dim() != 2:
+            raise ValueError(
+                "cond_seq_mask must have shape (batch, field_length), "
+                f"got {tuple(cond_seq_mask.shape)}"
+            )
+        if control_token_count < 0:
+            raise ValueError("control_token_count must be non-negative")
+        if plan_token_count <= 0:
+            raise ValueError("plan_token_count must be positive")
+
+        batch_size, field_length = cond_seq_mask.shape
+        if field_attention_mask is None:
+            field_valid = torch.ones(
+                (batch_size, field_length),
+                dtype=torch.bool,
+                device=cond_seq_mask.device,
+            )
+        else:
+            if field_attention_mask.dim() != 2 or tuple(field_attention_mask.shape) != (
+                batch_size,
+                field_length,
+            ):
+                raise ValueError(
+                    "field attention_mask must match cond_seq_mask shape for "
+                    "strict_hierarchical_prefix topology"
+                )
+            field_valid = field_attention_mask.bool()
+
+        control_rows = torch.ones(
+            (batch_size, control_token_count),
+            dtype=torch.bool,
+            device=cond_seq_mask.device,
+        )
+        plan_rows = torch.ones(
+            (batch_size, plan_token_count),
+            dtype=torch.bool,
+            device=cond_seq_mask.device,
+        )
+        cond_rows = cond_seq_mask.bool() & field_valid
+        future_rows = ~cond_seq_mask.bool() & field_valid
+
+        empty_controls = torch.zeros_like(control_rows)
+        empty_plans = torch.zeros_like(plan_rows)
+        empty_field = torch.zeros_like(field_valid)
+        query_is_control = torch.cat(
+            [control_rows, empty_plans, empty_field], dim=1,
+        )
+        query_is_plan = torch.cat(
+            [empty_controls, plan_rows, empty_field], dim=1,
+        )
+        query_is_prefix = torch.cat(
+            [empty_controls, empty_plans, cond_rows], dim=1,
+        )
+        query_is_future = torch.cat(
+            [empty_controls, empty_plans, future_rows], dim=1,
+        )
+
+        key_is_control = query_is_control
+        key_is_plan = query_is_plan
+        key_is_prefix = query_is_prefix
+        key_is_valid = torch.cat([control_rows, plan_rows, field_valid], dim=1)
+
+        allowed = (
+            (query_is_control.unsqueeze(-1) & key_is_control.unsqueeze(-2))
+            | (
+                query_is_prefix.unsqueeze(-1)
+                & (key_is_control | key_is_prefix).unsqueeze(-2)
+            )
+            | (
+                query_is_plan.unsqueeze(-1)
+                & (key_is_control | key_is_prefix | key_is_plan).unsqueeze(-2)
+            )
+            | (query_is_future.unsqueeze(-1) & key_is_valid.unsqueeze(-2))
+        )
+        return allowed & key_is_valid.unsqueeze(1)
+
     def forward(
         self,
         x: torch.Tensor,
@@ -487,8 +589,9 @@ class ELF(nn.Module):
         """Run ELF over token fields and optional plan slots.
 
         ``attention_mask`` and ``cond_seq_mask`` refer to the unprefixed token
-        field. The latter is required by ``hierarchical_prefix`` so observed
-        prefix rows can condition plan slots while future-token rows cannot.
+        field. The latter is required by either hierarchical topology so
+        observed prefix rows can condition plan slots while future-token rows
+        cannot.
         """
         B = x.shape[0]
 
@@ -500,12 +603,15 @@ class ELF(nn.Module):
 
         if (
             self.use_sentence_plan
-            and self.plan_attention_topology == "hierarchical_prefix"
+            and self.plan_attention_topology in {
+                "hierarchical_prefix",
+                "strict_hierarchical_prefix",
+            }
             and not learned_plan_encode
             and cond_seq_mask is None
         ):
             raise ValueError(
-                "cond_seq_mask is required for hierarchical_prefix plan attention"
+                "cond_seq_mask is required for hierarchical plan attention"
             )
 
         if self.use_sentence_plan:
@@ -580,7 +686,10 @@ class ELF(nn.Module):
 
         if (
             self.use_sentence_plan
-            and self.plan_attention_topology == "hierarchical_prefix"
+            and self.plan_attention_topology in {
+                "hierarchical_prefix",
+                "strict_hierarchical_prefix",
+            }
             and not learned_plan_encode
         ):
             field_length = cond_seq_mask.shape[1]
@@ -589,11 +698,19 @@ class ELF(nn.Module):
             field_attention_mask = None
             if attention_mask is not None:
                 field_attention_mask = attention_mask[:, -field_length:]
-            attention_mask = self.build_hierarchical_attention_mask(
-                field_attention_mask=field_attention_mask,
-                cond_seq_mask=cond_seq_mask,
-                upstream_token_count=x.shape[1] - field_length,
-            )
+            if self.plan_attention_topology == "hierarchical_prefix":
+                attention_mask = self.build_hierarchical_attention_mask(
+                    field_attention_mask=field_attention_mask,
+                    cond_seq_mask=cond_seq_mask,
+                    upstream_token_count=x.shape[1] - field_length,
+                )
+            else:
+                attention_mask = self.build_strict_hierarchical_attention_mask(
+                    field_attention_mask=field_attention_mask,
+                    cond_seq_mask=cond_seq_mask,
+                    control_token_count=prefix_len + model_mode_offset,
+                    plan_token_count=plan_offset,
+                )
 
         use_checkpoint = self.gradient_checkpointing and self.training and torch.is_grad_enabled()
         for block in self.blocks:

@@ -1,0 +1,123 @@
+schema_version: 1
+campaign: fusion-strict-hierarchical-prefix128-smoke-h200-20260716-c1
+project: elf
+source_id: auto
+local_root: outputs/experiment_campaigns
+
+# Operational gate only. The formal campaign may start only after both arms
+# emit finite training metrics and complete evaluation artifacts.
+research_contract:
+  schema_version: 1
+  question: >-
+    Can the original two-block and strict three-block prefix/plan denoisers
+    complete a matched one-GPU H200 smoke without changing clean encoders?
+  required_roles: [two_block_triangular, strict_prefix_plan_future]
+  required_metrics:
+    common:
+      - train_loss
+      - train_l2_loss
+      - train_ce_loss
+      - train_plan_loss
+      - train_plan_pred_batch_var
+      - steps_per_sec
+      - g_ppl
+      - generation_mean_entropy
+      - generation_nonempty_fraction
+      - oracle_plan_ppl
+      - shuffled_plan_ppl
+      - token_recon_ppl
+  required_artifacts:
+    common:
+      train_metrics: {min_records: 1}
+      evaluation_metrics: {min_records: 1}
+      generated_samples: {min_nonempty_records: 1}
+      reconstructed_samples: {min_nonempty_records: 1}
+  terminal_checks:
+    - {metric: steps_per_sec, op: gt, value: 0}
+    - {metric: generation_nonempty_fraction, op: gt, value: 0.90}
+    - {metric: generation_mean_entropy, op: gt, value: 1.0}
+  early_stop:
+    - metrics: [train_loss, train_l2_loss, train_ce_loss, train_plan_loss]
+      op: any_nonfinite
+  checkpoint: {required_on_success: true}
+  comparison:
+    match_fields:
+      - source_id
+      - image_id
+      - resolved_config.seed
+      - resolved_config.data_path
+      - resolved_config.max_length
+      - resolved_config.max_input_length
+      - resolved_config.split_input_as_prefix
+      - resolved_config.global_batch_size
+      - resolved_config.epochs
+      - resolved_config.grad_accum_steps
+      - resolved_config.warm_start
+      - resolved_config.warm_start_use_ema
+      - resolved_config.plan_denoiser_type
+      - resolved_config.plan_time_schedule
+      - resolved_config.plan_time_warp_gamma
+      - resolved_config.num_plan_tokens
+      - resolved_config.plan_loss_weight
+      - resolved_config.num_samples
+      - resolved_config.reconstruction_num_samples
+      - backend.kind
+      - backend.partition
+      - backend.gres
+
+defaults:
+  config_overrides:
+    - epochs=1
+    - data_path=/datapool/liangluocheng/elf/eval_data/openwebtext-t5-head256-v1
+    - global_batch_size=16
+    - grad_accum_steps=1
+    - warm_start=/datapool/liangluocheng/elf/runs/elf-a0-warm-a0ckpt19017-l256-s42-h100-20260712-r2/checkpoint_19017
+    - warm_start_use_ema=false
+    - save_freq=1
+    - eval_freq=1
+    - num_samples=16
+    - reconstruction_eval=true
+    - reconstruction_num_samples=16
+    - sampling_configs_path=src/configs/sampling_configs/uncond_sampling_steps32.yml
+    - train_sampling_eval_freq=0
+  image_id: sha256:0ddac1ccfce3bce3f21f3f55075247564522ff7d73cfc56dde7e41a0202af954
+  resources: {gpus: 1, nodes: 1, cpus: 8}
+  env:
+    LOG_FREQ: "1"
+    NUM_WORKERS: "2"
+    REQUIRE_OFFLINE_CACHE: "1"
+    USE_WANDB: "false"
+  storage:
+    run_dir: /datapool/liangluocheng/elf/runs/{run_id}
+  retry: {max_infra_retries: 0}
+
+profiles:
+  wyd-h200:
+    storage:
+      data_root: /datapool/liangluocheng
+      project_data_root: /datapool/liangluocheng/elf
+      hf_home: /datapool/liangluocheng/.cache/huggingface
+      hf_datasets_cache: /datapool/liangluocheng/.cache/huggingface/datasets
+    backend:
+      kind: slurm
+      ssh_alias: wyd-l40s-relay
+      partition: h200
+      account: lab
+      qos: normal
+      gres: gpu:h200:1
+      time: "01:00:00"
+      mount_root: /datapool
+      apptainer_cache_dir: /datapool/liangluocheng/elf/apptainer/cache
+      apptainer_tmp_dir: /datapool/liangluocheng/elf/apptainer/tmp
+      source_dir: /datapool/liangluocheng/elf/sources/{source_id}
+      sif_path: /datapool/liangluocheng/elf/images/0ddac1ccfce3bce3f21f3f55075247564522ff7d73cfc56dde7e41a0202af954.sif
+
+runs:
+  - run_id: elf-prefix128-two-block-triangular-smoke-s42-h200-20260716-r1
+    research_role: two_block_triangular
+    profile: wyd-h200
+    config: src/configs/training_configs/ablations/owt_elfb/tier5_prefix128_hierarchical_aligned_len256.yml
+  - run_id: elf-prefix128-strict-prefix-plan-future-smoke-s42-h200-20260716-r1
+    research_role: strict_prefix_plan_future
+    profile: wyd-h200
+    config: src/configs/training_configs/ablations/owt_elfb/tier5_prefix128_strict_hierarchical_aligned_len256.yml

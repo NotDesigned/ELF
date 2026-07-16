@@ -195,7 +195,10 @@ def _forward_sample_self_cond(
                 "return_plan": True,
             }
         topology_kwargs = {}
-        if str(getattr(config, "plan_attention_topology", "joint")) == "hierarchical_prefix":
+        if str(getattr(config, "plan_attention_topology", "joint")) in {
+            "hierarchical_prefix",
+            "strict_hierarchical_prefix",
+        }:
             topology_kwargs = {"cond_seq_mask": cond_seq_mask}
         return model(
             z_input, t_batch, deterministic=True,

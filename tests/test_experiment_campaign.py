@@ -112,6 +112,55 @@ def test_prefix128_plan_campaign_exercises_prefix_conditioning_in_all_arms():
         assert differences <= allowed_config_differences, (role, differences)
 
 
+@pytest.mark.parametrize("suffix,gpus", [("", 4), ("_smoke", 1)])
+def test_strict_hierarchical_campaign_is_a_matched_two_arm_ablation(suffix, gpus):
+    campaign = load_and_resolve_campaign(
+        REPO_ROOT
+        / (
+            "experiments/campaigns/"
+            f"fusion_strict_hierarchical_prefix128{suffix}_h200_20260716.yml"
+        )
+    )
+    runs = {run["research_role"]: run for run in campaign["runs"]}
+    assert set(runs) == {"two_block_triangular", "strict_prefix_plan_future"}
+    configs = {
+        role: load_config_from_yaml(str(REPO_ROOT / run["config"]))
+        for role, run in runs.items()
+    }
+    assert configs["two_block_triangular"].plan_attention_topology == "hierarchical_prefix"
+    assert (
+        configs["strict_prefix_plan_future"].plan_attention_topology
+        == "strict_hierarchical_prefix"
+    )
+    assert {cfg.plan_time_schedule for cfg in configs.values()} == {"aligned"}
+    assert {cfg.plan_time_warp_gamma for cfg in configs.values()} == {1.0}
+    assert {cfg.split_input_as_prefix for cfg in configs.values()} == {True}
+    assert {cfg.max_input_length for cfg in configs.values()} == {128}
+    assert {run["resources"]["gpus"] for run in runs.values()} == {gpus}
+    assert len({run["image_id"] for run in runs.values()}) == 1
+    assert len({run["backend"]["gres"] for run in runs.values()}) == 1
+
+    allowed_config_differences = {
+        "output_dir",
+        "wandb_run_name",
+        "wandb_tag",
+        "plan_attention_topology",
+    }
+    baseline = configs["two_block_triangular"]
+
+    def comparable(value):
+        if isinstance(value, list):
+            return [vars(item) if hasattr(item, "__dict__") else item for item in value]
+        return value
+
+    for role, config in configs.items():
+        differences = {
+            key for key in Config.__annotations__
+            if comparable(getattr(config, key)) != comparable(getattr(baseline, key))
+        }
+        assert differences <= allowed_config_differences, (role, differences)
+
+
 def test_research_project_campaign_catalog_matches_campaign_files():
     project = yaml.safe_load(
         (REPO_ROOT / "experiments/research_project.yaml").read_text(encoding="utf-8")

@@ -403,6 +403,16 @@ therefore contextual prefix embeddings do not leak the continuation into the
 plan path. Conditional generation and every plan/token diagnostic reuse this
 same split.
 
+The original `hierarchical_prefix` topology is a two-block mask: plan and
+observed-prefix states share one upstream block, so plan queries read prefix
+and prefix queries also read plan. The stricter
+`strict_hierarchical_prefix` ablation preserves the clean encoders but orders
+the noisy denoiser as `control -> prefix -> plan -> future`. Control queries
+read controls only, prefix queries cannot read plan, plan queries read prefix,
+and future queries read all valid groups. The matched 2026-07-16 campaign
+therefore isolates only removal of the plan -> prefix feedback edge; both arms
+use aligned plan/token time.
+
 **Current metrics:** `loss`, `l2_loss`, `ce_loss`, `plan_loss`, and
 `plan_aux_loss` are returned from `train_step.py`. `train_ce_loss` is still the
 training decoder branch, not the sampling metric: decoder rows see clean `s0`

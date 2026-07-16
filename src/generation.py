@@ -404,7 +404,10 @@ def _teacher_forced_token_stats(
             raise ValueError("plan_z is required for sentence-plan teacher forcing")
         plan_kwargs = {"plan_z": plan_z, "plan_t": t_one}
     topology_kwargs = {}
-    if str(getattr(config, "plan_attention_topology", "joint")) == "hierarchical_prefix":
+    if str(getattr(config, "plan_attention_topology", "joint")) in {
+        "hierarchical_prefix",
+        "strict_hierarchical_prefix",
+    }:
         if cond_seq_mask is None:
             cond_seq_mask = torch.zeros_like(attention_mask)
         topology_kwargs = {"cond_seq_mask": cond_seq_mask}

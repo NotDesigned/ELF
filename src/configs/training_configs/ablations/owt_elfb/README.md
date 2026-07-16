@@ -143,6 +143,16 @@ The prefix-conditioned counterpart uses a deterministic 128/128 split for full
 | Config | Observed prefix | Attention topology | Plan time |
 |---|---:|---|---|
 | `tier5_prefix128_joint_aligned_len256.yml` | first 128 valid tokens | joint plan/future | aligned |
+| `tier5_prefix128_hierarchical_aligned_len256.yml` | first 128 valid tokens | `(prefix + plan) -> future` two-block | aligned |
+| `tier5_prefix128_strict_hierarchical_aligned_len256.yml` | first 128 valid tokens | `prefix -> plan -> future` strict | aligned |
+
+The strict variant changes only the noisy shared denoiser. Clean token target
+encoding still uses the dataset encoder mask (future rows may read the full
+valid clean field), and frozen Sentence-T5 still embeds the complete clean
+continuation. Inside every denoiser block, control queries read controls only,
+prefix queries read controls plus prefix, plan queries read controls, prefix,
+and plan, and future queries read all valid keys. This removes the plan ->
+prefix feedback edge retained by the original two-block topology.
 | `tier5_prefix128_hierarchical_aligned_len256.yml` | first 128 valid tokens | prefix/plan -> future | aligned |
 | `tier5_prefix128_hierarchical_lead_g3_len256.yml` | first 128 valid tokens | prefix/plan -> future | `noise_power`, gamma=3 |
 

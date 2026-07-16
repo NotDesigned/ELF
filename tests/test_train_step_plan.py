@@ -188,6 +188,27 @@ def test_hierarchical_attention_mask_blocks_all_upstream_future_reads():
     assert mask[0, 4, :5].all()
 
 
+def test_strict_hierarchical_attention_mask_orders_prefix_plan_and_future():
+    mask = ELF.build_strict_hierarchical_attention_mask(
+        field_attention_mask=torch.tensor([[1, 1, 1, 0]], dtype=torch.float32),
+        cond_seq_mask=torch.tensor([[1, 1, 0, 0]], dtype=torch.float32),
+        control_token_count=2,
+        plan_token_count=1,
+    )
+
+    # Layout: two controls, one plan, two observed-prefix rows, one valid
+    # future row, then one padded field row.
+    assert mask.shape == (1, 7, 7)
+    assert mask[0, 0, :2].all()
+    assert not mask[0, 0, 2:].any()
+    assert mask[0, 3, [0, 1, 3, 4]].all()
+    assert not mask[0, 3, [2, 5, 6]].any()
+    assert mask[0, 2, :5].all()
+    assert not mask[0, 2, 5:].any()
+    assert mask[0, 5, :6].all()
+    assert not mask[0, :, 6].any()
+
+
 def test_hierarchical_shared_plan_depends_on_prefix_not_future_field():
     torch.manual_seed(2031)
     model = tiny_model(
@@ -225,9 +246,50 @@ def test_hierarchical_shared_plan_depends_on_prefix_not_future_field():
     assert not torch.equal(plan_base, plan_prefix_changed)
 
 
+def test_strict_hierarchical_shared_denoiser_has_no_plan_to_prefix_feedback():
+    torch.manual_seed(2032)
+    model = tiny_model(
+        sentence_encoder_type="sentence_t5",
+        plan_attention_topology="strict_hierarchical_prefix",
+    ).eval()
+    x = torch.randn(2, 6, 4)
+    plan_z = torch.randn(2, 8)
+    changed_plan_z = torch.randn_like(plan_z)
+    common = {
+        "t": torch.tensor([0.3, 0.6]),
+        "attention_mask": torch.ones(2, 6),
+        "cond_seq_mask": torch.tensor(
+            [[1, 1, 0, 0, 0, 0], [1, 1, 0, 0, 0, 0]], dtype=torch.float32,
+        ),
+        "plan_t": torch.tensor([0.2, 0.7]),
+        "self_cond_cfg_scale": torch.ones(2),
+        "decoder_step_active": True,
+        "return_plan": True,
+        "deterministic": True,
+    }
+
+    _, logits_base, plan_base = model(x, plan_z=plan_z, **common)
+    _, logits_changed, plan_changed = model(x, plan_z=changed_plan_z, **common)
+
+    assert torch.equal(logits_base[:, :2], logits_changed[:, :2])
+    assert not torch.equal(plan_base, plan_changed)
+    assert not torch.equal(logits_base[:, 2:], logits_changed[:, 2:])
+
+
 def test_hierarchical_train_step_runs_with_prefix_mask_plumbed():
     model = tiny_model(plan_attention_topology="hierarchical_prefix")
     config = tiny_config(plan_attention_topology="hierarchical_prefix")
+
+    _, metrics = run_tiny_train_step(config, model=model)
+
+    assert torch.isfinite(metrics["loss"])
+    assert torch.isfinite(metrics["plan_loss"])
+
+
+def test_strict_hierarchical_train_step_runs_with_prefix_mask_plumbed():
+    topology = "strict_hierarchical_prefix"
+    model = tiny_model(plan_attention_topology=topology)
+    config = tiny_config(plan_attention_topology=topology)
 
     _, metrics = run_tiny_train_step(config, model=model)
 

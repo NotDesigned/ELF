@@ -127,7 +127,10 @@ def train_step(
     loss_mask = loss_mask * (1 - cond_seq_mask)
 
     plan_attention_kwargs = {}
-    if str(getattr(config, "plan_attention_topology", "joint")) == "hierarchical_prefix":
+    if str(getattr(config, "plan_attention_topology", "joint")) in {
+        "hierarchical_prefix",
+        "strict_hierarchical_prefix",
+    }:
         topology_cond_seq_mask = cond_seq_mask
         if config.label_drop_prob > 0:
             topology_cond_seq_mask = topology_cond_seq_mask * (
