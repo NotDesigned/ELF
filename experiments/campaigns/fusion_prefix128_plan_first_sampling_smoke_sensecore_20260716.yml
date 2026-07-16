@@ -1,5 +1,5 @@
 schema_version: 1
-campaign: fusion-prefix128-plan-first-sampling-smoke-sensecore-20260716-c2
+campaign: fusion-prefix128-plan-first-sampling-smoke-sensecore-20260716-c3
 project: elf
 source_id: auto
 local_root: outputs/experiment_campaigns
@@ -54,17 +54,6 @@ research_contract:
 defaults:
   operation: evaluate
   config: src/configs/training_configs/ablations/owt_elfb/tier5_prefix128_hierarchical_aligned_len256.yml
-  config_overrides:
-    - global_batch_size=null
-    - batch_size=16
-    - num_samples=16
-    - reconstruction_eval=true
-    - reconstruction_num_samples=16
-    - eval_sampled_plan_diagnostics=true
-    - eval_mauve=true
-    - eval_mauve_model=gpt2-large
-    - data_path=/data/elf/eval_data/openwebtext-t5-head256-v1
-    - train_sampling_eval_freq=0
   evaluation:
     checkpoint_path: /data/elf/runs/elf-p128-tri-s42-sco-0716-r2/checkpoint_19017
     seeds: [42]
@@ -101,10 +90,20 @@ profiles:
       storage_mount: 01995896-d54c-7816-90b3-0ce73bce9936/L202500224:/data
 
 runs:
-  - run_id: elf-p128-pfirst-j32-s42-sco-0716-r2
+  - run_id: elf-p128-pfirst-j32-s42-sco-0716-r3
     research_role: joint32
     profile: sensecore-1gpu-spot
     config_overrides:
+      - global_batch_size=null
+      - batch_size=16
+      - num_samples=16
+      - reconstruction_eval=true
+      - reconstruction_num_samples=16
+      - eval_sampled_plan_diagnostics=true
+      - eval_mauve=true
+      - eval_mauve_model=gpt2-large
+      - data_path=/data/elf/eval_data/openwebtext-t5-head256-v1
+      - train_sampling_eval_freq=0
       - sampling_configs_path=src/configs/sampling_configs/uncond_sampling_steps32.yml
     evaluation:
       canonical_family_dimensions:
@@ -115,10 +114,20 @@ runs:
         time_schedule: logit_normal
         time_warp_gamma: 1.5
 
-  - run_id: elf-p128-pfirst-p32t32-s42-sco-0716-r2
+  - run_id: elf-p128-pfirst-p32t32-s42-sco-0716-r3
     research_role: planfirst32x32
     profile: sensecore-1gpu-spot
     config_overrides:
+      - global_batch_size=null
+      - batch_size=16
+      - num_samples=16
+      - reconstruction_eval=true
+      - reconstruction_num_samples=16
+      - eval_sampled_plan_diagnostics=true
+      - eval_mauve=true
+      - eval_mauve_model=gpt2-large
+      - data_path=/data/elf/eval_data/openwebtext-t5-head256-v1
+      - train_sampling_eval_freq=0
       - sampling_configs_path=src/configs/sampling_configs/cond_sampling_plan_first32_token32.yml
     evaluation:
       canonical_family_dimensions:
@@ -132,10 +141,20 @@ runs:
         plan_num_sampling_steps: 32
         total_model_evaluations: 64
 
-  - run_id: elf-p128-pfirst-j64-s42-sco-0716-r2
+  - run_id: elf-p128-pfirst-j64-s42-sco-0716-r3
     research_role: joint64_compute
     profile: sensecore-1gpu-spot
     config_overrides:
+      - global_batch_size=null
+      - batch_size=16
+      - num_samples=16
+      - reconstruction_eval=true
+      - reconstruction_num_samples=16
+      - eval_sampled_plan_diagnostics=true
+      - eval_mauve=true
+      - eval_mauve_model=gpt2-large
+      - data_path=/data/elf/eval_data/openwebtext-t5-head256-v1
+      - train_sampling_eval_freq=0
       - sampling_configs_path=src/configs/sampling_configs/uncond_sampling_steps64_gamma15.yml
     evaluation:
       canonical_family_dimensions:
