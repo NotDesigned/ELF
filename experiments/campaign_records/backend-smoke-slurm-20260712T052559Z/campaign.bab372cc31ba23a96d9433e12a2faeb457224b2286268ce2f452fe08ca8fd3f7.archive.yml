@@ -1,0 +1,8 @@
+schema_version: 1
+project: elf
+campaign: backend-smoke-slurm-20260712T052559Z
+revision_id: campaign.bab372cc31ba23a96d9433e12a2faeb457224b2286268ce2f452fe08ca8fd3f7
+reason: retired backend smoke campaign; no indexed run evidence
+prior_lifecycle_state: ACTIVE
+recorded_at: '2026-07-15T15:14:30.823322Z'
+record_kind: archive
