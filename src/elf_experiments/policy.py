@@ -57,5 +57,11 @@ def decide_next_action(
             "RETRY_ALLOWED", failure.value, "declared infrastructure retry budget remains",
             retries_used, max_infra_retries, completed_checkpoint,
         )
+    if failure is FailureClass.UNKNOWN and retries_used < max_infra_retries:
+        return Decision(
+            "REVIEW_RETRY", failure.value,
+            "unknown failure requires exact operator review before retry",
+            retries_used, max_infra_retries, completed_checkpoint,
+        )
     reason = "retry budget exhausted" if retryable else "failure requires explicit scientific/resource decision"
     return Decision("DO_NOT_RETRY", failure.value, reason, retries_used, max_infra_retries, completed_checkpoint)
