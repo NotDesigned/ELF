@@ -1,5 +1,5 @@
 schema_version: 1
-campaign: fusion-prefix128-plan-first-sampling-smoke-sensecore-20260716-c1
+campaign: fusion-prefix128-plan-first-sampling-smoke-sensecore-20260716-c2
 project: elf
 source_id: auto
 local_root: outputs/experiment_campaigns
@@ -68,7 +68,7 @@ defaults:
   evaluation:
     checkpoint_path: /data/elf/runs/elf-p128-tri-s42-sco-0716-r2/checkpoint_19017
     seeds: [42]
-  image_id: sha256:0000000000000000000000000000000000000000000000000000000000000000
+  image_id: sha256:0433dbaca676f24f6a377bf591b4f0d0e2dfd84e929569b3c0258abbe33212c0
   resources: {gpus: 1, nodes: 1, cpus: 8, max_time: 2h}
   env:
     ELF_EVAL_DATA_ID: sha256:ecff221a9bcea13f64ddce845e1b4918c6fc618608de3568413503ea7888bdf5
@@ -97,11 +97,11 @@ profiles:
       priority: NORMAL
       quota_type: spot
       wait: true
-      image: registry.cn-sh-01.sensecore.cn/ccr-zhicheng-02/elf:runtime-PENDING
+      image: registry.cn-sh-01.sensecore.cn/ccr-zhicheng-02/elf:runtime-b1cec9d07342b5ae27322be4a93dd883e926d7e0777896763d1d932d06f2db68
       storage_mount: 01995896-d54c-7816-90b3-0ce73bce9936/L202500224:/data
 
 runs:
-  - run_id: elf-p128-pfirst-j32-s42-sco-0716-r1
+  - run_id: elf-p128-pfirst-j32-s42-sco-0716-r2
     research_role: joint32
     profile: sensecore-1gpu-spot
     config_overrides:
@@ -115,7 +115,7 @@ runs:
         time_schedule: logit_normal
         time_warp_gamma: 1.5
 
-  - run_id: elf-p128-pfirst-p32t32-s42-sco-0716-r1
+  - run_id: elf-p128-pfirst-p32t32-s42-sco-0716-r2
     research_role: planfirst32x32
     profile: sensecore-1gpu-spot
     config_overrides:
@@ -132,7 +132,7 @@ runs:
         plan_num_sampling_steps: 32
         total_model_evaluations: 64
 
-  - run_id: elf-p128-pfirst-j64-s42-sco-0716-r1
+  - run_id: elf-p128-pfirst-j64-s42-sco-0716-r2
     research_role: joint64_compute
     profile: sensecore-1gpu-spot
     config_overrides:
