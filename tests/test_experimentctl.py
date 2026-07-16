@@ -1220,6 +1220,28 @@ def test_provenance_identity_preserves_daemon_reviewed_authored_revision(
         )
 
 
+def test_provenance_identity_inherits_canonical_commit_for_retry_campaign(
+    tmp_path, monkeypatch,
+):
+    campaign = tmp_path / "campaign.execution.yml"
+    campaign.write_text("git_commit: " + "c" * 40 + "\n", encoding="utf-8")
+    monkeypatch.setattr(
+        experimentctl, "run_command",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("retry identity must not read the controller checkout commit")
+        ),
+    )
+
+    result = experimentctl.provenance_identity(
+        campaign, campaign_id="campaign." + "a" * 64,
+    )
+
+    assert result == {
+        "git_commit": "c" * 40,
+        "campaign_id": "campaign." + "a" * 64,
+    }
+
+
 def test_parses_structured_training_metric_from_sensecore_log():
     record = parse_training_metric_line(
         "INFO - engine - Step 120: loss=3.1, l2=1.2, ce=9.8, plan=0.0, "

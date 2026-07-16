@@ -806,14 +806,24 @@ def provenance_identity(
     the exact catalog revision explicitly; direct CLI use continues to hash the
     supplied Campaign file.
     """
-    try:
-        commit = run_command(["git", "rev-parse", "HEAD"], cwd=REPO_ROOT).stdout.strip()
-    except subprocess.CalledProcessError as error:
-        commit = os.environ.get("ELF_GIT_COMMIT", "")
-        if not commit or commit == "unknown":
-            raise RuntimeError(
-                "Git metadata is unavailable; build the image with GIT_COMMIT"
-            ) from error
+    frozen_commit = ""
+    if campaign_id is not None and campaign_path.is_file():
+        payload = yaml.safe_load(campaign_path.read_text(encoding="utf-8")) or {}
+        if isinstance(payload, dict):
+            frozen_commit = str(payload.get("git_commit") or "")
+        if frozen_commit and re.fullmatch(r"[0-9a-f]{40}", frozen_commit) is None:
+            raise ValueError("execution Campaign git_commit must be a 40-digit lowercase SHA")
+    if frozen_commit:
+        commit = frozen_commit
+    else:
+        try:
+            commit = run_command(["git", "rev-parse", "HEAD"], cwd=REPO_ROOT).stdout.strip()
+        except subprocess.CalledProcessError as error:
+            commit = os.environ.get("ELF_GIT_COMMIT", "")
+            if not commit or commit == "unknown":
+                raise RuntimeError(
+                    "Git metadata is unavailable; build the image with GIT_COMMIT"
+                ) from error
     resolved_campaign_id = campaign_id
     if resolved_campaign_id is not None:
         if _CAMPAIGN_REVISION_RE.fullmatch(resolved_campaign_id) is None:
