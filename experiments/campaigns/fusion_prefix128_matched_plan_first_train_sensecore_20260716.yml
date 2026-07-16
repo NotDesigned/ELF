@@ -1,0 +1,142 @@
+schema_version: 1
+campaign: fusion-prefix128-matched-plan-first-train-sensecore-20260716-c1
+project: elf
+source_id: auto
+local_root: outputs/experiment_campaigns
+
+# Matched continuation experiment from the completed triangular checkpoint.
+# Both arms reset optimizer/step state and see one identical additional epoch;
+# only the denoiser training-state distribution changes.
+research_contract:
+  schema_version: 1
+  question: >-
+    Starting from the same completed prefix-conditioned triangular checkpoint,
+    does one matched epoch of strict plan-first training improve strict
+    plan-first free generation and sample-specific plan identity over an
+    aligned-training continuation control?
+  required_roles: [aligned_continue, planfirst_continue]
+  required_metrics:
+    common:
+      - train_loss
+      - train_l2_loss
+      - train_ce_loss
+      - train_plan_loss
+      - train_plan_phase_fraction
+      - train_token_phase_fraction
+      - train_plan_emb_batch_var
+      - train_plan_pred_batch_var
+      - steps_per_sec
+      - g_ppl
+      - mauve
+      - generation_mean_entropy
+      - generation_nonempty_fraction
+      - oracle_plan_ppl
+      - shuffled_plan_ppl
+      - token_recon_ppl
+      - sampled_plan_num_samples
+      - sampled_plan_var_ratio
+      - sampled_clean_plan_cosine
+      - sampled_clean_plan_retrieval_lift
+  required_artifacts:
+    common:
+      train_metrics: {min_records: 1}
+      evaluation_metrics: {min_records: 4}
+      generated_samples: {min_nonempty_records: 192}
+      reconstructed_samples: {min_nonempty_records: 64}
+  terminal_checks:
+    - {metric: steps_per_sec, op: gt, value: 0}
+    - {metric: generation_nonempty_fraction, op: gt, value: 0.95}
+    - {metric: generation_mean_entropy, op: gt, value: 3.0}
+    - {metric: sampled_plan_num_samples, op: gte, value: 64}
+  early_stop:
+    - metrics: [train_loss, train_l2_loss, train_ce_loss, train_plan_loss]
+      op: any_nonfinite
+  checkpoint: {required_on_success: true}
+  comparison:
+    match_fields:
+      - source_id
+      - image_id
+      - resolved_config.seed
+      - resolved_config.data_path
+      - resolved_config.max_length
+      - resolved_config.max_input_length
+      - resolved_config.split_input_as_prefix
+      - resolved_config.global_batch_size
+      - resolved_config.epochs
+      - resolved_config.grad_accum_steps
+      - resolved_config.warm_start
+      - resolved_config.warm_start_use_ema
+      - resolved_config.plan_attention_topology
+      - resolved_config.plan_denoiser_type
+      - resolved_config.plan_first_plan_phase_prob
+      - resolved_config.num_plan_tokens
+      - resolved_config.plan_loss_weight
+      - resolved_config.save_freq
+      - resolved_config.eval_freq
+      - resolved_config.num_samples
+      - resolved_config.reconstruction_num_samples
+      - resolved_config.sampling_configs_path
+      - backend.kind
+      - backend.worker_spec
+      - backend.worker_nodes
+      - backend.quota_type
+
+defaults:
+  config_overrides:
+    - epochs=1
+    - global_batch_size=512
+    - grad_accum_steps=1
+    - warm_start=/data/elf/runs/elf-p128-tri-s42-sco-0716-r2/checkpoint_19017
+    - warm_start_use_ema=false
+    - save_freq=0.1
+    - eval_freq=1
+    - num_samples=64
+    - reconstruction_eval=true
+    - reconstruction_num_samples=64
+    - eval_sampled_plan_diagnostics=true
+    - sampling_configs_path=src/configs/sampling_configs/cond_sampling_plan_first32_token32.yml
+    - train_sampling_eval_freq=2000
+    - train_sampling_eval_num_samples=64
+    - train_sampling_eval_batch_size=16
+  image_id: sha256:996bbca23e8c794994d9021e0295549cbbe927d1b80c7664cfeb79d765e2846f
+  resources: {gpus: 4, nodes: 1, cpus: 56, max_time: 4h}
+  env:
+    LOG_FREQ: "100"
+    NUM_WORKERS: "8"
+    REQUIRE_OFFLINE_CACHE: "1"
+    USE_WANDB: "false"
+  storage:
+    run_dir: /data/elf/runs/{run_id}
+  retry: {max_infra_retries: 0}
+
+profiles:
+  sensecore-4gpu-spot:
+    storage:
+      data_root: /data
+      project_data_root: /data/elf
+      hf_home: /data/.cache/huggingface
+      hf_datasets_cache: /data/.cache/huggingface/datasets
+    backend:
+      kind: sensecore
+      workspace: share-space-01e
+      aec2: computing-cluster-01e
+      job_name: "{run_id}"
+      display_name: "{run_id}"
+      worker_spec: N6lS.Iu.I10.4.56c832g
+      worker_nodes: 1
+      priority: NORMAL
+      quota_type: spot
+      wait: true
+      image: registry.cn-sh-01.sensecore.cn/ccr-zhicheng-02/elf:runtime-328f268b583e9cf92ff411d317896fa204ac00a1484f89460e7a73f9193cdf9e
+      storage_mount: 01995896-d54c-7816-90b3-0ce73bce9936/L202500224:/data
+
+runs:
+  - run_id: elf-p128-pfirst-train-ctrl-s42-sco-0716-r1
+    research_role: aligned_continue
+    profile: sensecore-4gpu-spot
+    config: src/configs/training_configs/ablations/owt_elfb/tier5_prefix128_hierarchical_aligned_len256.yml
+
+  - run_id: elf-p128-pfirst-train-match-s42-sco-0716-r1
+    research_role: planfirst_continue
+    profile: sensecore-4gpu-spot
+    config: src/configs/training_configs/ablations/owt_elfb/tier5_prefix128_hierarchical_plan_first_len256.yml
