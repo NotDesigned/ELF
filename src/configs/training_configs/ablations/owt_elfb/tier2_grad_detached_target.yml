@@ -1,0 +1,8 @@
+base_config: tier0_2_learned_main.yml
+
+# Tier 2: target detached but z_s input path still reaches encoder.
+sentence_encoder_grad: detached_target
+
+output_dir: outputs/ablations/owt_elfb/tier2_grad_detached_target
+wandb_run_name: tier2_owt_elfb_grad_detached_target
+wandb_tag: tier2,owt,elfb,grad_detached_target

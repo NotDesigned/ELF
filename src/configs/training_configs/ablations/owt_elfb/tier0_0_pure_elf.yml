@@ -1,0 +1,10 @@
+base_config: ../../train_owt_ELF-B.yml
+
+# Tier 0: unchanged ELF baseline.
+use_sentence_plan: false
+
+output_dir: outputs/ablations/owt_elfb/tier0_0_pure_elf
+resume: null
+warm_start: null
+wandb_run_name: tier0_0_owt_elfb_pure_elf
+wandb_tag: tier0,owt,elfb,pure_elf

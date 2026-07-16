@@ -1,0 +1,142 @@
+schema_version: 1
+campaign: fusion-oracle-capacity-probe-train-sensecore-20260716-c2
+project: elf
+source_id: auto
+local_root: outputs/experiment_campaigns
+
+# All arms receive the frozen clean Sentence-T5 embedding of the ground-truth
+# continuation on every token CE/L2 row. They warm-start from the same 12-layer
+# plan checkpoint; shallower arms load only the matching prefix blocks and then
+# train an actually smaller model for one matched epoch.
+research_contract:
+  schema_version: 1
+  question: >-
+    When every example is given its clean oracle continuation plan, can a
+    6-layer or 3-layer ELF-B-width token model approach the token denoising,
+    teacher-forced likelihood, and oracle-conditioned generation quality of
+    the 12-layer token model after one matched adaptation epoch?
+  required_roles: [depth12, depth6, depth3]
+  required_metrics:
+    common:
+      - train_loss
+      - train_l2_loss
+      - train_ce_loss
+      - train_plan_loss
+      - train_plan_phase_fraction
+      - train_token_phase_fraction
+      - steps_per_sec
+      - oracle_plan_teacher_forced_token_ppl
+      - shuffled_plan_teacher_forced_token_ppl
+      - oracle_plan_token_denoising_l2
+      - oracle_plan_token_denoising_l2_t10
+      - oracle_plan_token_denoising_l2_t30
+      - oracle_plan_token_denoising_l2_t50
+      - oracle_plan_token_denoising_l2_t70
+      - oracle_plan_token_denoising_l2_t90
+      - oracle_plan_ppl
+      - shuffled_plan_ppl
+      - generation_nonempty_fraction
+  required_artifacts:
+    common:
+      train_metrics: {min_records: 1}
+      evaluation_metrics: {min_records: 4}
+      generated_samples: {min_nonempty_records: 64}
+      reconstructed_samples: {min_nonempty_records: 128}
+  terminal_checks:
+    - {metric: steps_per_sec, op: gt, value: 0}
+    - {metric: generation_nonempty_fraction, op: gt, value: 0.90}
+    - {metric: train_plan_loss, op: lte, value: 1.0e-8}
+    - {metric: train_plan_phase_fraction, op: lte, value: 1.0e-8}
+    - {metric: train_token_phase_fraction, op: gt, value: 0.95}
+  early_stop:
+    - metrics: [train_loss, train_l2_loss, train_ce_loss]
+      op: any_nonfinite
+  checkpoint: {required_on_success: true}
+  comparison:
+    match_fields:
+      - source_id
+      - image_id
+      - resolved_config.seed
+      - resolved_config.data_path
+      - resolved_config.max_length
+      - resolved_config.max_input_length
+      - resolved_config.split_input_as_prefix
+      - resolved_config.global_batch_size
+      - resolved_config.epochs
+      - resolved_config.grad_accum_steps
+      - resolved_config.warm_start
+      - resolved_config.warm_start_use_ema
+      - resolved_config.plan_training_mode
+      - resolved_config.plan_attention_topology
+      - resolved_config.plan_loss_weight
+      - resolved_config.num_plan_tokens
+      - resolved_config.decoder_prob
+      - resolved_config.denoiser_p_mean
+      - resolved_config.denoiser_p_std
+      - resolved_config.save_freq
+      - resolved_config.num_samples
+      - resolved_config.reconstruction_num_samples
+      - resolved_config.sampling_configs_path
+      - backend.kind
+      - backend.worker_spec
+      - backend.worker_nodes
+      - backend.quota_type
+
+defaults:
+  config: src/configs/training_configs/ablations/owt_elfb/tier5_prefix128_hierarchical_oracle_len256.yml
+  image_id: sha256:5f839d0267958ad1082d6653b21f2446e44c4430e4336f0453fd35d1214ba6de
+  resources: {gpus: 4, nodes: 1, cpus: 56, max_time: 4h}
+  env:
+    LOG_FREQ: "100"
+    NUM_WORKERS: "8"
+    REQUIRE_OFFLINE_CACHE: "1"
+    USE_WANDB: "false"
+  storage:
+    run_dir: /data/elf/runs/{run_id}
+  retry: {max_infra_retries: 1}
+
+profiles:
+  sensecore-4gpu-spot:
+    storage:
+      data_root: /data
+      project_data_root: /data/elf
+      hf_home: /data/.cache/huggingface
+      hf_datasets_cache: /data/.cache/huggingface/datasets
+    backend:
+      kind: sensecore
+      workspace: share-space-01e
+      aec2: computing-cluster-01e
+      job_name: "{run_id}"
+      display_name: "{run_id}"
+      worker_spec: N6lS.Iu.I10.4.56c832g
+      worker_nodes: 1
+      priority: NORMAL
+      quota_type: spot
+      wait: true
+      image: registry.cn-sh-01.sensecore.cn/ccr-zhicheng-02/elf:runtime-runtime.069d27084fd3a30fcb2e972d576738ef0341d973dc4f51820172351374f18cfe
+      storage_mount: 01995896-d54c-7816-90b3-0ce73bce9936/L202500224:/data
+
+runs:
+  - matrix:
+      depth: [12, 6, 3]
+    template:
+      run_id: elf-oracle-cap-train-d{depth}-s42-sco-0716-r2
+      research_role: depth{depth}
+      profile: sensecore-4gpu-spot
+      config_overrides:
+        - model_depth={depth}
+        - epochs=1
+        - global_batch_size=512
+        - grad_accum_steps=1
+        - warm_start=/data/elf/runs/elf-p128-tri-s42-sco-0716-r2/checkpoint_19017
+        - warm_start_use_ema=false
+        - save_freq=0.25
+        - eval_freq=1
+        - num_samples=64
+        - reconstruction_eval=true
+        - reconstruction_num_samples=128
+        - eval_sampled_plan_diagnostics=false
+        - eval_mauve=false
+        - sampling_configs_path=src/configs/sampling_configs/cond_sampling_plan_first32_token32.yml
+        - train_sampling_eval_freq=0
+        - use_wandb=false

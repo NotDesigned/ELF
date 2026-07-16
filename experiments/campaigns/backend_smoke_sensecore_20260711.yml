@@ -1,0 +1,48 @@
+schema_version: 1
+campaign: backend-smoke-sensecore-20260711
+project: elf
+source_id: auto
+local_root: outputs/experiment_campaigns
+
+defaults:
+  config: src/configs/training_configs/ablations/owt_elfb/tier0_0_pure_elf_len256.yml
+  config_overrides:
+    - epochs=1
+    - online_eval=false
+    - reconstruction_eval=false
+  image_id: sha256:f6b963095ebf1aa4b516ff8a958ba3d0392eac9b3f85de072c3ab766b30420fb
+  resources: {gpus: 4, cpus: 56}
+  env:
+    LOG_FREQ: "10"
+    REQUIRE_OFFLINE_CACHE: "1"
+    USE_WANDB: "false"
+  storage:
+    run_dir: /data/elf/runs/{run_id}
+  retry: {max_infra_retries: 0}
+
+profiles:
+  sensecore-4gpu-spot:
+    storage:
+      data_root: /data
+      project_data_root: /data/elf
+      hf_home: /data/.cache/huggingface
+      hf_datasets_cache: /data/.cache/huggingface/datasets
+    backend:
+      kind: sensecore
+      workspace: share-space-01e
+      aec2: computing-cluster-01e
+      job_name: "{run_id}"
+      display_name: "{run_id}"
+      worker_spec: N6lS.Iu.I10.4.56c832g
+      worker_nodes: 1
+      priority: NORMAL
+      quota_type: spot
+      image: registry.cn-sh-01.sensecore.cn/ccr-zhicheng-02/elf:runtime-fe73180
+      storage_mount: 01995896-d54c-7816-90b3-0ce73bce9936/L202500224:/data
+
+runs:
+  - run_id: elf-smoke-sco-0711-1618
+    profile: sensecore-4gpu-spot
+    # The published image predates the controller changes; record its actual
+    # source rather than attributing the dirty local tree to this smoke.
+    source_id: fe73180e7204f8aeec3c255e0f49a1b81e6aa9e8

@@ -1,0 +1,208 @@
+schema_version: 1
+campaign: fusion-clean-vs-t5-plan-quality-stage-a-h200-20260715-c3
+project: elf
+source_id: auto
+local_root: outputs/experiment_campaigns
+
+# Stage A is a mechanism diagnostic on the existing 256-row OWT subset. A
+# held-out, larger, external-judge campaign remains a separate Stage B gate.
+research_contract:
+  schema_version: 1
+  question: >-
+    Across three paired evaluation seeds and 32/64-step sampling families,
+    does the frozen T5 plan improve free generation over clean ELF, and does
+    A1 respond consistently to clean versus shuffled plan interventions?
+  required_roles:
+    - a0_f32_s42
+    - a0_f32_s123
+    - a0_f32_s456
+    - a0_f64_s42
+    - a0_f64_s123
+    - a0_f64_s456
+    - a1_f32_s42
+    - a1_f32_s123
+    - a1_f32_s456
+    - a1_f64_s42
+    - a1_f64_s123
+    - a1_f64_s456
+  required_metrics:
+    common:
+      - g_ppl
+      - mauve
+      - generation_mean_entropy
+      - generation_nonempty_fraction
+      - token_recon_ppl
+      - teacher_forced_token_ppl
+      - token_denoising_l2
+    by_role:
+      a1_f32_s42: &a1_metrics
+        - oracle_plan_ppl
+        - shuffled_plan_ppl
+        - oracle_plan_teacher_forced_token_ppl
+        - shuffled_plan_teacher_forced_token_ppl
+        - oracle_plan_token_denoising_l2
+        - shuffled_plan_token_denoising_l2
+      a1_f32_s123: *a1_metrics
+      a1_f32_s456: *a1_metrics
+      a1_f64_s42: *a1_metrics
+      a1_f64_s123: *a1_metrics
+      a1_f64_s456: *a1_metrics
+  required_artifacts:
+    common:
+      evaluation_metrics: {min_records: 1}
+      generated_samples: {min_nonempty_records: 1}
+      reconstructed_samples: {min_nonempty_records: 1}
+  terminal_checks:
+    - {metric: generation_nonempty_fraction, op: gt, value: 0.95}
+    - {metric: generation_mean_entropy, op: gt, value: 3.0}
+  checkpoint: {required_on_success: false}
+  comparison:
+    match_fields:
+      - source_id
+      - image_id
+      - resolved_config.max_length
+      - resolved_config.data_path
+      - env.ELF_EVAL_DATA_ID
+      - resolved_config.batch_size
+      - resolved_config.num_samples
+      - resolved_config.reconstruction_num_samples
+      - backend.kind
+      - backend.partition
+      - backend.gres
+
+defaults:
+  operation: evaluate
+  config_overrides:
+    - global_batch_size=null
+    - batch_size=16
+    - num_samples=256
+    - reconstruction_eval=true
+    - reconstruction_num_samples=256
+    - eval_mauve=true
+    - eval_mauve_model=gpt2-large
+    - data_path=/datapool/liangluocheng/elf/eval_data/openwebtext-t5-head256-v1
+  image_id: sha256:0ddac1ccfce3bce3f21f3f55075247564522ff7d73cfc56dde7e41a0202af954
+  resources: {gpus: 1, nodes: 1, cpus: 8}
+  env:
+    ELF_EVAL_DATA_ID: sha256:ecff221a9bcea13f64ddce845e1b4918c6fc618608de3568413503ea7888bdf5
+    NUM_WORKERS: "4"
+    REQUIRE_OFFLINE_CACHE: "1"
+    USE_WANDB: "false"
+  storage:
+    run_dir: /datapool/liangluocheng/elf/runs/{run_id}
+  retry: {max_infra_retries: 1}
+
+profiles:
+  wyd-h200:
+    storage:
+      data_root: /datapool/liangluocheng
+      project_data_root: /datapool/liangluocheng/elf
+      hf_home: /datapool/liangluocheng/.cache/huggingface
+      hf_datasets_cache: /datapool/liangluocheng/.cache/huggingface/datasets
+    backend:
+      kind: slurm
+      ssh_alias: wyd-l40s-seoul-relay
+      partition: h200
+      account: lab
+      qos: normal
+      gres: gpu:h200:1
+      time: "00:45:00"
+      mount_root: /datapool
+      apptainer_cache_dir: /datapool/liangluocheng/elf/apptainer/cache
+      apptainer_tmp_dir: /datapool/liangluocheng/elf/apptainer/tmp
+      source_dir: /datapool/liangluocheng/elf/sources/{source_id}
+      sif_path: /datapool/liangluocheng/elf/images/0ddac1ccfce3bce3f21f3f55075247564522ff7d73cfc56dde7e41a0202af954.sif
+
+runs:
+  - matrix: {seed: [42, 123, 456]}
+    template:
+      run_id: elf-a0-quality-stage-a-f32-s{seed}-h200-20260715-r3
+      research_role: a0_f32_s{seed}
+      profile: wyd-h200
+      config: src/configs/training_configs/ablations/owt_elfb/tier0_0_pure_elf_len256.yml
+      config_overrides:
+        - global_batch_size=null
+        - batch_size=16
+        - num_samples=256
+        - reconstruction_eval=true
+        - reconstruction_num_samples=256
+        - eval_mauve=true
+        - eval_mauve_model=gpt2-large
+        - data_path=/datapool/liangluocheng/elf/eval_data/openwebtext-t5-head256-v1
+        - sampling_configs_path=src/configs/sampling_configs/uncond_sampling_steps32.yml
+      evaluation:
+        checkpoint_path: /datapool/liangluocheng/elf/runs/elf-a0-warm-a0ckpt19017-l256-s42-h100-20260712-r2/checkpoint_19017
+        seeds: ['{seed}']
+        canonical_family_dimensions: &f32_family
+          sampling_method: sde
+          num_sampling_steps: 32
+          cfg: 1.0
+          self_cond_cfg_scale: 3.0
+          time_schedule: logit_normal
+          time_warp_gamma: 1.5
+  - matrix: {seed: [42, 123, 456]}
+    template:
+      run_id: elf-a0-quality-stage-a-f64-s{seed}-h200-20260715-r3
+      research_role: a0_f64_s{seed}
+      profile: wyd-h200
+      config: src/configs/training_configs/ablations/owt_elfb/tier0_0_pure_elf_len256.yml
+      config_overrides:
+        - global_batch_size=null
+        - batch_size=16
+        - num_samples=256
+        - reconstruction_eval=true
+        - reconstruction_num_samples=256
+        - eval_mauve=true
+        - eval_mauve_model=gpt2-large
+        - data_path=/datapool/liangluocheng/elf/eval_data/openwebtext-t5-head256-v1
+        - sampling_configs_path=src/configs/sampling_configs/uncond_sampling_steps64.yml
+      evaluation:
+        checkpoint_path: /datapool/liangluocheng/elf/runs/elf-a0-warm-a0ckpt19017-l256-s42-h100-20260712-r2/checkpoint_19017
+        seeds: ['{seed}']
+        canonical_family_dimensions: &f64_family
+          sampling_method: sde
+          num_sampling_steps: 64
+          cfg: 1.0
+          self_cond_cfg_scale: 3.0
+          time_schedule: logit_normal
+          time_warp_gamma: 1.0
+  - matrix: {seed: [42, 123, 456]}
+    template:
+      run_id: elf-a1-quality-stage-a-f32-s{seed}-h200-20260715-r3
+      research_role: a1_f32_s{seed}
+      profile: wyd-h200
+      config: src/configs/training_configs/ablations/owt_elfb/tier0_1_sentence_t5_len256.yml
+      config_overrides:
+        - global_batch_size=null
+        - batch_size=16
+        - num_samples=256
+        - reconstruction_eval=true
+        - reconstruction_num_samples=256
+        - eval_mauve=true
+        - eval_mauve_model=gpt2-large
+        - data_path=/datapool/liangluocheng/elf/eval_data/openwebtext-t5-head256-v1
+        - sampling_configs_path=src/configs/sampling_configs/uncond_sampling_steps32.yml
+      evaluation:
+        checkpoint_path: /datapool/liangluocheng/elf/runs/elf-a1-warm-a0ckpt19017-l256-s42-h100-20260712-r2/checkpoint_19017
+        seeds: ['{seed}']
+        canonical_family_dimensions: *f32_family
+  - matrix: {seed: [42, 123, 456]}
+    template:
+      run_id: elf-a1-quality-stage-a-f64-s{seed}-h200-20260715-r3
+      research_role: a1_f64_s{seed}
+      profile: wyd-h200
+      config: src/configs/training_configs/ablations/owt_elfb/tier0_1_sentence_t5_len256.yml
+      config_overrides:
+        - global_batch_size=null
+        - batch_size=16
+        - num_samples=256
+        - reconstruction_eval=true
+        - reconstruction_num_samples=256
+        - eval_mauve=true
+        - eval_mauve_model=gpt2-large
+        - data_path=/datapool/liangluocheng/elf/eval_data/openwebtext-t5-head256-v1
+        - sampling_configs_path=src/configs/sampling_configs/uncond_sampling_steps64.yml
+      evaluation:
+        checkpoint_path: /datapool/liangluocheng/elf/runs/elf-a1-warm-a0ckpt19017-l256-s42-h100-20260712-r2/checkpoint_19017
+        seeds: ['{seed}']
+        canonical_family_dimensions: *f64_family

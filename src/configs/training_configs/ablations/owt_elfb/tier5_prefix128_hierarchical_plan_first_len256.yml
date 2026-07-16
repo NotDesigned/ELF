@@ -1,0 +1,13 @@
+base_config: tier5_prefix128_hierarchical_aligned_len256.yml
+
+# Match the strict two-stage sampler during training.  Half of non-decoder
+# examples train prefix-conditioned plan denoising with token_t=0; the other
+# half train token denoising with a completed clean plan at plan_t=1.
+plan_training_mode: plan_first
+plan_first_plan_phase_prob: 0.5
+
+output_dir: outputs/ablations/owt_elfb/tier5_prefix128_hierarchical_plan_first_len256
+resume: null
+warm_start: null
+wandb_run_name: tier5_owt_elfb_prefix128_hierarchical_plan_first_len256
+wandb_tag: tier5,owt,elfb,sentence_t5,prefix128,hierarchical_prefix,plan_first,len256

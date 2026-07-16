@@ -1,0 +1,108 @@
+schema_version: 1
+campaign: fusion-a2-mb64-ga2-h100-20260712-c1
+project: elf
+
+# A2 recovery run. The original immutable A2 run failed during the first
+# backward pass with grad_accum_steps=1. A controller-managed smoke run proved
+# that the same effective global batch fits with microbatch 64 and GA2.
+source_id: e44db5b272df3b6a196e8f58addc54446003595f
+git_commit: e44db5b272df3b6a196e8f58addc54446003595f
+local_root: outputs/experiment_campaigns
+
+research_contract:
+  schema_version: 1
+  question: >-
+    Can the learned-plan A2 variant complete the one-epoch viability gate at
+    effective global batch 512 using microbatch 64 and GA2, while retaining
+    non-collapsed plan representations and useful plan conditioning?
+  required_roles: [a2]
+  required_metrics:
+    common:
+      - train_loss
+      - steps_per_sec
+      - g_ppl
+      - generation_mean_entropy
+      - generation_nonempty_fraction
+      - token_recon_ppl
+    by_role:
+      a2:
+        - oracle_plan_ppl
+        - shuffled_plan_ppl
+        - train_plan_emb_batch_var
+        - train_plan_emb_norm
+  required_artifacts:
+    common:
+      train_metrics: {min_records: 1}
+      evaluation_metrics: {min_records: 1}
+      generated_samples: {min_nonempty_records: 1}
+      reconstructed_samples: {min_nonempty_records: 1}
+  terminal_checks:
+    - {metric: steps_per_sec, op: gt, value: 0}
+    - {metric: generation_nonempty_fraction, op: gt, value: 0}
+    - {metric: generation_mean_entropy, op: gt, value: 0}
+    - roles: [a2]
+      left: oracle_plan_ppl
+      op: lt
+      right: shuffled_plan_ppl
+    - roles: [a2]
+      metric: train_plan_emb_batch_var
+      op: gt
+      value: 0
+    - roles: [a2]
+      metric: train_plan_emb_norm
+      op: gt
+      value: 0
+  early_stop:
+    - metrics: [train_loss, train_l2_loss, train_ce_loss, train_plan_loss, train_plan_aux_loss]
+      op: any_nonfinite
+  checkpoint: {required_on_success: true}
+
+defaults:
+  config: src/configs/training_configs/ablations/owt_elfb/tier0_2_learned_main_len256.yml
+  config_overrides:
+    - epochs=1
+    - global_batch_size=512
+    - grad_accum_steps=2
+    - save_freq=0.1
+    - eval_freq=1
+    - num_samples=256
+    - reconstruction_num_samples=256
+    - train_sampling_eval_freq=2000
+    - train_sampling_eval_num_samples=64
+    - train_sampling_eval_batch_size=16
+  image_id: sha256:1e25f456cd26219ff89015a41b8653efb0db4444f911522802f850a791710de4
+  resources: {gpus: 4, cpus: 32}
+  env:
+    LOG_FREQ: "100"
+    NUM_WORKERS: "8"
+    REQUIRE_OFFLINE_CACHE: "1"
+    USE_WANDB: "false"
+  storage:
+    run_dir: /datapool/liangluocheng/elf/runs/{run_id}
+  retry: {max_infra_retries: 0}
+
+profiles:
+  wyd-h100:
+    storage:
+      data_root: /datapool/liangluocheng
+      project_data_root: /datapool/liangluocheng/elf
+      hf_home: /datapool/liangluocheng/.cache/huggingface
+      hf_datasets_cache: /datapool/liangluocheng/.cache/huggingface/datasets
+    backend:
+      kind: slurm
+      ssh_alias: wyd-l40s
+      partition: h100
+      account: lab
+      qos: normal
+      gres: gpu:h100:4
+      time: "24:00:00"
+      mount_root: /datapool
+      apptainer_cache_dir: /datapool/liangluocheng/elf/apptainer/cache
+      apptainer_tmp_dir: /datapool/liangluocheng/elf/apptainer/tmp
+      source_dir: /datapool/liangluocheng/elf/sources/{source_id}
+      sif_path: /datapool/liangluocheng/elf/images/1e25f456cd26219ff89015a41b8653efb0db4444f911522802f850a791710de4.sif
+
+runs:
+  - run_id: elf-a2-learned-mb64-ga2-h100-20260712-r1
+    research_role: a2
+    profile: wyd-h100

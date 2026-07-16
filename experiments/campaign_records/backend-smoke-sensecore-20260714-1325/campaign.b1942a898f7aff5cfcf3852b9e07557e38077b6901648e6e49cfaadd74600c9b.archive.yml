@@ -1,0 +1,8 @@
+schema_version: 1
+project: elf
+campaign: backend-smoke-sensecore-20260714-1325
+revision_id: campaign.b1942a898f7aff5cfcf3852b9e07557e38077b6901648e6e49cfaadd74600c9b
+reason: retired backend smoke campaign; no indexed run evidence
+prior_lifecycle_state: ACTIVE
+recorded_at: '2026-07-15T15:14:28.571985Z'
+record_kind: archive

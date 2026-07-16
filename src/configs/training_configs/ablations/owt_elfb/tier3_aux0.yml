@@ -1,0 +1,8 @@
+base_config: tier0_2_learned_main.yml
+
+# Tier 3: no detached UNITE-style plan-denoiser pass.
+plan_aux_passes: 0
+
+output_dir: outputs/ablations/owt_elfb/tier3_aux0
+wandb_run_name: tier3_owt_elfb_aux0
+wandb_tag: tier3,owt,elfb,aux0

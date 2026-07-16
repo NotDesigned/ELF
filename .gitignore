@@ -1,0 +1,32 @@
+# Python/cache
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+
+# Local environments
+.env
+.venv/
+venv/
+env/
+
+# Experiment outputs
+outputs/
+output_dir/
+wandb/
+papers/
+runs/
+checkpoints/
+*.log
+
+# Local model/data caches
+.cache/
+hf_cache/
+huggingface/
+
+# OS/editor noise
+.DS_Store
+Thumbs.db

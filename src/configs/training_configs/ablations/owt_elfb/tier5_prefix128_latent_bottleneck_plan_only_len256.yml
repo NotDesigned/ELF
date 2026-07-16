@@ -1,0 +1,21 @@
+base_config: tier5_prefix128_hierarchical_aligned_len256.yml
+
+# Stage-B latent bottleneck training.  Token-ELF is frozen; an independent
+# Plan-ELF sees only the observed prefix and must denoise one 768-D Sentence-T5
+# continuation target.  Only that final latent is exposed to Token-ELF.
+plan_training_mode: plan_only
+plan_denoiser_type: independent
+plan_denoiser_conditioning: prefix
+plan_denoiser_hidden_size: 768
+plan_denoiser_num_heads: 12
+plan_denoiser_depth: 12
+plan_loss_weight: 1.0
+plan_aux_passes: 0
+plan_time_schedule: aligned
+plan_time_warp_gamma: 1.0
+
+output_dir: outputs/ablations/owt_elfb/tier5_prefix128_latent_bottleneck_plan_only_len256
+resume: null
+warm_start: null
+wandb_run_name: tier5_owt_elfb_prefix128_latent_bottleneck_plan_only_len256
+wandb_tag: tier5,owt,elfb,sentence_t5,prefix128,latent_bottleneck,plan_only,len256

@@ -1,0 +1,10 @@
+base_config: tier4_independent_plan_denoiser.yml
+
+max_length: 256
+eval_ppl_max_length: 256
+
+output_dir: outputs/ablations/owt_elfb/tier4_independent_plan_denoiser_len256
+resume: null
+warm_start: null
+wandb_run_name: tier4_owt_elfb_independent_plan_denoiser_len256
+wandb_tag: tier4,owt,elfb,sentence_t5,independent_plan_denoiser,len256

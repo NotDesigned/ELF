@@ -1,0 +1,147 @@
+# syntax=docker/dockerfile:1.7
+ARG PYTORCH_IMAGE=pytorch/pytorch:2.10.0-cuda12.6-cudnn9-runtime
+FROM ${PYTORCH_IMAGE}
+
+WORKDIR /app
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_BREAK_SYSTEM_PACKAGES=1
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential \
+        ca-certificates \
+        curl \
+        git \
+        git-lfs \
+    && git lfs install --system \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt .
+RUN python -m pip install --break-system-packages --upgrade pip setuptools wheel \
+    && python -m pip install --break-system-packages -r requirements.txt
+
+ARG PROJECT_NAME=elf
+ARG BAKED_HF_HOME=/opt/elf/hf-cache
+ARG BAKED_CHECKPOINT_ROOT=/opt/elf/checkpoints
+ARG DATASET_ID=embedded-language-flows/openwebtext-t5
+ARG ENCODER_MODEL=t5-small
+ARG PRELOAD_SENTENCE_T5=false
+ARG SENTENCE_T5_MODEL=sentence-transformers/sentence-t5-xl
+ARG ELF_B_CHECKPOINT_FILE=checkpoint_95085
+ARG SOURCE_ID=unknown
+ARG GIT_COMMIT=unknown
+
+ENV PROJECT_NAME=${PROJECT_NAME} \
+    PYTHONPATH=/app/src \
+    HF_ENDPOINT=https://hf-mirror.com \
+    HF_HOME=/data/.cache/huggingface \
+    HF_DATASETS_CACHE=/data/.cache/huggingface/datasets \
+    BAKED_HF_HOME=${BAKED_HF_HOME} \
+    BAKED_CHECKPOINT_ROOT=${BAKED_CHECKPOINT_ROOT} \
+    ELF_SOURCE_ID=${SOURCE_ID} \
+    ELF_GIT_COMMIT=${GIT_COMMIT} \
+    ELF_B_OWT_CHECKPOINT=/data/${PROJECT_NAME}/checkpoints/ELF-B-owt-torch/${ELF_B_CHECKPOINT_FILE} \
+    WANDB_DIR=/data/${PROJECT_NAME}/wandb \
+    WANDB_CACHE_DIR=/data/${PROJECT_NAME}/wandb_cache \
+    SAVE_DIR=/data/${PROJECT_NAME}/saved_models \
+    NCCL_DEBUG=WARN \
+    HF_HUB_OFFLINE=1 \
+    TRANSFORMERS_OFFLINE=1 \
+    HF_DATASETS_OFFLINE=1
+
+# Bake slow network dependencies from a slim host-side Hugging Face cache.
+# Build with: --build-context hf_cache=/home/proton/.cache/elf/docker-hf-cache
+RUN --mount=type=bind,from=hf_cache,source=/,target=/host-hf-cache,readonly \
+    set -eux; \
+    encoder_cache="models--$(printf '%s' "$ENCODER_MODEL" | sed 's#/#--#g')"; \
+    dataset_arrow="$(printf '%s' "$DATASET_ID" | sed 's#/#___#g')"; \
+    mkdir -p "$BAKED_HF_HOME/hub" "$BAKED_HF_HOME/datasets"; \
+    test -d "/host-hf-cache/hub/$encoder_cache"; \
+    test -d "/host-hf-cache/datasets/$dataset_arrow"; \
+    cp -a "/host-hf-cache/hub/$encoder_cache" "$BAKED_HF_HOME/hub/"; \
+    cp -a "/host-hf-cache/datasets/$dataset_arrow" "$BAKED_HF_HOME/datasets/"; \
+    if [ "$PRELOAD_SENTENCE_T5" = "true" ]; then \
+        sentence_cache="models--$(printf '%s' "$SENTENCE_T5_MODEL" | sed 's#/#--#g')"; \
+        test -d "/host-hf-cache/hub/$sentence_cache"; \
+        cp -a "/host-hf-cache/hub/$sentence_cache" "$BAKED_HF_HOME/hub/"; \
+    fi; \
+    find "$BAKED_HF_HOME" -name '*.incomplete' -exec rm -rf {} +; \
+    find "$BAKED_HF_HOME" -type f ! -name '.baked-cache-id' -printf '%P %s\n' \
+        | LC_ALL=C sort \
+        | sha256sum \
+        | awk '{print $1}' > "$BAKED_HF_HOME/.baked-cache-id"
+
+# Bake the ELF-B OWT checkpoint for offline warm-start. Build with:
+# --build-context elf_b_ckpt=/home/proton/.cache/elf/checkpoints/ELF-B-owt-torch
+RUN --mount=type=bind,from=elf_b_ckpt,source=/,target=/host-elf-b-ckpt,readonly \
+    set -eux; \
+    elf_b_dir="$BAKED_CHECKPOINT_ROOT/ELF-B-owt-torch"; \
+    test -s "/host-elf-b-ckpt/$ELF_B_CHECKPOINT_FILE"; \
+    mkdir -p "$elf_b_dir"; \
+    cp -a /host-elf-b-ckpt/. "$elf_b_dir/"; \
+    test -s "$elf_b_dir/$ELF_B_CHECKPOINT_FILE"; \
+    find "$BAKED_CHECKPOINT_ROOT" -type f ! -name '.baked-checkpoints-id' -printf '%P %s\n' \
+        | LC_ALL=C sort \
+        | sha256sum \
+        | awk '{print $1}' > "$BAKED_CHECKPOINT_ROOT/.baked-checkpoints-id"; \
+    ls -lh "$elf_b_dir"
+
+COPY src/ src/
+COPY scripts/ scripts/
+COPY tools/ tools/
+COPY tests/ tests/
+COPY docs/ docs/
+COPY experiments/ experiments/
+COPY README.md ./
+
+RUN chmod +x scripts/launch.sh scripts/cloud_train.sh scripts/source_identity.sh tools/push_registry_image.sh \
+    && mkdir -p /data/.cache/huggingface /data/${PROJECT_NAME}/wandb \
+        /data/${PROJECT_NAME}/wandb_cache /data/${PROJECT_NAME}/outputs \
+        /data/${PROJECT_NAME}/saved_models /data/${PROJECT_NAME}/checkpoints
+
+# Prove the seed image can resolve required assets with network disabled.
+RUN HF_HOME="${BAKED_HF_HOME}" \
+    HF_DATASETS_CACHE="${BAKED_HF_HOME}/datasets" \
+    HF_HUB_OFFLINE=1 \
+    TRANSFORMERS_OFFLINE=1 \
+    HF_DATASETS_OFFLINE=1 \
+    DATASET_ID="${DATASET_ID}" \
+    ENCODER_MODEL="${ENCODER_MODEL}" \
+    PRELOAD_SENTENCE_T5="${PRELOAD_SENTENCE_T5}" \
+    SENTENCE_T5_MODEL="${SENTENCE_T5_MODEL}" \
+    BAKED_ELF_B_CHECKPOINT="${BAKED_CHECKPOINT_ROOT}/ELF-B-owt-torch/${ELF_B_CHECKPOINT_FILE}" \
+    python - <<'PY'
+import os
+
+from transformers import AutoTokenizer, T5EncoderModel
+
+from utils.data_utils import load_dataset_split
+
+
+def truthy(value: str) -> bool:
+    return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+dataset_id = os.environ["DATASET_ID"]
+encoder_model = os.environ["ENCODER_MODEL"]
+AutoTokenizer.from_pretrained(encoder_model, local_files_only=True)
+T5EncoderModel.from_pretrained(encoder_model, local_files_only=True)
+dataset = load_dataset_split(dataset_id)
+print(f"[offline-check] offline dataset rows={len(dataset)}")
+
+checkpoint = os.environ["BAKED_ELF_B_CHECKPOINT"]
+if not os.path.getsize(checkpoint):
+    raise RuntimeError(f"empty checkpoint file: {checkpoint}")
+print(f"[offline-check] ELF-B checkpoint={checkpoint} bytes={os.path.getsize(checkpoint)}")
+
+if truthy(os.environ["PRELOAD_SENTENCE_T5"]):
+    from sentence_transformers import SentenceTransformer
+
+    model = SentenceTransformer(os.environ["SENTENCE_T5_MODEL"], device="cpu")
+    print(f"[offline-check] offline Sentence-T5 dim={model.get_sentence_embedding_dimension()}")
+PY
+
+CMD ["bash"]

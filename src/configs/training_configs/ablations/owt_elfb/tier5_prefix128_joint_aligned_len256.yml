@@ -1,0 +1,12 @@
+base_config: tier0_1_sentence_t5_len256.yml
+
+# Convert each input-only OWT document into 128 observed prefix tokens followed
+# by up to 128 future tokens. This is the matched joint-attention control.
+split_input_as_prefix: true
+max_input_length: 128
+
+output_dir: outputs/ablations/owt_elfb/tier5_prefix128_joint_aligned_len256
+resume: null
+warm_start: null
+wandb_run_name: tier5_owt_elfb_prefix128_joint_aligned_len256
+wandb_tag: tier5,owt,elfb,sentence_t5,prefix128,joint,aligned,len256

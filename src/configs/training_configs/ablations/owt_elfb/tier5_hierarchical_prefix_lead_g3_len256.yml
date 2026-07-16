@@ -1,0 +1,10 @@
+base_config: tier5_hierarchical_prefix_lead_g3.yml
+
+max_length: 256
+eval_ppl_max_length: 256
+
+output_dir: outputs/ablations/owt_elfb/tier5_hierarchical_prefix_lead_g3_len256
+resume: null
+warm_start: null
+wandb_run_name: tier5_owt_elfb_hierarchical_prefix_lead_g3_len256
+wandb_tag: tier5,owt,elfb,sentence_t5,hierarchical_prefix,noise_power,gamma3,len256

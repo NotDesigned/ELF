@@ -1,0 +1,166 @@
+schema_version: 1
+campaign: fusion-prefix128-plan-first-sampling-smoke-sensecore-20260716-c3
+project: elf
+source_id: auto
+local_root: outputs/experiment_campaigns
+
+# Post-hoc mechanism screen on one completed hierarchical checkpoint.  The
+# checkpoint was trained with aligned token/plan times, so this smoke decides
+# whether the strict two-phase inference path is operational and promising; it
+# is not evidence for or against matched plan-first training.
+research_contract:
+  schema_version: 1
+  question: >-
+    At matched checkpoint, data, seed, initial noise, SDE gamma, and either
+    token-step or total-NFE budgets, does strict plan-first sampling improve
+    free-generation quality and sampled-plan identity over joint sampling?
+  required_roles: [joint32, planfirst32x32, joint64_compute]
+  required_metrics:
+    common:
+      - g_ppl
+      - mauve
+      - generation_mean_entropy
+      - generation_nonempty_fraction
+      - oracle_plan_ppl
+      - shuffled_plan_ppl
+      - token_recon_ppl
+      - sampled_plan_num_samples
+      - sampled_plan_var_ratio
+      - sampled_clean_plan_cosine
+      - sampled_clean_plan_retrieval_lift
+  required_artifacts:
+    common:
+      evaluation_metrics: {min_records: 4}
+      generated_samples: {min_nonempty_records: 16}
+      reconstructed_samples: {min_nonempty_records: 16}
+  terminal_checks:
+    - {metric: generation_nonempty_fraction, op: gt, value: 0.90}
+    - {metric: generation_mean_entropy, op: gt, value: 1.0}
+    - {metric: sampled_plan_num_samples, op: gte, value: 16}
+  checkpoint: {required_on_success: false}
+  comparison:
+    match_fields:
+      - source_id
+      - image_id
+      - resolved_config.data_path
+      - resolved_config.num_samples
+      - resolved_config.reconstruction_num_samples
+      - resolved_config.eval_sampled_plan_diagnostics
+      - backend.kind
+      - backend.worker_spec
+      - backend.worker_nodes
+      - backend.quota_type
+
+defaults:
+  operation: evaluate
+  config: src/configs/training_configs/ablations/owt_elfb/tier5_prefix128_hierarchical_aligned_len256.yml
+  evaluation:
+    checkpoint_path: /data/elf/runs/elf-p128-tri-s42-sco-0716-r2/checkpoint_19017
+    seeds: [42]
+  image_id: sha256:0433dbaca676f24f6a377bf591b4f0d0e2dfd84e929569b3c0258abbe33212c0
+  resources: {gpus: 1, nodes: 1, cpus: 8, max_time: 2h}
+  env:
+    ELF_EVAL_DATA_ID: sha256:ecff221a9bcea13f64ddce845e1b4918c6fc618608de3568413503ea7888bdf5
+    NUM_WORKERS: "2"
+    REQUIRE_OFFLINE_CACHE: "1"
+    USE_WANDB: "false"
+  storage:
+    run_dir: /data/elf/runs/{run_id}
+  retry: {max_infra_retries: 0}
+
+profiles:
+  sensecore-1gpu-spot:
+    storage:
+      data_root: /data
+      project_data_root: /data/elf
+      hf_home: /data/.cache/huggingface
+      hf_datasets_cache: /data/.cache/huggingface/datasets
+    backend:
+      kind: sensecore
+      workspace: share-space-01e
+      aec2: computing-cluster-01e
+      job_name: "{run_id}"
+      display_name: "{run_id}"
+      worker_spec: N6lS.Iu.I10.1.8c128g
+      worker_nodes: 1
+      priority: NORMAL
+      quota_type: spot
+      wait: true
+      image: registry.cn-sh-01.sensecore.cn/ccr-zhicheng-02/elf:runtime-b1cec9d07342b5ae27322be4a93dd883e926d7e0777896763d1d932d06f2db68
+      storage_mount: 01995896-d54c-7816-90b3-0ce73bce9936/L202500224:/data
+
+runs:
+  - run_id: elf-p128-pfirst-j32-s42-sco-0716-r3
+    research_role: joint32
+    profile: sensecore-1gpu-spot
+    config_overrides:
+      - global_batch_size=null
+      - batch_size=16
+      - num_samples=16
+      - reconstruction_eval=true
+      - reconstruction_num_samples=16
+      - eval_sampled_plan_diagnostics=true
+      - eval_mauve=true
+      - eval_mauve_model=gpt2-large
+      - data_path=/data/elf/eval_data/openwebtext-t5-head256-v1
+      - train_sampling_eval_freq=0
+      - sampling_configs_path=src/configs/sampling_configs/uncond_sampling_steps32.yml
+    evaluation:
+      canonical_family_dimensions:
+        sampling_method: sde
+        num_sampling_steps: 32
+        cfg: 1.0
+        self_cond_cfg_scale: 3.0
+        time_schedule: logit_normal
+        time_warp_gamma: 1.5
+
+  - run_id: elf-p128-pfirst-p32t32-s42-sco-0716-r3
+    research_role: planfirst32x32
+    profile: sensecore-1gpu-spot
+    config_overrides:
+      - global_batch_size=null
+      - batch_size=16
+      - num_samples=16
+      - reconstruction_eval=true
+      - reconstruction_num_samples=16
+      - eval_sampled_plan_diagnostics=true
+      - eval_mauve=true
+      - eval_mauve_model=gpt2-large
+      - data_path=/data/elf/eval_data/openwebtext-t5-head256-v1
+      - train_sampling_eval_freq=0
+      - sampling_configs_path=src/configs/sampling_configs/cond_sampling_plan_first32_token32.yml
+    evaluation:
+      canonical_family_dimensions:
+        sampling_method: sde
+        num_sampling_steps: 32
+        cfg: 1.0
+        self_cond_cfg_scale: 3.0
+        time_schedule: logit_normal
+        time_warp_gamma: 1.5
+        plan_sampling_mode: plan_first
+        plan_num_sampling_steps: 32
+        total_model_evaluations: 64
+
+  - run_id: elf-p128-pfirst-j64-s42-sco-0716-r3
+    research_role: joint64_compute
+    profile: sensecore-1gpu-spot
+    config_overrides:
+      - global_batch_size=null
+      - batch_size=16
+      - num_samples=16
+      - reconstruction_eval=true
+      - reconstruction_num_samples=16
+      - eval_sampled_plan_diagnostics=true
+      - eval_mauve=true
+      - eval_mauve_model=gpt2-large
+      - data_path=/data/elf/eval_data/openwebtext-t5-head256-v1
+      - train_sampling_eval_freq=0
+      - sampling_configs_path=src/configs/sampling_configs/uncond_sampling_steps64_gamma15.yml
+    evaluation:
+      canonical_family_dimensions:
+        sampling_method: sde
+        num_sampling_steps: 64
+        cfg: 1.0
+        self_cond_cfg_scale: 3.0
+        time_schedule: logit_normal
+        time_warp_gamma: 1.5

@@ -1,0 +1,177 @@
+schema_version: 1
+project: elf
+title: ELF plan-token fusion
+run_roots:
+  - outputs/experiment_campaigns
+controller:
+  python: /opt/ml-expd/venv/bin/python
+  experimentctl: tools/experimentctl.py
+  workdir: .
+  capabilities:
+    submit_outbox: true
+    run_identity_v2: true
+    authored_campaign_revision: true
+    cancel_outbox: true
+    evaluate: false
+    refresh_evidence_local: true
+  execution_bundle:
+    entry_module: elf_experiments.controller
+    paths:
+      - tools/experimentctl.py
+      - src/elf_experiments
+      - src/configs
+    python_packages:
+      - yaml
+    require_clean_git: true
+campaigns:
+  - name: fusion-latent-bottleneck-plan-only-sensecore-20260716-c2
+    file: experiments/campaigns/fusion_latent_bottleneck_plan_only_sensecore_20260716.yml
+  - name: fusion-oracle-capacity-probe-train-sensecore-20260716-c2
+    file: experiments/campaigns/fusion_oracle_capacity_probe_train_sensecore_20260716.yml
+  - name: fusion-prefix128-matched-plan-first-train-sensecore-20260716-c1
+    file: experiments/campaigns/fusion_prefix128_matched_plan_first_train_sensecore_20260716.yml
+    role_notes:
+      aligned_continue: matched continuation control trained with aligned plan/token time
+      planfirst_continue: matched continuation trained with separate plan and token phases
+  - name: fusion-prefix128-plan-first-sampling-smoke-sensecore-20260716-c3
+    file: experiments/campaigns/fusion_prefix128_plan_first_sampling_smoke_sensecore_20260716.yml
+  - name: fusion-prefix128-sampled-plan-eval-sensecore-20260716-c1
+    file: experiments/campaigns/fusion_prefix128_sampled_plan_eval_sensecore_20260716.yml
+  - name: fusion-prefix128-sampled-plan-eval-smoke-sensecore-20260716-c1
+    file: experiments/campaigns/fusion_prefix128_sampled_plan_eval_smoke_sensecore_20260716.yml
+  - name: fusion-clean-vs-t5-plan-quality-stage-a-h200-20260715-c3
+    file: experiments/campaigns/fusion_clean_vs_t5_plan_quality_stage_a_h200_20260715.yml
+  - name: fusion-clean-vs-t5-plan-quality-stage-a-smoke-h200-20260715-c3
+    file: experiments/campaigns/fusion_clean_vs_t5_plan_quality_stage_a_smoke_h200_20260715.yml
+  - name: fusion-len256-gate-slurm-20260711
+    file: experiments/campaigns/fusion_len256_gate_slurm_20260711.yml
+  - name: fusion-len256-gate-slurm-v2-20260711
+    file: experiments/campaigns/fusion_len256_gate_slurm_v2_20260711.yml
+  - name: backend-smoke-sensecore-20260711
+    file: experiments/campaigns/backend_smoke_sensecore_20260711.yml
+  - name: backend-smoke-slurm-20260711
+    file: experiments/campaigns/backend_smoke_slurm_20260711.yml
+  - name: fusion-strict-hierarchical-prefix128-h200-20260716-c1
+    file: experiments/campaigns/fusion_strict_hierarchical_prefix128_h200_20260716.yml
+    role_notes:
+      two_block_triangular: original aligned mask with prefix and plan in one upstream block
+      strict_prefix_plan_future: aligned mask with plan-to-prefix feedback removed
+  - name: fusion-strict-hierarchical-prefix128-smoke-h200-20260716-c2
+    file: experiments/campaigns/fusion_strict_hierarchical_prefix128_smoke_h200_20260716.yml
+    role_notes:
+      two_block_triangular: one-GPU operational control for the existing mask
+      strict_prefix_plan_future: one-GPU operational gate for the strict mask
+  - name: fusion-hierarchical-prefix128-plan-lead-h200-20260715-c2
+    file: experiments/campaigns/fusion_hierarchical_prefix128_plan_lead_h200_20260715.yml
+    role_notes:
+      joint_aligned: prefix128 conditional control with joint plan/future attention
+      triangular_aligned: matched prefix -> plan -> future topology with aligned time
+      triangular_lead_g3: matched prefix topology plus gamma-3 plan-leading time
+  - name: fusion-hierarchical-prefix128-plan-lead-smoke-h200-20260715-c2
+    file: experiments/campaigns/fusion_hierarchical_prefix128_plan_lead_smoke_h200_20260715.yml
+    role_notes:
+      joint_aligned: operational conditional joint-attention control
+      triangular_aligned: operational prefix mask and block-triangular treatment
+      triangular_lead_g3: operational prefix topology plus gamma-3 schedule treatment
+  - name: fusion-hierarchical-plan-lead-h200-20260715-c2
+    file: experiments/campaigns/fusion_hierarchical_plan_lead_h200_20260715.yml
+    role_notes:
+      joint_aligned: shared-trunk bidirectional attention with aligned plan/token time
+      triangular_aligned: matched shared-trunk block-triangular attention with aligned time
+      triangular_lead_g3: matched block-triangular treatment with gamma-3 plan-leading time
+  - name: fusion-hierarchical-plan-lead-smoke-h200-20260715-c2
+    file: experiments/campaigns/fusion_hierarchical_plan_lead_smoke_h200_20260715.yml
+    role_notes:
+      joint_aligned: operational joint-attention control
+      triangular_aligned: operational mask and prefix-plumbing treatment
+      triangular_lead_g3: operational mask plus gamma-3 schedule treatment
+  - name: fusion-independent-plan-denoiser-h200-20260715-c2
+    file: experiments/campaigns/fusion_independent_plan_denoiser_h200_20260715_c2.yml
+    role_notes:
+      shared: frozen-T5 shared-trunk control on four matched H200 GPUs
+      independent: matched-depth independent plan-only ELF treatment on the same H200 resource shape
+  - name: fusion-independent-plan-denoiser-smoke-h200-20260715-c2
+    file: experiments/campaigns/fusion_independent_plan_denoiser_smoke_h200_20260715_c2.yml
+    role_notes:
+      shared: clean H200 smoke after immutable source staging was verified
+      independent: matched-depth independent prior using the same staged source and H200 resource shape
+  - name: fusion-independent-plan-denoiser-smoke-h200-20260715-c1
+    file: experiments/campaigns/fusion_independent_plan_denoiser_smoke_h200_20260715.yml
+    role_notes:
+      shared: H200 replacement smoke after H100 queue cancellation
+      independent: matched-depth independent prior on the same H200 resource shape
+  - name: fusion-independent-plan-denoiser-smoke-h100-20260715-c1
+    file: experiments/campaigns/fusion_independent_plan_denoiser_smoke_h100_20260715.yml
+    role_notes:
+      shared: execution control using the shared ELF trunk plan predictor
+      independent: execution treatment using the matched-depth plan-only ELF predictor
+  - name: fusion-independent-plan-denoiser-h100-20260715-c1
+    file: experiments/campaigns/fusion_independent_plan_denoiser_h100_20260715.yml
+    role_notes:
+      shared: frozen-T5 plan predictor in the shared ELF trunk
+      independent: frozen-T5 plan predictor in an independent 12-block plan-only ELF stack
+  - name: fusion-aux-ratio-eval-f32-h200-20260715-c4
+    file: experiments/campaigns/fusion_aux_ratio_eval_f32_h200_20260715.yml
+    role_notes:
+      aux0: completed H100 aux0 checkpoint, paired oracle/shuffled evaluation
+      aux1: completed H100 aux1 checkpoint, paired oracle/shuffled evaluation
+      aux2: completed H100 aux2 checkpoint, paired oracle/shuffled evaluation
+  - name: fusion-aux-ratio-eval-f64-h200-20260715-c4
+    file: experiments/campaigns/fusion_aux_ratio_eval_f64_h200_20260715.yml
+    role_notes:
+      aux0: completed H100 aux0 checkpoint, paired oracle/shuffled evaluation
+      aux1: completed H100 aux1 checkpoint, paired oracle/shuffled evaluation
+      aux2: completed H100 aux2 checkpoint, paired oracle/shuffled evaluation
+  - name: backend-smoke-sensecore-20260714-1419
+    file: experiments/campaigns/backend_smoke_sensecore_20260714_1419.yml
+    role_notes:
+      smoke: operational-only one-GPU spot validation with microbatch 8; excluded from scientific comparisons
+  - name: backend-smoke-sensecore-20260714-1325
+    file: experiments/campaigns/backend_smoke_sensecore_20260714_1325.yml
+    role_notes:
+      smoke: one-GPU spot validation of AFS mount, offline assets, process startup, and first metric
+  - name: fusion-aux-ratio-ga2-h100-20260714-c1
+    file: experiments/campaigns/fusion_aux_ratio_ga2_h100_20260714.yml
+    role_notes:
+      aux0: matched H100 control; no detached learned-plan denoiser pass
+      aux1: matched H100 treatment; one detached learned-plan denoiser pass
+      aux2: matched H100 treatment; two detached learned-plan denoiser passes
+  - name: fusion-aux-ratio-ga2-h200-20260714-c2
+    file: experiments/campaigns/fusion_aux_ratio_ga2_h200_20260714.yml
+    role_notes:
+      aux0: clean r2 replacement; no detached learned-plan denoiser pass
+      aux1: clean r2 replacement; one detached learned-plan denoiser pass
+      aux2: clean r2 replacement; two detached learned-plan denoiser passes
+  - name: fusion-a2-mb64-ga2-h100-20260712-c1
+    file: experiments/campaigns/fusion_a2_mb64_ga2_h100_20260712.yml
+    role_notes:
+      a2: learned-plan recovery run at effective global batch 512 with microbatch 64 and GA2
+  - name: fusion-a2-mb64-ga2-h100-smoke-20260712-c1
+    file: experiments/campaigns/fusion_a2_mb64_ga2_h100_smoke_20260712.yml
+  - name: fusion-aux-ratio-ga2-h200-20260712-c1
+    file: experiments/campaigns/fusion_aux_ratio_ga2_h200_20260712.yml
+    role_notes:
+      aux0: no detached learned-plan denoiser pass
+      aux1: one detached learned-plan denoiser pass
+      aux2: two detached learned-plan denoiser passes
+  - name: fusion-aux-ratio-ga2-h200-smoke-20260712-c1
+    file: experiments/campaigns/fusion_aux_ratio_ga2_h200_smoke_20260712.yml
+  - name: fusion-a1-warmstart-a0-h100-20260712-c2
+    file: experiments/campaigns/fusion_a1_warmstart_a0_h100_20260712.yml
+    role_notes:
+      a0_warm: pure-ELF control warm-started from A0 checkpoint 19017
+      a1_warm: frozen Sentence-T5 treatment from the same A0 checkpoint
+  - name: backend-smoke-slurm-20260712T052559Z
+    file: experiments/campaigns/backend_smoke_slurm_20260712T052559Z.yml
+  - name: backend-smoke-slurm-20260712T051912Z
+    file: experiments/campaigns/backend_smoke_slurm_20260712T051912Z.yml
+  - name: backend-smoke-slurm-20260712T050714Z
+    file: experiments/campaigns/backend_smoke_slurm_20260712T050714Z.yml
+  - name: fusion-len256-gate-h100-20260711
+    file: experiments/campaigns/fusion_len256_gate_h100_20260711.yml
+    role_notes:
+      a0: pure ELF baseline（无 plan 对照）
+      a1: frozen Sentence-T5 teacher（plan 通路 sanity / 上界参考）
+      a2: learned plan + 1 detached aux pass（主实验）
+      a3: learned plan without aux（aux 必要性消融）
+research_questions_dir: experiments/research_questions

@@ -1,0 +1,13 @@
+base_config: tier0_1_sentence_t5.yml
+
+# Prefix/plan is the upstream group. Future-token rows may read it, but no
+# upstream query may read a future-token key in any ELF block.
+plan_attention_topology: hierarchical_prefix
+plan_time_schedule: aligned
+plan_time_warp_gamma: 1.0
+
+output_dir: outputs/ablations/owt_elfb/tier5_hierarchical_prefix
+resume: null
+warm_start: null
+wandb_run_name: tier5_owt_elfb_hierarchical_prefix
+wandb_tag: tier5,owt,elfb,sentence_t5,hierarchical_prefix,aligned

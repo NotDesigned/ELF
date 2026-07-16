@@ -1,0 +1,13 @@
+base_config: tier0_1_sentence_t5.yml
+
+# Tier 4: keep the frozen Sentence-T5 target and token-conditioning adapter,
+# but predict the clean plan with a separate plan-only DiT instead of the
+# shared ELF token trunk.
+plan_denoiser_type: independent
+plan_denoiser_depth: 12
+
+output_dir: outputs/ablations/owt_elfb/tier4_independent_plan_denoiser
+resume: null
+warm_start: null
+wandb_run_name: tier4_owt_elfb_independent_plan_denoiser
+wandb_tag: tier4,owt,elfb,sentence_t5,independent_plan_denoiser

@@ -1,15 +1,18 @@
+import json
 import logging
 import os
-import pickle
+import random
 import re
-from typing import Any, Optional, Tuple
+import tempfile
+import time
+from typing import Any, Dict, Optional, Tuple
 
-import jax
-import jax.numpy as jnp
-from flax import serialization
-from flax.training import checkpoints
+import numpy as np
+import torch
+import torch.distributed as dist
 
-from utils.logging_utils import log_for_0
+from utils.logging_utils import log_for_0, _process_index
+from utils.train_utils import unwrap_model
 
 
 def _local_path(path: str) -> str:
@@ -17,17 +20,15 @@ def _local_path(path: str) -> str:
 
 
 def upload_output_dir_to_hf(output_dir: str, hf_repo_id: Optional[str], reason: str = "artifacts"):
-    if not hf_repo_id or jax.process_index() != 0:
+    if not hf_repo_id or _process_index() != 0:
         return
-
     folder_path = _local_path(output_dir)
     if not os.path.isdir(folder_path):
-        log_for_0(f"HF upload skipped; output directory does not exist: {folder_path}", level=logging.WARNING)
+        log_for_0(f"HF upload skipped; output directory does not exist: {folder_path}",
+                  level=logging.WARNING)
         return
-
     try:
         from huggingface_hub import HfApi
-
         repo_id = hf_repo_id.strip("/")
         api = HfApi()
         api.create_repo(repo_id, repo_type="model", exist_ok=True)
@@ -45,106 +46,110 @@ def _split_hf_path(path: str, min_parts: int) -> Optional[Tuple[str, str]]:
         return None
     if os.path.exists(_local_path(path)):
         return None
-
     parts = path.split("/")
     if len(parts) < min_parts:
         return None
-
-    repo_id = "/".join(parts[:2])
-    sub_path = "/".join(parts[2:])
-    return repo_id, sub_path
+    return "/".join(parts[:2]), "/".join(parts[2:])
 
 
-
-def save_checkpoint(state: Any, output_dir: str, step: int, hf_repo_id: str = None):
-    """Save model checkpoint locally, optionally mirroring the output dir to HF."""
-    state = jax.device_get(jax.tree_util.tree_map(lambda x: x[0], state))
-    state_dict = {
-        "params": state.params,
-        "ema_params1": state.ema_params1,
-        "opt_state": state.opt_state,
-        "step": int(state.step),
-        "epoch": int(state.epoch),
-        "dropout_rng": state.dropout_rng,
+def _capture_rng_state(state) -> Dict[str, Any]:
+    numpy_state = np.random.get_state()
+    return {
+        "python": random.getstate(),
+        "numpy": {
+            "bit_generator": numpy_state[0],
+            "keys": numpy_state[1].tolist(),
+            "position": numpy_state[2],
+            "has_gauss": numpy_state[3],
+            "cached_gaussian": numpy_state[4],
+        },
+        "torch_cpu": torch.get_rng_state(),
+        "torch_cuda": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
+        "dropout": (
+            state.dropout_generator.get_state()
+            if state.dropout_generator is not None else None
+        ),
     }
 
+
+def _gather_rng_states(state):
+    local_state = _capture_rng_state(state)
+    if not (dist.is_available() and dist.is_initialized()):
+        return [local_state]
+    states = [None] * dist.get_world_size()
+    dist.all_gather_object(states, local_state)
+    return states
+
+
+def _fsync_dir(path: str) -> None:
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _atomic_torch_save(payload: Dict[str, Any], path: str) -> int:
+    fd, temp_path = tempfile.mkstemp(prefix=f".{os.path.basename(path)}.", suffix=".tmp", dir=os.path.dirname(path))
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            torch.save(payload, handle)
+            handle.flush()
+            os.fsync(handle.fileno())
+        size = os.path.getsize(temp_path)
+        os.replace(temp_path, path)
+        _fsync_dir(os.path.dirname(path))
+        return size
+    finally:
+        if os.path.exists(temp_path):
+            os.unlink(temp_path)
+
+
+def _write_completion_marker(path: str, *, size: int, step: int) -> None:
+    marker = f"{path}.complete"
+    fd, temp_path = tempfile.mkstemp(prefix=f".{os.path.basename(marker)}.", suffix=".tmp", dir=os.path.dirname(path))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump({"bytes": size, "step": int(step), "completed_at": time.time()}, handle, sort_keys=True)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_path, marker)
+        _fsync_dir(os.path.dirname(path))
+    finally:
+        if os.path.exists(temp_path):
+            os.unlink(temp_path)
+
+
+def save_checkpoint(state, output_dir: str, step: int, hf_repo_id: str = None):
+    """Atomically save an optimizer-boundary checkpoint and completion marker."""
+    if int(getattr(state, "accum_step", 0)) != 0:
+        raise RuntimeError("refusing to checkpoint inside a gradient accumulation window")
+
+    rng_states = _gather_rng_states(state)
+    if _process_index() != 0:
+        return
     ckpt_dir = _local_path(output_dir)
     os.makedirs(ckpt_dir, exist_ok=True)
-    log_for_0(f"Saving checkpoint to {ckpt_dir}")
-
-    checkpoints.save_checkpoint_multiprocess(
-        ckpt_dir, state_dict, step, keep=10, overwrite=True,
-    )
-
-    log_for_0(f"Checkpoint written to {ckpt_dir}")
+    inner_model = unwrap_model(state.model)
+    payload = {
+        "params": inner_model.state_dict(),
+        "ema_params1": state.ema_params1,
+        "opt_state": state.optimizer.state_dict(),
+        "lr_scheduler": state.lr_scheduler.state_dict() if state.lr_scheduler is not None else None,
+        "step": int(state.step),
+        "micro_step": int(getattr(state, "micro_step", state.step)),
+        "optimizer_step": int(getattr(state, "optimizer_step", 0)),
+        "accum_step": 0,
+        "epoch": float(state.epoch),
+        "rng_states": rng_states,
+    }
+    out_path = os.path.join(ckpt_dir, f"checkpoint_{step}")
+    log_for_0(f"Saving checkpoint to {out_path}")
+    size = _atomic_torch_save(payload, out_path)
+    _write_completion_marker(out_path, size=size, step=step)
+    log_for_0(f"Checkpoint committed to {out_path} ({size} bytes)")
     upload_output_dir_to_hf(output_dir, hf_repo_id, reason="checkpoint")
-
-# ============================================
-# Encoder checkpoint (single pickle file)
-# ============================================
-
-def load_encoder_checkpoint(checkpoint_path: str):
-    """Load a pickled encoder checkpoint from HF first, then local fallback.
-
-    HF form: '<org>/<repo>/<filename>'.
-    """
-    if not checkpoint_path:
-        raise ValueError(
-            "encoder_checkpoint is not set. Provide a local path or HF Hub path "
-            "like 'embedded-language-flows/t5_small_encoder_jax/t5_small_encoder_jax.pkl'."
-        )
-
-    log_for_0(f"Loading encoder checkpoint from {checkpoint_path}...")
-    loaded_params, loaded_from = None, None
-    errors = []
-
-    try:
-        hf_path = _download_hf_file(checkpoint_path)
-        if hf_path:
-            loaded_params = _load_pickle(hf_path)
-            loaded_from = "HF"
-    except Exception as e:
-        errors.append(f"HF: {e}")
-        log_for_0(f"HF encoder checkpoint load failed ({e}); falling back to local path.")
-
-    if loaded_params is None:
-        local_path = _local_path(checkpoint_path)
-        try:
-            loaded_params = _load_pickle(local_path)
-            loaded_from = "local"
-        except Exception as e:
-            errors.append(f"local: {e}")
-            raise FileNotFoundError(
-                f"Failed to load encoder checkpoint from {checkpoint_path}. "
-                f"Tried: {'; '.join(errors)}"
-            ) from e
-
-    if isinstance(loaded_params, dict) and "params" in loaded_params:
-        loaded_params = loaded_params["params"]
-    log_for_0(f"Loaded {loaded_from} encoder checkpoint.")
-    return loaded_params
-
-
-def _load_pickle(path: str):
-    log_for_0(f"Loading encoder checkpoint from {path}...")
-    with open(path, "rb") as f:
-        return pickle.load(f)
-
-
-def _download_hf_file(path: str) -> Optional[str]:
-    """Download a single file from HF Hub and return its local cache path."""
-    hf_path = _split_hf_path(path, min_parts=3)
-    if hf_path is None:
-        return None
-    repo_id, filename = hf_path
-
-    try:
-        from huggingface_hub import hf_hub_download
-
-        log_for_0(f"Downloading checkpoint file from HF: {repo_id}/{filename}")
-        return hf_hub_download(repo_id=repo_id, filename=filename, repo_type="model")
-    except Exception as e:
-        raise FileNotFoundError(f"HF checkpoint file not found: {path} ({e})") from e
 
 
 def _checkpoint_step(checkpoint_name: str) -> int:
@@ -153,19 +158,23 @@ def _checkpoint_step(checkpoint_name: str) -> int:
     return int(match.group(1)) if match else -1
 
 
-# ============================================
-# Resume: list + load (local or HF)
-# ============================================
-
 def find_all_checkpoints(ckpt_dir: str, prefix: str = "checkpoint_"):
-    """Find local checkpoint paths in a directory, sorted by step ascending."""
+    """Find marker-validated local checkpoints, sorted by microstep ascending."""
     ckpt_dir = _local_path(ckpt_dir)
     if not os.path.isdir(ckpt_dir):
         return []
-    names = sorted(
-        [f for f in os.listdir(ckpt_dir) if f.startswith(prefix)],
-        key=_checkpoint_step,
-    )
+    pattern = re.compile(rf"^{re.escape(prefix)}\d+$")
+    names = []
+    for name in os.listdir(ckpt_dir):
+        path = os.path.join(ckpt_dir, name)
+        if not pattern.fullmatch(name) or not os.path.isfile(path):
+            continue
+        try:
+            _validate_completion_marker(path)
+        except (KeyError, OSError, TypeError, ValueError, json.JSONDecodeError):
+            continue
+        names.append(name)
+    names.sort(key=_checkpoint_step)
     return [os.path.join(ckpt_dir, name) for name in names]
 
 
@@ -176,14 +185,11 @@ def find_latest_checkpoint(ckpt_dir: str, prefix: str = "checkpoint_"):
 
 
 def _download_hf_checkpoint(checkpoint_path: str) -> Optional[str]:
-    """Download an HF checkpoint snapshot and return the local checkpoint path."""
     hf_path = _split_hf_path(checkpoint_path, min_parts=2)
     if hf_path is None:
         return None
     repo_id, sub_path = hf_path
-
     from huggingface_hub import snapshot_download
-
     log_for_0(f"Downloading checkpoint from HF: {repo_id}" + (f"/{sub_path}" if sub_path else ""))
     local_dir = snapshot_download(
         repo_id=repo_id, repo_type="model",
@@ -192,68 +198,72 @@ def _download_hf_checkpoint(checkpoint_path: str) -> Optional[str]:
     return os.path.join(local_dir, sub_path) if sub_path else local_dir
 
 
-def _checkpoint_target(state_template: Any):
-    return {
-        "params": state_template.params,
-        "ema_params1": state_template.ema_params1,
-        "opt_state": state_template.opt_state,
-        "step": state_template.step,
-        "epoch": state_template.epoch,
-        "dropout_rng": state_template.dropout_rng,
-    }
+def _validate_completion_marker(path: str) -> None:
+    marker_path = f"{path}.complete"
+    if not os.path.isfile(marker_path):
+        raise ValueError(f"checkpoint has no completion marker: {marker_path}")
+    with open(marker_path, "r", encoding="utf-8") as handle:
+        marker = json.load(handle)
+    if not isinstance(marker, dict) or not isinstance(marker.get("bytes"), int):
+        raise ValueError(f"checkpoint completion marker is invalid: {marker_path}")
+    expected_step = _checkpoint_step(os.path.basename(path))
+    if expected_step >= 0 and marker.get("step") != expected_step:
+        raise ValueError(
+            f"checkpoint step does not match completion marker: "
+            f"expected {expected_step}, got {marker.get('step')!r}"
+        )
+    expected_size = marker["bytes"]
+    actual_size = os.path.getsize(path)
+    if actual_size != expected_size:
+        raise ValueError(
+            f"checkpoint size does not match completion marker: expected {expected_size}, got {actual_size}"
+        )
 
 
-def _restore_checkpoint(checkpoint_path: str, target: Any):
-    """Restore a checkpoint from a file or directory.
-
-    Tries (in order):
-      1. flax.serialization.from_bytes on a file (format written by save_checkpoint)
-      2. flax.training.checkpoints.restore_checkpoint for HF pre-trained checkpoints
-         that may have been saved with the old Flax msgpack / orbax format.
-    """
+def _restore_checkpoint(checkpoint_path: str, *, require_complete: bool = False) -> Any:
+    """Restore a checkpoint from a file or directory (latest inside dir)."""
     local = _local_path(checkpoint_path)
-
-    # Resolve directory → latest checkpoint file
-    resolved = local
     if os.path.isdir(local):
-        latest = find_latest_checkpoint(local)
-        if latest is not None and os.path.isfile(latest):
-            resolved = latest
+        if require_complete:
+            errors = []
+            for candidate in reversed(find_all_checkpoints(local)):
+                try:
+                    _validate_completion_marker(candidate)
+                    return torch.load(candidate, map_location="cpu")
+                except Exception as exc:
+                    errors.append(f"{os.path.basename(candidate)}: {exc}")
+            detail = "; ".join(errors) if errors else "no completed checkpoints"
+            raise ValueError(f"no valid completed checkpoint in {local}: {detail}")
+        else:
+            legacy = [
+                os.path.join(local, name)
+                for name in os.listdir(local)
+                if re.fullmatch(r"checkpoint_\d+", name)
+            ]
+            resolved = max(legacy, key=lambda path: _checkpoint_step(os.path.basename(path)), default=None)
+            if resolved is not None:
+                return torch.load(resolved, map_location="cpu")
+            return None
+    if os.path.isfile(local):
+        if require_complete:
+            _validate_completion_marker(local)
+        return torch.load(local, map_location="cpu")
+    return None
 
-    if os.path.isfile(resolved):
-        try:
-            with open(resolved, "rb") as f:
-                data = f.read()
-            return serialization.from_bytes(target, data)
-        except Exception:
-            pass
 
-    # Fallback: old Flax/orbax format (e.g., HF pre-trained checkpoints saved before
-    # this change).
-    try:
-        from flax.training import checkpoints as _ckpts
-        return _ckpts.restore_checkpoint(local, target=target)
-    except Exception:
-        return None
-
-
-def _validate_checkpoint(ckpt: Any):
+def _validate_checkpoint(ckpt: Any, require_optimizer: bool = True):
     if ckpt is None:
         raise ValueError("checkpoint restore returned None")
-    required_keys = ("params", "opt_state", "step", "epoch", "dropout_rng")
+    required_keys = ["params", "step", "epoch"]
+    if require_optimizer:
+        required_keys.append("opt_state")
     missing_keys = [key for key in required_keys if key not in ckpt]
     if missing_keys:
         raise ValueError(f"checkpoint restore missing keys: {missing_keys}")
 
 
-def load_checkpoint(checkpoint_path: str, state_template: Any) -> Tuple[Any, int]:
-    """Load an ELF checkpoint.
-
-    Uses an existing local path first; otherwise tries HF and then local fallback.
-    """
-    log_for_0(f"Loading ELF checkpoint from {checkpoint_path}...")
-
-    target = _checkpoint_target(state_template)
+def _load_checkpoint_payload(checkpoint_path: str, require_optimizer: bool) -> Tuple[Any, str]:
+    """Load a checkpoint payload from local path or HF fallback."""
     ckpt, loaded_from = None, None
     errors = []
 
@@ -261,8 +271,13 @@ def load_checkpoint(checkpoint_path: str, state_template: Any) -> Tuple[Any, int
     if os.path.exists(local_path):
         try:
             log_for_0(f"Loading local checkpoint from {local_path}...")
-            ckpt = _restore_checkpoint(local_path, target)
-            _validate_checkpoint(ckpt)
+            # A directory is an implicit "latest" selection. Only committed
+            # payloads may participate, including evaluation and warm starts.
+            # Explicit files retain legacy/HF-compatible behavior for callers
+            # that intentionally name one payload.
+            require_complete = require_optimizer or os.path.isdir(local_path)
+            ckpt = _restore_checkpoint(local_path, require_complete=require_complete)
+            _validate_checkpoint(ckpt, require_optimizer=require_optimizer)
             loaded_from = "local"
         except Exception as e:
             errors.append(f"local: {e}")
@@ -272,38 +287,163 @@ def load_checkpoint(checkpoint_path: str, state_template: Any) -> Tuple[Any, int
             hf_path = _download_hf_checkpoint(checkpoint_path)
             if hf_path:
                 log_for_0(f"Loading HF checkpoint from {hf_path}...")
-                ckpt = _restore_checkpoint(hf_path, target)
-                _validate_checkpoint(ckpt)
+                ckpt = _restore_checkpoint(hf_path, require_complete=False)
+                _validate_checkpoint(ckpt, require_optimizer=require_optimizer)
                 loaded_from = "HF"
         except Exception as e:
             errors.append(f"HF: {e}")
             log_for_0(f"HF checkpoint restore failed ({e}); falling back to local path.")
 
-    if ckpt is None and not os.path.exists(local_path):
-        try:
-            log_for_0(f"Loading local checkpoint from {local_path}...")
-            ckpt = _restore_checkpoint(local_path, target)
-            _validate_checkpoint(ckpt)
-            loaded_from = "local"
-        except Exception as e:
-            errors.append(f"local: {e}")
-
     if ckpt is None:
         raise ValueError(
-            f"Failed to load checkpoint from {checkpoint_path}. "
-            f"Tried: {'; '.join(errors)}"
+            f"Failed to load checkpoint from {checkpoint_path}. Tried: {'; '.join(errors)}"
         )
+    return ckpt, loaded_from
 
-    log_for_0(f"Loaded checkpoint keys: {ckpt.keys()}")
 
-    restored_state = state_template.replace(
-        params=jax.tree_util.tree_map(jnp.array, ckpt["params"]),
-        ema_params1=jax.tree_util.tree_map(jnp.array, ckpt.get("ema_params1", ckpt["params"])),
-        opt_state=ckpt["opt_state"],
-        step=ckpt["step"],
-        epoch=ckpt["epoch"],
-        dropout_rng=jnp.array(ckpt["dropout_rng"]),
+def load_checkpoint(checkpoint_path: str, state, load_optimizer: bool = True) -> Tuple[Any, int]:
+    """Load an ELF checkpoint.
+
+    Uses an existing local path first; otherwise tries HF and then local fallback.
+    Evaluation loads (``load_optimizer=False``) intentionally do not restore
+    process RNG state: evaluation seeds are applied after loading, and a
+    checkpoint produced with more CUDA ranks cannot be restored verbatim into
+    a smaller evaluation allocation.
+    """
+    log_for_0(f"Loading ELF checkpoint from {checkpoint_path}...")
+    ckpt, loaded_from = _load_checkpoint_payload(
+        checkpoint_path, require_optimizer=load_optimizer,
     )
-    step, epoch = int(ckpt["step"]), int(ckpt["epoch"])
-    log_for_0(f"Loaded {loaded_from} checkpoint from step {step} (epoch {epoch})")
-    return restored_state, step
+
+    log_for_0(f"Loaded checkpoint keys: {list(ckpt.keys())}")
+
+    inner_model = unwrap_model(state.model)
+    inner_model.load_state_dict(ckpt["params"])
+    ema_src = ckpt.get("ema_params1", ckpt["params"])
+    device_map = {n: p.device for n, p in inner_model.named_parameters()}
+    for n, b in inner_model.named_buffers():
+        device_map.setdefault(n, b.device)
+    fallback_device = next(iter(device_map.values()), torch.device("cpu"))
+    state.ema_params1 = {
+        n: t.to(device_map.get(n, fallback_device)) for n, t in ema_src.items()
+    }
+    if load_optimizer and state.optimizer is not None and ckpt.get("opt_state") is not None:
+        state.optimizer.load_state_dict(ckpt["opt_state"])
+    if load_optimizer and state.lr_scheduler is not None and ckpt.get("lr_scheduler") is not None:
+        state.lr_scheduler.load_state_dict(ckpt["lr_scheduler"])
+    state.step = int(ckpt["step"])
+    state.micro_step = int(ckpt.get("micro_step", ckpt["step"]))
+    state.optimizer_step = int(ckpt.get("optimizer_step", state.micro_step))
+    state.accum_step = int(ckpt.get("accum_step", 0))
+    if state.accum_step != 0:
+        raise ValueError("resume checkpoint was not saved at an optimizer boundary")
+    state.epoch = float(ckpt["epoch"])
+    rng_states = ckpt.get("rng_states")
+    if load_optimizer and rng_states:
+        rank = dist.get_rank() if dist.is_available() and dist.is_initialized() else 0
+        rng = rng_states[rank] if rank < len(rng_states) else rng_states[0]
+        random.setstate(rng["python"])
+        numpy_rng = rng["numpy"]
+        np.random.set_state((
+            numpy_rng["bit_generator"],
+            np.asarray(numpy_rng["keys"], dtype=np.uint32),
+            numpy_rng["position"],
+            numpy_rng["has_gauss"],
+            numpy_rng["cached_gaussian"],
+        ))
+        torch.set_rng_state(rng["torch_cpu"])
+        if rng.get("torch_cuda") is not None and torch.cuda.is_available():
+            torch.cuda.set_rng_state_all(rng["torch_cuda"])
+        if rng.get("dropout") is not None and state.dropout_generator is not None:
+            state.dropout_generator.set_state(rng["dropout"])
+    elif load_optimizer and ckpt.get("dropout_rng") is not None and state.dropout_generator is not None:
+        # Legacy warm-start/resume compatibility for explicitly migrated files.
+        state.dropout_generator.set_state(ckpt["dropout_rng"])
+
+    step = int(ckpt["step"])
+    log_for_0(f"Loaded {loaded_from} checkpoint from step {step} (epoch {state.epoch})")
+    return state, step
+
+
+def _init_ema_from_model(state) -> None:
+    inner_model = unwrap_model(state.model)
+    state.ema_params1 = {
+        name: param.detach().clone()
+        for name, param in inner_model.named_parameters()
+    }
+
+
+def load_warm_start_checkpoint(
+    checkpoint_path: str,
+    state,
+    use_ema: bool = False,
+) -> Tuple[Any, Dict[str, Any]]:
+    """Partially initialize a model from a checkpoint without restoring training state.
+
+    Only same-name, same-shape tensors are copied. Optimizer, scheduler, step,
+    epoch, dropout RNG, and grad-accum buffers are intentionally left untouched.
+    This is for trunk warm-starts such as old ELF -> sentence-plan ELF.
+    """
+    log_for_0(
+        f"Warm-starting model from {checkpoint_path} "
+        f"({'ema_params1' if use_ema else 'params'})..."
+    )
+    ckpt, loaded_from = _load_checkpoint_payload(checkpoint_path, require_optimizer=False)
+    source_name = "ema_params1" if use_ema and ckpt.get("ema_params1") is not None else "params"
+    source_state = ckpt[source_name]
+
+    inner_model = unwrap_model(state.model)
+    target_state = inner_model.state_dict()
+    loadable = {}
+    missing_keys = []
+    shape_mismatch_keys = []
+    unexpected_keys = []
+
+    for name, target_tensor in target_state.items():
+        source_tensor = source_state.get(name)
+        if source_tensor is None:
+            missing_keys.append(name)
+            continue
+        if tuple(source_tensor.shape) != tuple(target_tensor.shape):
+            shape_mismatch_keys.append(name)
+            continue
+        loadable[name] = source_tensor.to(dtype=target_tensor.dtype)
+
+    for name in source_state.keys():
+        if name not in target_state:
+            unexpected_keys.append(name)
+
+    if not loadable:
+        raise ValueError(f"Warm-start from {checkpoint_path} found no matching tensors")
+
+    merged_state = dict(target_state)
+    merged_state.update(loadable)
+    inner_model.load_state_dict(merged_state, strict=True)
+    _init_ema_from_model(state)
+
+    stats = {
+        "source": source_name,
+        "loaded_from": loaded_from,
+        "checkpoint_step": int(ckpt.get("step", -1)),
+        "checkpoint_epoch": int(ckpt.get("epoch", -1)),
+        "loaded": len(loadable),
+        "missing": len(missing_keys),
+        "shape_mismatch": len(shape_mismatch_keys),
+        "unexpected": len(unexpected_keys),
+        "loaded_keys": sorted(loadable.keys()),
+        "missing_keys": sorted(missing_keys),
+        "shape_mismatch_keys": sorted(shape_mismatch_keys),
+        "unexpected_keys": sorted(unexpected_keys),
+    }
+    log_for_0(
+        "Warm-start loaded "
+        f"{stats['loaded']} tensors from {loaded_from} checkpoint "
+        f"(step={stats['checkpoint_step']}, epoch={stats['checkpoint_epoch']}); "
+        f"missing={stats['missing']}, shape_mismatch={stats['shape_mismatch']}, "
+        f"unexpected={stats['unexpected']}"
+    )
+    if missing_keys:
+        log_for_0(f"Warm-start missing target keys (first 20): {stats['missing_keys'][:20]}")
+    if shape_mismatch_keys:
+        log_for_0(f"Warm-start shape-mismatch keys (first 20): {stats['shape_mismatch_keys'][:20]}")
+    return state, stats

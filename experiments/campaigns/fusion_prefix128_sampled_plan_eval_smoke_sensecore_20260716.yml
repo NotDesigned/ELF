@@ -1,0 +1,120 @@
+schema_version: 1
+campaign: fusion-prefix128-sampled-plan-eval-smoke-sensecore-20260716-c1
+project: elf
+source_id: auto
+local_root: outputs/experiment_campaigns
+
+# Operational gate for the final nine-run sampled-plan evaluation. This uses a
+# completed intermediate checkpoint and is not part of the scientific result.
+research_contract:
+  schema_version: 1
+  question: >-
+    Can the published sampled-plan runtime load a formal SenseCore checkpoint
+    and emit complete plan-identity diagnostics through the experiment backend?
+  required_roles: [joint_smoke]
+  required_metrics:
+    common:
+      - g_ppl
+      - mauve
+      - generation_mean_entropy
+      - generation_nonempty_fraction
+      - oracle_plan_ppl
+      - shuffled_plan_ppl
+      - token_recon_ppl
+      - sampled_plan_num_samples
+      - sampled_plan_batch_var
+      - clean_plan_batch_var
+      - sampled_plan_var_ratio
+      - sampled_clean_plan_cosine
+      - sampled_clean_plan_cosine_std
+      - sampled_clean_plan_mse
+      - sampled_clean_plan_mse_std
+      - sampled_clean_plan_retrieval_top1
+      - sampled_clean_plan_retrieval_top1_count
+      - sampled_clean_plan_retrieval_chance
+      - sampled_clean_plan_retrieval_lift
+      - sampled_clean_plan_retrieval_margin
+  required_artifacts:
+    common:
+      evaluation_metrics: {min_records: 4}
+      generated_samples: {min_nonempty_records: 48}
+      reconstructed_samples: {min_nonempty_records: 16}
+  terminal_checks:
+    - {metric: generation_nonempty_fraction, op: gt, value: 0.90}
+    - {metric: generation_mean_entropy, op: gt, value: 1.0}
+    - {metric: sampled_plan_num_samples, op: gte, value: 16}
+    - {metric: sampled_clean_plan_retrieval_chance, op: gt, value: 0}
+  checkpoint: {required_on_success: false}
+  comparison:
+    match_fields:
+      - source_id
+      - image_id
+      - resolved_config.data_path
+      - resolved_config.num_samples
+      - resolved_config.reconstruction_num_samples
+      - resolved_config.eval_sampled_plan_diagnostics
+      - backend.kind
+      - backend.worker_spec
+      - backend.worker_nodes
+      - backend.quota_type
+
+defaults:
+  operation: evaluate
+  config: src/configs/training_configs/ablations/owt_elfb/tier5_prefix128_joint_aligned_len256.yml
+  config_overrides:
+    - global_batch_size=null
+    - batch_size=16
+    - num_samples=16
+    - reconstruction_eval=true
+    - reconstruction_num_samples=16
+    - eval_sampled_plan_diagnostics=true
+    - eval_mauve=true
+    - data_path=/data/elf/eval_data/openwebtext-t5-head256-v1
+    - sampling_configs_path=src/configs/sampling_configs/uncond_sampling_steps32.yml
+    - train_sampling_eval_freq=0
+  evaluation:
+    checkpoint_path: /data/elf/runs/elf-p128-joint-s42-sco-0716-r2/checkpoint_11412
+    seeds: [42]
+    canonical_family_dimensions:
+      sampling_method: sde
+      num_sampling_steps: 32
+      cfg: 1.0
+      self_cond_cfg_scale: 3.0
+      time_schedule: logit_normal
+      time_warp_gamma: 1.5
+  image_id: sha256:f2920ed0acf995cc2b4ef8e50ed538ca4be8afb5372c8848c80a65c6803beb76
+  resources: {gpus: 1, nodes: 1, cpus: 8, max_time: 1h}
+  env:
+    ELF_EVAL_DATA_ID: sha256:ecff221a9bcea13f64ddce845e1b4918c6fc618608de3568413503ea7888bdf5
+    NUM_WORKERS: "2"
+    REQUIRE_OFFLINE_CACHE: "1"
+    USE_WANDB: "false"
+  storage:
+    run_dir: /data/elf/runs/{run_id}
+  retry: {max_infra_retries: 0}
+
+profiles:
+  sensecore-1gpu-spot:
+    storage:
+      data_root: /data
+      project_data_root: /data/elf
+      hf_home: /data/.cache/huggingface
+      hf_datasets_cache: /data/.cache/huggingface/datasets
+    backend:
+      kind: sensecore
+      workspace: share-space-01e
+      aec2: computing-cluster-01e
+      job_name: "{run_id}"
+      display_name: "{run_id}"
+      worker_spec: N6lS.Iu.I10.1.8c128g
+      worker_nodes: 1
+      priority: NORMAL
+      quota_type: spot
+      wait: true
+      image: registry.cn-sh-01.sensecore.cn/ccr-zhicheng-02/elf:runtime-81719aa3ca4d7f5cb589d7718f5297880b77e1f1863aa18d62361e0790007b79
+      storage_mount: 01995896-d54c-7816-90b3-0ce73bce9936/L202500224:/data
+
+runs:
+  - run_id: elf-p128-planid-joint-smoke-s42-sco-0716-r1
+    research_role: joint_smoke
+    profile: sensecore-1gpu-spot

@@ -1,0 +1,8 @@
+base_config: tier0_2_learned_main.yml
+
+# Tier 2: strongest diffusion-loss coupling into learned sentence encoder.
+sentence_encoder_grad: full
+
+output_dir: outputs/ablations/owt_elfb/tier2_grad_full
+wandb_run_name: tier2_owt_elfb_grad_full
+wandb_tag: tier2,owt,elfb,grad_full

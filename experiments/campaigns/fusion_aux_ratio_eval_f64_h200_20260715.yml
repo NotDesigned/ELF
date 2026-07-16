@@ -1,0 +1,127 @@
+schema_version: 1
+campaign: fusion-aux-ratio-eval-f64-h200-20260715-c4
+project: elf
+source_id: auto
+local_root: outputs/experiment_campaigns
+
+# Clean replacement after c3 exposed stale resolved sampling configs after a
+# sampling_configs_path override. Evaluation also skips training RNG restore
+# and uses a fixed 256-row reconstruction subset instead of mapping 35GB.
+research_contract:
+  schema_version: 1
+  question: >-
+    At the prespecified 64-step sampling family, do detached learned-plan
+    denoiser passes recover useful causal plan conditioning across evaluation
+    seeds without degrading generation or clean token reconstruction?
+  required_roles:
+    - aux0_s42
+    - aux0_s123
+    - aux0_s456
+    - aux1_s42
+    - aux1_s123
+    - aux1_s456
+    - aux2_s42
+    - aux2_s123
+    - aux2_s456
+  required_metrics:
+    common:
+      - g_ppl
+      - oracle_plan_ppl
+      - shuffled_plan_ppl
+      - generation_mean_entropy
+      - generation_nonempty_fraction
+      - token_recon_ppl
+  required_artifacts:
+    common:
+      evaluation_metrics: {min_records: 1}
+      generated_samples: {min_nonempty_records: 1}
+      reconstructed_samples: {min_nonempty_records: 1}
+  terminal_checks:
+    - {metric: generation_nonempty_fraction, op: gt, value: 0}
+    - {metric: generation_mean_entropy, op: gt, value: 0}
+  checkpoint: {required_on_success: false}
+  comparison:
+    match_fields:
+      - source_id
+      - image_id
+      - resolved_config.max_length
+      - resolved_config.data_path
+      - env.ELF_EVAL_DATA_ID
+      - resolved_config.batch_size
+      - resolved_config.num_samples
+      - resolved_config.reconstruction_num_samples
+      - backend.kind
+      - backend.partition
+      - backend.gres
+
+defaults:
+  operation: evaluate
+  config_overrides:
+    - global_batch_size=null
+    - batch_size=16
+    - num_samples=256
+    - reconstruction_eval=true
+    - reconstruction_num_samples=256
+    - data_path=/datapool/liangluocheng/elf/eval_data/openwebtext-t5-head256-v1
+    - sampling_configs_path=src/configs/sampling_configs/uncond_sampling_steps64.yml
+  evaluation:
+    canonical_family_dimensions:
+      sampling_method: sde
+      num_sampling_steps: 64
+      cfg: 1.0
+      self_cond_cfg_scale: 3.0
+      time_schedule: logit_normal
+      time_warp_gamma: 1.0
+  image_id: sha256:de751282d5d72932ab64a7a22fd0324373cf35c00f0e27e38fb80bf1834b168c
+  resources: {gpus: 1, nodes: 1, cpus: 8}
+  env:
+    ELF_EVAL_DATA_ID: sha256:ecff221a9bcea13f64ddce845e1b4918c6fc618608de3568413503ea7888bdf5
+    NUM_WORKERS: "4"
+    REQUIRE_OFFLINE_CACHE: "1"
+    USE_WANDB: "false"
+  storage:
+    run_dir: /datapool/liangluocheng/elf/runs/{run_id}
+  retry: {max_infra_retries: 1}
+
+profiles:
+  wyd-h200:
+    storage:
+      data_root: /datapool/liangluocheng
+      project_data_root: /datapool/liangluocheng/elf
+      hf_home: /datapool/liangluocheng/.cache/huggingface
+      hf_datasets_cache: /datapool/liangluocheng/.cache/huggingface/datasets
+    backend:
+      kind: slurm
+      ssh_alias: wyd-l40s
+      partition: h200
+      account: lab
+      qos: normal
+      gres: gpu:h200:1
+      time: "04:00:00"
+      mount_root: /datapool
+      apptainer_cache_dir: /datapool/liangluocheng/elf/apptainer/cache
+      apptainer_tmp_dir: /datapool/liangluocheng/elf/apptainer/tmp
+      source_dir: /datapool/liangluocheng/elf/sources/{source_id}
+      sif_path: /datapool/liangluocheng/elf/images/de751282d5d72932ab64a7a22fd0324373cf35c00f0e27e38fb80bf1834b168c.sif
+
+runs:
+  - matrix:
+      arm:
+        - name: aux0
+          config: src/configs/training_configs/ablations/owt_elfb/tier3_aux0_len256.yml
+          checkpoint: /datapool/liangluocheng/elf/runs/elf-aux0-mb64-ga2-h100-20260714-r1/checkpoint_38035
+        - name: aux1
+          config: src/configs/training_configs/ablations/owt_elfb/tier0_2_learned_main_len256.yml
+          checkpoint: /datapool/liangluocheng/elf/runs/elf-aux1-mb64-ga2-h100-20260714-r1/checkpoint_38035
+        - name: aux2
+          config: src/configs/training_configs/ablations/owt_elfb/tier3_aux2_len256.yml
+          checkpoint: /datapool/liangluocheng/elf/runs/elf-aux2-mb64-ga2-h100-20260714-r1/checkpoint_38035
+      seed: [42, 123, 456]
+    template:
+      run_id: elf-{arm.name}-eval-f64-s{seed}-h200-20260715-r4
+      research_role: '{arm.name}_s{seed}'
+      profile: wyd-h200
+      config: '{arm.config}'
+      evaluation:
+        checkpoint_path: '{arm.checkpoint}'
+        seeds: ['{seed}']

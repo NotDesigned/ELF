@@ -1,0 +1,8 @@
+schema_version: 1
+project: elf
+campaign: fusion-independent-plan-denoiser-smoke-h100-20260715-c1
+revision_id: campaign.6917a2ad5e5a2f5b8eec923ce57be629bd7d536c7f6221350ec2d093e958f3bc
+reason: retired cancelled H100 smoke campaign; both attempts are terminal
+prior_lifecycle_state: INVALID
+recorded_at: '2026-07-15T15:14:32.736785Z'
+record_kind: archive

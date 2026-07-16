@@ -1,0 +1,59 @@
+schema_version: 1
+campaign: fusion-aux-ratio-ga2-h200-smoke-20260712-c1
+project: elf
+
+# Hardware/runtime smoke for the most expensive aux=2 arm. Reuse the exact
+# scientific source snapshot and SIF used by the completed/running H100 anchors.
+source_id: e44db5b272df3b6a196e8f58addc54446003595f
+git_commit: e44db5b272df3b6a196e8f58addc54446003595f
+local_root: outputs/experiment_campaigns
+
+defaults:
+  config: src/configs/training_configs/ablations/owt_elfb/tier3_aux2_len256.yml
+  config_overrides:
+    - epochs=1
+    - global_batch_size=512
+    - grad_accum_steps=2
+    - log_freq=2
+    - save_freq=1
+    - eval_freq=1
+    - num_samples=256
+    - reconstruction_num_samples=256
+    - train_sampling_eval_freq=2000
+    - train_sampling_eval_num_samples=64
+    - train_sampling_eval_batch_size=16
+  image_id: sha256:1e25f456cd26219ff89015a41b8653efb0db4444f911522802f850a791710de4
+  resources: {gpus: 4, nodes: 1, cpus: 32}
+  env:
+    LOG_FREQ: "2"
+    NUM_WORKERS: "8"
+    REQUIRE_OFFLINE_CACHE: "1"
+    USE_WANDB: "false"
+  storage:
+    run_dir: /datapool/liangluocheng/elf/runs/{run_id}
+  retry: {max_infra_retries: 0}
+
+profiles:
+  wyd-h200-smoke:
+    storage:
+      data_root: /datapool/liangluocheng
+      project_data_root: /datapool/liangluocheng/elf
+      hf_home: /datapool/liangluocheng/.cache/huggingface
+      hf_datasets_cache: /datapool/liangluocheng/.cache/huggingface/datasets
+    backend:
+      kind: slurm
+      ssh_alias: wyd-h200
+      partition: h200
+      account: lab
+      qos: normal
+      gres: gpu:h200:4
+      time: "00:30:00"
+      mount_root: /datapool
+      apptainer_cache_dir: /datapool/liangluocheng/elf/apptainer/cache
+      apptainer_tmp_dir: /datapool/liangluocheng/elf/apptainer/tmp
+      source_dir: /datapool/liangluocheng/elf/sources/{source_id}
+      sif_path: /datapool/liangluocheng/elf/images/1e25f456cd26219ff89015a41b8653efb0db4444f911522802f850a791710de4.sif
+
+runs:
+  - run_id: elf-aux2-mb64-ga2-h200-smoke-20260712-r1
+    profile: wyd-h200-smoke
